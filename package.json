@@ -1,0 +1,20 @@
+{
+  "name": "piano-helper",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Turn piano sheet music into a falling-notes visual performance.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@tonejs/midi": "^2.0.28",
+    "tone": "^15.0.4"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vite": "^6.0.5"
+  }
+}

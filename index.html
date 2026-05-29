@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Piano Helper</title>
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <h1>Piano Helper</h1>
+        <div class="controls">
+          <label class="file-btn">
+            Load MIDI
+            <input id="file-input" type="file" accept=".mid,.midi" hidden />
+          </label>
+          <button id="play-btn" disabled>Play</button>
+          <span id="track-name" class="track-name">No file loaded</span>
+        </div>
+      </header>
+      <canvas id="stage"></canvas>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
