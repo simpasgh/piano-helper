@@ -80,8 +80,24 @@ button:disabled {
   opacity: 0.65;
 }
 
+#sheet {
+  height: 42%;
+  overflow-y: auto;
+  background: #f6f2fb;
+  padding: 1rem 1.25rem;
+}
+
+#sheet:empty::before {
+  content: "Load a MusicXML file to see the score here.";
+  display: block;
+  color: #7a7088;
+  font-size: 0.9rem;
+  padding: 1rem;
+}
+
 #stage {
   flex: 1;
   display: block;
   width: 100%;
+  min-height: 0;
 }

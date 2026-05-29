@@ -11,13 +11,14 @@
         <h1>Piano Helper</h1>
         <div class="controls">
           <label class="file-btn">
-            Load MIDI
-            <input id="file-input" type="file" accept=".mid,.midi" hidden />
+            Load MusicXML
+            <input id="file-input" type="file" accept=".xml,.musicxml" hidden />
           </label>
           <button id="play-btn" disabled>Play</button>
           <span id="track-name" class="track-name">No file loaded</span>
         </div>
       </header>
+      <div id="sheet"></div>
       <canvas id="stage"></canvas>
     </div>
     <script type="module" src="/src/main.ts"></script>

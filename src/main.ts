@@ -1,7 +1,8 @@
 import "./style.css";
 import * as Tone from "tone";
-import { Midi } from "@tonejs/midi";
-import { Visualizer, type VisNote } from "./visualizer";
+import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
+import { Visualizer } from "./visualizer";
+import { extractScore, type ScoreData } from "./score";
 
 const canvas = document.getElementById("stage") as HTMLCanvasElement;
 const fileInput = document.getElementById("file-input") as HTMLInputElement;
@@ -9,10 +10,16 @@ const playBtn = document.getElementById("play-btn") as HTMLButtonElement;
 const trackName = document.getElementById("track-name") as HTMLSpanElement;
 
 const visualizer = new Visualizer(canvas);
+const osmd = new OpenSheetMusicDisplay("sheet", {
+  autoResize: true,
+  backend: "svg",
+  followCursor: true,
+});
 
 let synth: Tone.PolySynth | null = null;
 let part: Tone.Part | null = null;
-let songEnd = 0;
+let score: ScoreData | null = null;
+let stepIndex = 0;
 let playing = false;
 
 function ensureSynth(): Tone.PolySynth {
@@ -26,44 +33,34 @@ function ensureSynth(): Tone.PolySynth {
   return synth;
 }
 
-async function loadMidiFile(file: File): Promise<void> {
-  const buffer = await file.arrayBuffer();
-  const midi = new Midi(buffer);
+async function loadScoreFile(file: File): Promise<void> {
+  const xml = await file.text();
+  await osmd.load(xml);
+  osmd.render();
+  osmd.cursor.reset();
+  osmd.cursor.show();
 
-  const notes: VisNote[] = [];
+  score = extractScore(osmd);
+
   const transport = Tone.getTransport();
   transport.stop();
   transport.position = 0;
   part?.dispose();
 
-  const scheduled: { time: number; midi: number; duration: number; velocity: number }[] = [];
-  for (const track of midi.tracks) {
-    for (const note of track.notes) {
-      notes.push({ midi: note.midi, time: note.time, duration: note.duration });
-      scheduled.push({
-        time: note.time,
-        midi: note.midi,
-        duration: note.duration,
-        velocity: note.velocity,
-      });
-    }
-  }
-
-  songEnd = midi.duration;
-  visualizer.setNotes(notes);
+  visualizer.setNotes(score.notes);
 
   const instrument = ensureSynth();
-  part = new Tone.Part((time, value) => {
+  part = new Tone.Part((time, note) => {
     instrument.triggerAttackRelease(
-      Tone.Frequency(value.midi, "midi").toFrequency(),
-      value.duration,
+      Tone.Frequency(note.midi, "midi").toFrequency(),
+      note.duration,
       time,
-      value.velocity,
     );
-  }, scheduled);
+  }, score.notes.map((n) => ({ time: n.time, midi: n.midi, duration: n.duration })));
   part.start(0);
 
-  trackName.textContent = `${file.name} (${notes.length} notes)`;
+  stepIndex = 0;
+  trackName.textContent = `${file.name} (${score.notes.length} notes)`;
   playBtn.disabled = false;
   setPlaying(false);
 }
@@ -85,20 +82,44 @@ async function togglePlay(): Promise<void> {
   }
 }
 
+function rewind(): void {
+  const transport = Tone.getTransport();
+  transport.stop();
+  transport.position = 0;
+  stepIndex = 0;
+  osmd.cursor.reset();
+  osmd.cursor.show();
+  setPlaying(false);
+}
+
+// Advance the sheet cursor so the highlighted note matches the playback time.
+function syncCursor(currentTime: number): void {
+  if (!score) return;
+  const { stepTimes } = score;
+  while (stepIndex < stepTimes.length - 1 && currentTime >= stepTimes[stepIndex + 1]) {
+    osmd.cursor.next();
+    stepIndex++;
+  }
+}
+
 fileInput.addEventListener("change", () => {
   const file = fileInput.files?.[0];
-  if (file) loadMidiFile(file).catch((err) => alert(`Failed to load MIDI: ${err.message}`));
+  if (file) {
+    loadScoreFile(file).catch((err) => {
+      console.error("Failed to load score:", err);
+      alert(`Failed to load score: ${err.message}`);
+    });
+  }
 });
 
 playBtn.addEventListener("click", () => togglePlay());
 
 function frame(): void {
-  const current = Tone.getTransport().seconds;
-  if (playing && songEnd > 0 && current >= songEnd) {
-    const transport = Tone.getTransport();
-    transport.stop();
-    transport.position = 0;
-    setPlaying(false);
+  const currentTime = Tone.getTransport().seconds;
+  if (playing && score && currentTime >= score.duration) {
+    rewind();
+  } else if (playing) {
+    syncCursor(currentTime);
   }
   visualizer.render(Tone.getTransport().seconds);
   requestAnimationFrame(frame);

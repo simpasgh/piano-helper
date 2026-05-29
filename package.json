@@ -10,7 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@tonejs/midi": "^2.0.28",
+    "opensheetmusicdisplay": "^1.9.0",
     "tone": "^15.0.4"
   },
   "devDependencies": {
