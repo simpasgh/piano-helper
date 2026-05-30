@@ -230,8 +230,9 @@ function loadNotes(data: ScoreData, name: string, sheet: boolean): void {
   transport.bpm.value = rateToBpm(tempoRate, BASE_BPM);
 
   // Per-hand mute toggles (issue #37): shown only when the score has both a right- and a
-  // left-hand note set; hidden for single-staff/audio-derived scores. Reset on every load so
-  // a previously muted hand from another score does not silently carry over.
+  // left-hand note set. Grand-staff sheets split by clef; audio-derived scores split by pitch
+  // (issue #70 follow-up), so a two-handed clip now shows the controls and a single-register
+  // one stays hidden. Reset on every load so a previously muted hand does not carry over.
   handMuted.left = false;
   handMuted.right = false;
   reflectHandMute(muteRightBtn, false);

@@ -19,7 +19,23 @@ function event(
 describe("noteEventsToVisNotes", () => {
   it("maps pitch/time/duration into the VisNote shape", () => {
     const out = noteEventsToVisNotes([event(60, 1.5, 0.5)]);
-    expect(out).toEqual([{ midi: 60, time: 1.5, duration: 0.5 }]);
+    expect(out).toEqual([{ midi: 60, time: 1.5, duration: 0.5, hand: "right" }]);
+  });
+
+  it("tags a hand by pitch so audio scores can split hands (issue #70)", () => {
+    // Middle C (60) and above read as the right hand; below it as the left.
+    const out = noteEventsToVisNotes([
+      event(48, 0, 1), // C3, below middle C
+      event(59, 0, 1), // B3, just below middle C
+      event(60, 0, 1), // middle C, the boundary
+      event(72, 0, 1), // C5, well above
+    ]);
+    expect(out.map((n) => n.hand)).toEqual(["left", "left", "right", "right"]);
+  });
+
+  it("never tags audio notes 'unknown' (so per-hand controls are reachable)", () => {
+    const out = noteEventsToVisNotes([event(40, 0, 1), event(90, 0, 1)]);
+    expect(out.every((n) => n.hand === "left" || n.hand === "right")).toBe(true);
   });
 
   it("rounds fractional MIDI pitches to the nearest key", () => {

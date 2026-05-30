@@ -90,6 +90,20 @@ export function handFromClef(clef: "treble" | "bass" | "other"): Hand | null {
   return null;
 }
 
+// Split point for audio-derived scores (issue #70 follow-up). Audio transcription (issue #19)
+// yields bare pitches with no staff or clef, so every note used to be tagged "unknown": the
+// per-hand mute and balance controls then stayed hidden and unreachable. We approximate the
+// grand-staff convention with a fixed boundary at middle C (MIDI 60): a note at or above
+// middle C reads as the right hand, below it as the left. This is a heuristic, not ground
+// truth (a left hand can reach above middle C), but it makes the two-hand controls reachable
+// for the common melody-over-bass piano clip. A genuinely single-register clip lands on one
+// hand, so `hasBothHands` stays false and the controls stay hidden, which is correct.
+export const HAND_SPLIT_MIDI = 60;
+
+export function handFromPitch(midi: number): Hand {
+  return midi >= HAND_SPLIT_MIDI ? "right" : "left";
+}
+
 // Whether a note belongs to a hand the player has muted (issue #54). "unknown"-hand notes
 // (single-staff or audio-derived scores) are never muted, so those scores are unaffected.
 export function isHandMuted(

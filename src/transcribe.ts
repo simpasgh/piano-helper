@@ -10,7 +10,7 @@ import {
   outputToNotesPoly,
   type NoteEventTime,
 } from "@spotify/basic-pitch";
-import { FIRST_MIDI, LAST_MIDI } from "./piano";
+import { FIRST_MIDI, LAST_MIDI, handFromPitch } from "./piano";
 import type { VisNote } from "./visualizer";
 
 // jsDelivr serves package files; TFJS resolves the weight shard relative to this URL.
@@ -66,8 +66,9 @@ const MIN_NOTE_LENGTH_FRAMES = 11;
 
 // Pure glue between Basic Pitch's note events and the player's VisNote shape. Rounds to
 // the nearest MIDI integer, drops anything outside the 88-key range or with non-positive
-// duration, clamps negative start times to 0, and sorts by start time. Isolated from the
-// model and Web Audio so it can be unit-tested without an AudioContext.
+// duration, clamps negative start times to 0, tags a hand by pitch (issue #70 follow-up, so
+// the per-hand controls are reachable for two-handed clips), and sorts by start time.
+// Isolated from the model and Web Audio so it can be unit-tested without an AudioContext.
 export function noteEventsToVisNotes(events: NoteEventTime[]): VisNote[] {
   const notes: VisNote[] = [];
   for (const e of events) {
@@ -78,6 +79,7 @@ export function noteEventsToVisNotes(events: NoteEventTime[]): VisNote[] {
       midi,
       time: Math.max(0, e.startTimeSeconds),
       duration: e.durationSeconds,
+      hand: handFromPitch(midi),
     });
   }
   notes.sort((a, b) => a.time - b.time);
