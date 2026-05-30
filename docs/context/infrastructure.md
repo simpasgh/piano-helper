@@ -29,6 +29,13 @@ Accounts available:
 - **Code review runs locally** through the Claude Code subscription (Tech Lead + /code-review),
   NOT a CI Claude action, to avoid Anthropic API charges.
 
+## Ticketing
+
+**GitHub Issues** is the tracker (free, unlimited, lives next to code/PRs). Decided
+2026-05-30. Roadmap epics live in [product.md](product.md); each actionable slice becomes an
+issue. Label scheme: `type:{spike,feature,chore}`, `area:{omr,viz,infra}`,
+`priority:{high,med,low}`. Reference issues from PRs/commits so history links back.
+
 ## Release / merge rules
 
 See [../workflow.md](../workflow.md). Summary: trunk-based, short-lived branches rebased on
