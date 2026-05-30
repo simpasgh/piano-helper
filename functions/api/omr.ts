@@ -1,14 +1,9 @@
 /// <reference types="@cloudflare/workers-types" />
 
-import {
-  validateUpload,
-  buildDispatchRequest,
-  uploadKey,
-} from "../../src/omr-server";
+import { validateUpload, uploadKey } from "../../src/omr-server";
 
 interface Env {
   OMR_BUCKET: R2Bucket;
-  GITHUB_DISPATCH_TOKEN: string;
 }
 
 function json(body: unknown, status: number): Response {
@@ -55,7 +50,15 @@ async function readUpload(
   return { bytes, contentType: reqType ? reqType.split(";")[0].trim() : null };
 }
 
+// Accept a sheet-music upload, validate it, and store it in R2 under
+// uploads/<jobId>. An external always-on worker (omr-worker/) polls R2, runs the
+// OMR engine, and writes results/<jobId>.musicxml back. There is no GitHub Actions
+// dispatch and no token here: the worker discovers the upload by listing R2.
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
+  if (!env.OMR_BUCKET) {
+    return json({ error: "OMR is not configured." }, 503);
+  }
+
   let upload: { bytes: ArrayBuffer; contentType: string | null };
   try {
     upload = await readUpload(request);
@@ -65,7 +68,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
 
   const { bytes, contentType } = upload;
   const check = validateUpload(contentType, bytes.byteLength);
-  if (!check.ok || !check.ext) {
+  if (!check.ok) {
     return json({ error: check.error ?? "Invalid upload." }, check.status);
   }
 
@@ -78,25 +81,6 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     });
   } catch {
     return json({ error: "Failed to store the upload." }, 502);
-  }
-
-  const dispatch = buildDispatchRequest(env.GITHUB_DISPATCH_TOKEN, jobId, check.ext);
-  let dispatchRes: Response;
-  try {
-    dispatchRes = await fetch(dispatch.url, {
-      method: dispatch.method,
-      headers: dispatch.headers,
-      body: dispatch.body,
-    });
-  } catch {
-    // Best-effort cleanup so a failed dispatch does not leak orphan uploads.
-    await env.OMR_BUCKET.delete(key).catch(() => {});
-    return json({ error: "Could not reach the OMR job dispatcher." }, 502);
-  }
-
-  if (!dispatchRes.ok) {
-    await env.OMR_BUCKET.delete(key).catch(() => {});
-    return json({ error: "Failed to start the OMR job." }, 502);
   }
 
   return json({ jobId }, 202);

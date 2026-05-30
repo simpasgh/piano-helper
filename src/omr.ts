@@ -1,7 +1,22 @@
 // Browser-side OMR client: submit a scan and poll for the resulting MusicXML.
 // DOM-free and dependency-injectable so it can be unit-tested with fakes.
+//
+// Compute runs on an external always-on worker that polls R2 (omr-worker/). The
+// worker always writes results/<jobId>.musicxml; on recognition failure it writes
+// a valid-but-empty MusicXML carrying an omr-status="failed" sentinel instead of a
+// separate error object. So the result endpoint only ever returns 200 (ready) or
+// 404 (pending), and this client detects the sentinel and raises a real error so
+// the app never silently loads a blank score as success.
 
 type FetchFn = typeof fetch;
+
+// Matches the sentinel the worker writes when both OMR engines fail. Kept in sync
+// with omr-worker/worker.py (FAILURE_SENTINEL) and functions/api/omr/result.ts.
+const FAILURE_SENTINEL_RE = /name="omr-status"\s*>\s*failed/;
+
+export function isFailureSentinel(xml: string): boolean {
+  return FAILURE_SENTINEL_RE.test(xml);
+}
 
 export async function submitOmr(file: File, fetchFn: FetchFn = fetch): Promise<string> {
   const form = new FormData();
@@ -31,8 +46,11 @@ export interface PollOptions {
 const defaultSleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
-// Poll /api/omr/result until the job resolves. Returns MusicXML on 200, throws the
-// server reason on 422, throws on timeout. Treats 404 as "still pending".
+// Poll /api/omr/result until the job resolves. Returns MusicXML on 200 unless that
+// MusicXML is the failure sentinel (then it throws a friendly error). Treats 404 as
+// "still pending" and throws on timeout. A cold worker run (model download +
+// inference + possible homr fallback) can take several minutes, hence the generous
+// default timeout.
 export async function pollOmrResult(
   jobId: string,
   options: PollOptions = {},
@@ -40,7 +58,7 @@ export async function pollOmrResult(
   const {
     fetchFn = fetch,
     intervalMs = 3000,
-    timeoutMs = 300000,
+    timeoutMs = 900000, // 15 minutes
     sleep = defaultSleep,
     now = () => Date.now(),
   } = options;
@@ -52,11 +70,13 @@ export async function pollOmrResult(
     const res = await fetchFn(url, { method: "GET" });
 
     if (res.status === 200) {
-      return await res.text();
-    }
-    if (res.status === 422) {
-      const message = await readError(res, "OMR could not read this sheet.");
-      throw new Error(message);
+      const xml = await res.text();
+      if (isFailureSentinel(xml)) {
+        throw new Error(
+          "Could not recognize any notes in this sheet. Try a clearer scan.",
+        );
+      }
+      return xml;
     }
     // 404 (pending) or any transient status: keep waiting until timeout.
     if (now() - start >= timeoutMs) {

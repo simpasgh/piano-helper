@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 
-import { resultKey, errorKey, isValidJobId } from "../../../src/omr-server";
+import { resultKey, isValidJobId } from "../../../src/omr-server";
 
 interface Env {
   OMR_BUCKET: R2Bucket;
@@ -13,7 +13,16 @@ function json(body: unknown, status: number): Response {
   });
 }
 
+// Read the OMR result for a job from R2. Returns 200 + MusicXML once the worker
+// has written results/<jobId>.musicxml, or 404 { status: "pending" } while absent.
+// Recognition failure is carried inside the MusicXML (an omr-status="failed"
+// sentinel the worker writes) and detected client-side, so there is no separate
+// error key or 422 path here.
 export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
+  if (!env.OMR_BUCKET) {
+    return json({ error: "OMR is not configured." }, 503);
+  }
+
   const url = new URL(request.url);
   const jobId = url.searchParams.get("jobId");
   if (!isValidJobId(jobId)) {
@@ -26,12 +35,6 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
       status: 200,
       headers: { "Content-Type": "application/vnd.recordare.musicxml+xml" },
     });
-  }
-
-  const err = await env.OMR_BUCKET.get(errorKey(jobId));
-  if (err) {
-    const reason = await err.text();
-    return json({ error: reason || "OMR failed." }, 422);
   }
 
   return json({ status: "pending" }, 404);
