@@ -86,6 +86,52 @@ systemctl status omr-worker.service
 journalctl -u omr-worker.service -f
 ```
 
+## Alternative: run locally on macOS (launchd)
+
+The worker is host-agnostic, so it also runs on a Mac as an interim/zero-cost host while no
+Always Free VM has capacity. This is the setup currently in use (Apple Silicon, macOS 15,
+Python 3.11). It is "always-on" only while the Mac is awake and online, not 24/7.
+
+```bash
+# 1. System dep: pdftoppm (PDF rasterizer) + a modern Python (homr needs 3.10+).
+brew install poppler python@3.11
+
+# 2. Standalone runtime dir (kept out of any git worktree so the service is stable).
+RT=~/piano-helper-omr
+mkdir -p "$RT"
+cp omr-worker/worker.py omr-worker/requirements.txt "$RT/"
+
+# 3. venv + deps (oemer pulls a large ML stack; first oemer run also downloads its model).
+/opt/homebrew/opt/python@3.11/bin/python3.11 -m venv "$RT/.venv"
+"$RT/.venv/bin/pip" install --upgrade pip
+"$RT/.venv/bin/pip" install -r "$RT/requirements.txt"
+
+# 4. Credentials file (chmod 600), same four R2 values as the VM env file above.
+cat > "$RT/omr.env" <<'ENV'
+R2_S3_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+R2_ACCESS_KEY_ID=<access-key-id>
+R2_SECRET_ACCESS_KEY=<secret-access-key>
+R2_BUCKET=piano-helper-omr
+# OMR_POLL_SECONDS=5
+ENV
+chmod 600 "$RT/omr.env"
+```
+
+Create a launcher `~/piano-helper-omr/run.sh` (chmod +x) that sources `omr.env`, sets
+`PATH` to include the venv bin (oemer/homr), `/opt/homebrew/bin` (pdftoppm) and `/usr/bin`
+(file), then `exec`s `.venv/bin/python worker.py`. Point a LaunchAgent at it:
+
+```bash
+# ~/Library/LaunchAgents/com.pianohelper.omr.plist runs /bin/bash run.sh with
+# RunAtLoad + KeepAlive, logging to ~/piano-helper-omr/worker.log.
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.pianohelper.omr.plist
+launchctl print  gui/$(id -u)/com.pianohelper.omr   # state should be "running"
+tail -f ~/piano-helper-omr/worker.log
+
+# Stop / reload:
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.pianohelper.omr.plist
+```
+
 ## Test end to end
 
 Upload any PNG to `uploads/<some-uuid>` (dashboard or `aws s3 cp`), then confirm
