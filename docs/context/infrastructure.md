@@ -48,9 +48,21 @@ Repo **variables** (Settings -> Secrets and variables -> Actions -> Variables):
 
 Repo **secrets**: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`.
 
-## One-time setup still required (manual, by the user)
+## Live deployment (done)
 
-- [ ] Create the Cloudflare Pages project (e.g. `wrangler pages project create piano-helper`).
-- [ ] Add GitHub repo secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
-- [ ] Add repo variable `PROD_URL` (the `*.pages.dev` URL) once known.
-- [ ] Set repo variable `DEPLOY_ENABLED=true` to enable the deploy workflow.
+- **Prod URL:** https://piano-helper.pages.dev (smoke test green).
+- **Cloudflare account:** `pasculli.simone@gmail.com` (account ID stored as the
+  `CLOUDFLARE_ACCOUNT_ID` repo secret, not committed since the repo is public).
+- **Pages project:** `piano-helper`, production branch `main`.
+- Local `wrangler` is authenticated via OAuth (scopes incl. `pages (write)`), so manual
+  `wrangler pages deploy dist` works from this machine without any token.
+
+## Setup status
+
+- [x] Cloudflare Pages project created (`piano-helper`).
+- [x] First deploy live + smoke test green.
+- [x] Repo variables `PROD_URL`, `CF_PAGES_PROJECT` set.
+- [x] Repo secret `CLOUDFLARE_ACCOUNT_ID` set.
+- [x] Repo secret `CLOUDFLARE_API_TOKEN` set (dedicated `piano-helper-deploy` token,
+      Account > Cloudflare Pages > Edit; separate from the todeo/finpilot tokens).
+- [x] Repo variable `DEPLOY_ENABLED=true` (CI deploy + prod smoke test verified green).
