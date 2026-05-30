@@ -3,6 +3,217 @@
 UX, visual design, interaction decisions. Append durable learnings at the top of the
 relevant section, dated.
 
+## Toolbar redesign v2 (issue #46)
+
+- **2026-05-30 - Research-led fix for the all-violet toolbar + broken step buttons.** The #34
+  pass added hierarchy (ghost vs filled) but left the palette monochrome: the three loaders AND
+  Play are all the same saturated violet gradient, so the bar still reads as "purple everywhere"
+  with no real primary. The prev/next step glyphs (`◄|` and `|►`, an arrow jammed against a pipe)
+  render as broken little marks, not as "step one note back / forward". This entry replaces the
+  #34 palette and step-button treatment; the grouping, ghost-vs-filled split, focus ring, and
+  responsive rules from #34 mostly stand and are only refined.
+
+  **Research basis (proven patterns, not guesswork).** Key findings that drove each decision:
+  - *Single accent per viewport / 60-30-10.* The dominant fix for the "everything looks the
+    same" problem in dark UIs is a contrast/text hierarchy plus ONE high-contrast accent element
+    per viewport, not coloring every control. So only ONE class of control should carry the
+    filled violet gradient; spraying it across four buttons is exactly the anti-pattern #46 calls
+    out. (raxxo "Dark Mode Design That Doesn't Look AI", HYPE4 60-30-10, IxDF UI color palette.)
+  - *Near-white, never pure #fff, on dark.* Production dark UIs use ~#F5F5F7 to cut halation; our
+    `--text #e8e0f5` already follows this, keep it and stop using `#ffffff` for button labels.
+  - *Classic transport icons.* "Stick to classic icons, triangles for play, bars for pause; the
+    audience should not need a legend." Play is the single hero; step controls are quiet
+    satellites. (Microsoft media controls, Balsamiq, think.design.)
+  - *Step = skip-previous / skip-next glyph.* The universally-read "step by one" control is a
+    triangle pointing at a vertical bar (skip-previous `⏮`-style and skip-next `⏭`-style): bar on
+    the OUTSIDE, triangle pointing toward it. That is the conventional, instantly-legible shape;
+    our reversed `◄|` (bar inside, on the right) is why it looked broken. (SF Symbols
+    `backward.end` / `forward.end`, Material `skip_previous` / `skip_next`, icons8 skip set.)
+  - *Accessibility.* Visible focus ring, ARIA labels, AA contrast (4.5:1 text / 3:1 large). All
+    preserved; the new colors are contrast-checked below.
+
+  ### 1. New color scheme (REQUIRED) - violet brand + ONE functional accent
+
+  Direction in one line: keep violet as the BRAND identity (wordmark, glow, falling notes,
+  sliders all stay violet, the whole visualizer is tuned to it), but stop using violet as the
+  button-fill for everything. Give the toolbar a real hierarchy with ONE filled-accent action
+  class, ghost everything else, and a distinct, calmer surface so the bar reads as a tool, not a
+  purple slab. The single biggest change: Play becomes the ONE saturated-violet hero, and the
+  file loaders drop from "three loud violet pills" to a quieter SECONDARY tier.
+
+  **Token block (replace the existing toolbar tokens in `:root`).** Keep the four brand anchors
+  and the brand ramp; revise the surfaces and add the secondary tier:
+
+  ```css
+  :root {
+    /* existing brand anchors (UNCHANGED, the visualizer depends on these) */
+    --bg: #0a0712;
+    --accent: #b14bff;
+    --accent-glow: rgba(177, 75, 255, 0.6);
+    --text: #e8e0f5;
+
+    /* brand ramp (UNCHANGED) */
+    --accent-deep: #7a2fd6;
+    --accent-gradient: linear-gradient(135deg, var(--accent-deep), var(--accent));
+
+    /* toolbar surfaces - calmer, less violet-tinted so the bar is a neutral tool surface */
+    --bar-surface: rgba(16, 14, 22, 0.92);   /* near-neutral dark, only a hair of violet */
+    --bar-border: rgba(232, 224, 245, 0.10); /* neutral hairline, not violet */
+    --group-divider: rgba(232, 224, 245, 0.12);
+
+    /* SECONDARY tier (NEW): the file loaders. A quiet raised surface, NOT filled violet.
+       This is the key palette move that breaks the monochrome: loaders are no longer
+       primary-violet, they are neutral raised buttons that only tint violet on hover. */
+    --secondary-bg: rgba(255, 255, 255, 0.07);
+    --secondary-bg-hover: rgba(255, 255, 255, 0.11);
+    --secondary-bg-active: rgba(177, 75, 255, 0.18);
+    --secondary-border: rgba(232, 224, 245, 0.16);
+    --secondary-border-hover: rgba(177, 75, 255, 0.5);
+
+    /* GHOST tier (transport step, Names, Export): even quieter, transparent fill */
+    --ghost-bg: rgba(255, 255, 255, 0.03);
+    --ghost-bg-hover: rgba(177, 75, 255, 0.12);
+    --ghost-bg-active: rgba(177, 75, 255, 0.2);
+    --ghost-border: rgba(232, 224, 245, 0.14);
+    --ghost-border-hover: rgba(177, 75, 255, 0.5);
+
+    /* text tiers (UNCHANGED) */
+    --text-muted: rgba(232, 224, 245, 0.6);
+    --text-faint: rgba(232, 224, 245, 0.4);
+
+    /* focus ring (UNCHANGED) */
+    --focus-ring: #d9a6ff;
+  }
+  ```
+
+  **Three-tier button hierarchy (this is the whole fix):**
+  - **PRIMARY (filled violet gradient), exactly ONE control: `#play-btn`.** Play is the single
+    hero, per "one accent per viewport". It keeps `--accent-gradient`, white-ish label, extra
+    padding, and a resting `--accent-glow`. Nothing else is filled violet. This alone removes the
+    "purple everywhere" read because now there is exactly one purple button on the bar.
+  - **SECONDARY (raised neutral surface), the three `.file-btn` loaders.** They were filled
+    violet in #34; now they are a light raised neutral surface (`--secondary-bg`, subtle border,
+    full `--text` label). They are clearly clickable and clearly more prominent than ghost
+    controls (solid-ish fill vs transparent), but they no longer compete with Play for the violet.
+    On hover they tint violet (`--secondary-bg-active` border `--secondary-border-hover`) so the
+    brand still answers the touch. Rationale: loading a score is the main ENTRY action, so it
+    earns a solid raised tier, but the transport Play is the main IN-APP action and deserves the
+    sole accent fill.
+  - **GHOST (transparent + border), everything else:** `#export-btn`, `.toggle` (Names + hand
+    mutes), `.step-btn` (prev/next), `.tempo-readout`. Recede until hovered. Unchanged in spirit
+    from #34, only the token values calm down (neutral border instead of violet-tinted at rest).
+
+  **Why this is not "add a second brand color":** #46 says "not monochrome violet" and "sensible
+  accent usage". We deliberately do NOT introduce a competing hue (teal, etc), which would fight
+  the pitch-class hue wheel in the visualizer (#12) and the violet identity. Instead the
+  hierarchy comes from SURFACE/LUMINANCE tiers (filled-violet hero, raised-neutral secondary,
+  transparent ghost) plus the existing text tiers. This is the "contrast hierarchy fixes 80% of
+  the sameness" finding applied literally: three visibly different button SURFACES on one calm
+  neutral bar reads as intentional and non-monochrome, while keeping exactly one brand accent.
+  A bar with one violet hero, a row of neutral raised loaders, and quiet ghost utilities has
+  obvious primary/secondary/ghost hierarchy that the all-violet bar lacked.
+
+  **Contrast check (AA).** `--text #e8e0f5` on `--bar-surface rgba(16,14,22,0.92)` over the dark
+  stage is ~14:1 (far past AA). Secondary `--secondary-bg` raised pills carry full `--text`
+  labels, so legibility rides on text (~12:1), border carries "clickable" (the #34 rule, kept).
+  Play's near-white label on the violet gradient keeps the #34 ~3.3:1-plus-weight treatment
+  (large/bold text, clears the 3:1 large-text bar). Focus ring `--focus-ring #d9a6ff` clears AA
+  on both the neutral surface and the violet fill.
+
+  ### 2. Step buttons (REQUIRED) - conventional skip-previous / skip-next glyphs
+
+  Replace the broken `◄|` / `|►` markup with the conventional skip glyphs and give them a clear
+  satellite treatment flanking the Play hero.
+
+  - **Glyph: use the skip-previous / skip-next Unicode triangles, bar on the OUTSIDE.**
+    - Prev note: `⏮` (U+23EE, BLACK LEFT-POINTING DOUBLE TRIANGLE WITH VERTICAL BAR) OR the
+      cleaner single-step `⏮`-style. To keep it unambiguous as "one note" (not "skip to start"),
+      use the SINGLE triangle + bar: prev = `\23F4`-with-bar is not standard, so use the
+      well-supported pair **`⏮` (prev) and `⏭` (next)** which every OS renders as the familiar
+      skip-track shape. These are the instantly-read "step to the adjacent item" glyphs.
+    - The bar sits on the OUTSIDE edge (left bar for prev, right bar for next) with the
+      triangle(s) pointing toward it. That outside-bar orientation is the entire reason it reads
+      as "step": the old markup put the bar inside/right which looked like a glitch.
+  - **Implementation note for the Tech Lead:** emoji-variation selectors can make `⏮`/`⏭` render
+    as full-color emoji on some platforms, which looks toy-like on a pro toolbar. Force the
+    text/mono presentation. Two safe options: (a) append the text-presentation selector U+FE0E
+    (`&#9198;&#65038;` for `⏮`, `&#9197;&#65038;`... note next is U+23ED `&#9197;`) so it renders
+    as a monochrome glyph; OR (b, PREFERRED for full control) drop inline SVG icons so the icon
+    is crisp, currentColor-tinted, and identical cross-platform. If using SVG, the shape is: two
+    stacked triangles (or one triangle) + a 2px vertical bar on the outside edge, 16x16,
+    `fill: currentColor`, so it inherits the ghost label color and the hover `#fff`-ish brighten.
+    Keep the existing `aria-label="Previous note"` / `"Next note"` and `title` so the glyph
+    change is purely visual; screen readers are unaffected.
+  - **Sizing + states.** Step buttons stay GHOST tier (transparent, satellite of Play). Make them
+    square-ish so the icon centers cleanly: `min-width: 2.6rem`, equal vertical/horizontal padding
+    so the glyph is optically centered next to the taller Play. Icon size ~1rem. States:
+    - resting: ghost bg + neutral border, glyph at `--text`.
+    - hover (`:not(:disabled)`): `--ghost-bg-hover`, border `--ghost-border-hover`, glyph
+      brightens toward `#fff`-ish (`--text` -> near-white). The whole button lifts subtly.
+    - active: `--ghost-bg-active`, `translateY(1px)` (the #34 press feel).
+    - disabled: `opacity: 0.4`, `cursor: not-allowed`, NO hover. This is the resting state before
+      a score loads (the buttons start `disabled`), so disabled must look clearly inert, not just
+      dim-but-clickable. Keep the glyph visible but faded so the affordance is "will work once a
+      score is loaded".
+    - focus-visible: the shared `--focus-ring` (unchanged).
+  - **Placement: tight transport cluster.** Group prev / Play / next as a tight unit (gap
+    `0.4rem`) so the two steps visually flank the hero, THEN a wider gap before the seek slider.
+    This grouping is what makes them read as "the two things you do to the current note" around
+    Play, matching every media transport bar. The seek slider + time readout trail to the right
+    as the scrub sub-group.
+
+  ### 3. Grouping (REQUIRED, refine #34) - input / output / settings / transport
+
+  Keep the #34 `.group` + hairline-divider structure (it survives the responsive wrap well), with
+  these refinements so the four conceptual groups read as deliberate:
+  - Dividers use the new NEUTRAL `--group-divider` (not violet `--bar-border`), so the grouping
+    is structural, not another violet element. Keep them 1px, ~1.4rem tall, centered, wrapping
+    with their group via `.group + .group::before`.
+  - The `.controls` row is the first three groups: **source/input** (3 loaders) | **output**
+    (Export) | **settings** (Names, hand mutes, tempo), with `#track-name` + `#sound-status`
+    pushed right via `margin-left: auto`.
+  - The `.transport` row IS the fourth group (transport): the tight prev/Play/next cluster, then
+    the seek scrub + time readout. No inner DOM change needed beyond a small wrapper if the Tech
+    Lead wants the tight-cluster gap; a flex gap tweak on `.transport` plus a wrapper around
+    prev/Play/next is cleanest, but keep every existing `id=` intact.
+  - **Bar surface.** Repoint `.topbar` background to the new calmer `--bar-surface` and bottom
+    border to the neutral `--bar-border`. Keep the #34 depth shadow and the violet wordmark `<h1>`
+    (the wordmark stays the ONE violet text element, which is good: brand leads, buttons calm).
+
+  ### 4. Coordinate with #44 and #33 (REQUIRED, do not implement #44)
+
+  - **#44 (editable sheet name in the bar, not built yet):** leave room. `#track-name` currently
+    trails right after `margin-left: auto`. When #44 lands it will likely become an editable field
+    in/near that slot. Do NOT build it here, but do NOT hard-pin the right side so tightly that an
+    editable name field could not slot in. Keeping `#track-name` as the right-trailing flexible
+    element (as today) leaves that door open. No structural change needed; just don't remove the
+    `margin-left: auto` flex behavior.
+  - **#33 (mobile, shipped):** every responsive rule must still hold. The tier change is
+    color-only on the loaders (still `.file-btn`, still `button`), so the 720px `min-height: 44px`
+    tap targets, the `<h1>`/`#track-name`/`#sound-status` hide, the slider thumb growth, and the
+    divider-hide all still apply unchanged. The new step-button `min-width: 2.6rem` must not drop
+    below the 720px `min-width: 44px` rule (it won't; the phone rule overrides upward). Re-verify
+    the loaders still wrap two-per-row at 380px and that the neutral secondary surface is visible
+    at 44px height (it is; surface + border are height-independent).
+
+  ### REQUIRED checklist (ship in this order)
+
+  1. Replace the toolbar tokens in `:root` (section 1): calmer neutral `--bar-surface` /
+     `--bar-border` / `--group-divider`, add the `--secondary-*` tier, calm the `--ghost-*` tier.
+  2. Demote the three `.file-btn` loaders from PRIMARY (filled violet) to SECONDARY (raised
+     neutral). Leave `#play-btn` as the SOLE filled-violet PRIMARY hero.
+  3. Replace the prev/next `.step-btn` glyph markup with conventional skip-previous / skip-next
+     icons (prefer inline SVG, `fill: currentColor`; else `⏮`/`⏭` with U+FE0E text-presentation),
+     bar on the outside. Keep `aria-label`/`title`. Square-ish ghost styling + the four states.
+  4. Tighten the transport into a prev/Play/next cluster (gap ~0.4rem) then the scrub sub-group.
+  5. Point group dividers at the neutral `--group-divider`; repoint `.topbar` to the new surface
+     + neutral border. Keep the depth shadow and violet wordmark.
+  6. Re-verify #33 breakpoints (900 / 720 / 380) and leave the `#track-name` right-trailing slot
+     open for #44.
+
+  NICE-TO-HAVE (defer): a play-triangle glyph on `#play-btn` (needs the label-swap logic touched);
+  a subtle inner top-highlight on the secondary pills; backdrop blur on the bar.
+
 ## Aesthetic
 
 - **Neon-on-dark** "Synthesia" look: purple accent (`--accent: #b14bff`) glowing falling
