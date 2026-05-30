@@ -73,3 +73,53 @@ export function midiToBarLabel(midi: number, mode: LabelMode): string {
   }
   return base;
 }
+
+// --- Color (issue #12): pitch-class hue wheel, purple-anchored. ---
+
+// Pitch class 0..11 (C..B), handling negative midi defensively.
+export function pitchClass(midi: number): number {
+  return ((midi % 12) + 12) % 12;
+}
+
+// Pure, unit-testable hue math: hue = (276 + pc * 30) mod 360 degrees.
+// 276deg is the hue of the brand violet #b14bff, so C/Do anchors on purple.
+// Depends only on pitch class, so octaves share a hue.
+export function pitchHue(midi: number): number {
+  return (276 + pitchClass(midi) * 30) % 360;
+}
+
+// Colors a note carries, derived from its pitch class. S/L are fixed per row
+// (white vs black key); only hue varies by pitch class.
+export interface NoteColors {
+  hue: number;
+  whiteFill: string; // white-key note bar fill
+  blackFill: string; // black-key note bar fill
+  glow: string; // per-note glow (shadowColor) and landing bloom
+  activeFill: string; // active (sounding) bar fill
+  activeWhiteKey: string; // active white key face fill
+  activeBlackKey: string; // active black key face fill
+}
+
+function buildNoteColors(hue: number): NoteColors {
+  return {
+    hue,
+    whiteFill: `hsl(${hue}, 85%, 62%)`,
+    blackFill: `hsl(${hue}, 70%, 50%)`,
+    glow: `hsl(${hue}, 90%, 68%)`,
+    activeFill: `hsl(${hue}, 95%, 72%)`,
+    activeWhiteKey: `hsl(${hue}, 85%, 66%)`,
+    activeBlackKey: `hsl(${hue}, 80%, 60%)`,
+  };
+}
+
+// Precomputed 12-entry pitch-class -> colors table, built once at module load.
+// The rAF render loop indexes this instead of building hsl strings per note.
+const PITCH_CLASS_COLORS: readonly NoteColors[] = Array.from({ length: 12 }, (_, pc) =>
+  buildNoteColors((276 + pc * 30) % 360),
+);
+
+// Colors for a midi note, looked up from the precomputed table (no per-call
+// string building). Hue is a function of pitch class only.
+export function noteColor(midi: number): NoteColors {
+  return PITCH_CLASS_COLORS[pitchClass(midi)];
+}

@@ -10,6 +10,133 @@ relevant section, dated.
 - Falling note bars have a soft glow (canvas `shadowBlur`); white-key notes are brighter
   than black-key notes.
 
+## Visualizer color + polish (issue #12)
+
+- **2026-05-30 — Beautify the piano + falling-notes view: pitch-class palette + bar/key/
+  landing polish.** Concrete, Canvas-2D-ready spec. Data constraint: a note carries only
+  `{ midi, time, duration }`, so coloring is by **pitch class (0-11)**, never by hand/voice.
+  The purple identity is kept as the anchor of the wheel.
+
+  **0. Helpers to add (in `src/piano.ts`, presentation strings/colors live here).**
+  Add `pitchClass(midi)` (already inline as `((midi % 12) + 12) % 12`) and a pure color
+  helper `noteColor(midi, { black, active })` returning the hex/hsl strings below. The
+  visualizer stays presentation-light and asks piano.ts for colors, mirroring how it asks
+  for labels.
+
+  **1. Palette: pitch-class hue wheel, purple-anchored.**
+  Map pitch class to hue around the full wheel so all 12 notes are distinguishable, but
+  rotate the wheel so **C (Do) lands on the brand violet**, keeping purple as the visual home
+  key. The chromatic circle reads as a smooth rainbow that loops back to violet at the octave.
+
+  - **Hue rule:** `hue = (276 + pc * 30) mod 360` degrees. (276deg is the hue of `#b14bff`.)
+    This gives, by pitch class 0..11 (C, C#, D, D#, E, F, F#, G, G#, A, A#, B):
+
+    | pc | note | hue | role |
+    | --- | --- | --- | --- |
+    | 0  | C  / Do   | 276 | violet (brand anchor) |
+    | 1  | C# / Do#  | 306 | magenta |
+    | 2  | D  / Re   | 336 | pink-red |
+    | 3  | D# / Re#  | 6   | red |
+    | 4  | E  / Mi   | 36  | orange |
+    | 5  | F  / Fa   | 66  | amber-yellow |
+    | 6  | F# / Fa#  | 96  | yellow-green |
+    | 7  | G  / Sol  | 126 | green |
+    | 8  | G# / Sol# | 156 | teal-green |
+    | 9  | A  / La   | 186 | cyan |
+    | 10 | A# / La#  | 216 | azure |
+    | 11 | B  / Si   | 246 | indigo-blue |
+
+  - **Saturation / lightness (white-key vs black-key notes).** Keep the existing "white notes
+    brighter than black notes" depth cue, now per hue:
+    - **White-key note bar fill:** `hsl(hue, 85%, 62%)`.
+    - **Black-key note bar fill:** `hsl(hue, 70%, 50%)` (more saturated-dark so it still reads
+      as a recessed/inner note, same role purple `#8a2fe0` played before).
+    - These S/L values are fixed per row; **only hue varies by pitch class**, so the
+      brightness depth between white and black notes is constant across the wheel.
+
+  - **Colorblind reasoning.** Differentiation never relies on hue alone: (a) every bar also
+    carries its **solfege/letter label** (issue #11) which is the primary identifier; (b)
+    **screen X position is the pitch** (a piano is a position display), so two same-hue
+    octaves are never adjacent and the player reads pitch from where the bar falls, not its
+    color; (c) white-vs-black notes differ in lightness (62% vs 50%) as well as hue. So the
+    palette is decorative reinforcement, not the sole channel. We intentionally do not place
+    a pure-red and pure-green note next to each other as the only cue; adjacent pitch classes
+    are 30deg apart and also one key apart horizontally.
+
+  - **Legibility on `#0a0712`.** All fills sit at L 50-62% with high S, which is bright on the
+    near-black stage (every hue clears ~4:1 luminance contrast against `#0a0712`). The white
+    `#ffffff` bar labels with the existing `rgba(0,0,0,0.45)` 2px shadow stay legible over
+    every hue at these lightnesses (worst case is the L62% yellow-green band; the dark shadow
+    plus 700 weight carries it, same mechanism that already carries white-on-`#b14bff`). Do
+    not lighten fills past L 62% or the white labels start to wash out.
+
+  **2. Falling-note bars.**
+  - **Fill:** flat `hsl(...)` per the table above (no vertical gradient per bar; a per-note
+    gradient is wasted cost in the rAF loop and the glow already gives dimension). Keep
+    rounded corners at **r=4**.
+  - **Glow:** keep `ctx.shadowBlur = 18`, but set **`ctx.shadowColor` to the note's own hue**
+    instead of the single ACCENT. Use a slightly brighter glow color than the fill so it reads
+    as emission: `hsl(hue, 90%, 68%)`. This is the one change that makes the wheel sing on the
+    dark stage. Cost is identical to today (one shadowColor assignment per bar, which already
+    happens).
+  - **Active (sounding) bar emphasis.** When `active.has(note.midi)`, bump the fill to
+    `hsl(hue, 95%, 72%)` and `shadowBlur` to `26` for that bar only. Cheap, and it ties the
+    falling bar to the lit key and the landing flash below.
+  - **Order:** still fill all bars first, collect label geometry, then draw labels with
+    `shadowBlur` reset (unchanged from #11 so glow never bleeds into glyphs).
+
+  **3. Landing effect (the one tasteful impact cue).**
+  Replace the static purple glow strip with a **hue-reactive landing strip + per-key flash**:
+  - **Resting strip:** keep the 30px vertical gradient above the keyboard, but neutral so it
+    does not fight the colors: `rgba(177,75,255,0)` -> `rgba(177,75,255,0.18)` (dimmer than
+    today's 0.35). Build this gradient **once per frame**, not per note.
+  - **Impact flash:** for each currently-active midi, draw a short vertical bloom directly
+    above that key's x-range at the strip: a rounded rect (key width, ~22px tall) filled with
+    the **note's glow hue** `hsl(hue, 90%, 68%)` at alpha ramped by how recently it landed.
+    Cheap version with no new per-note timing state: alpha = `0.55` constant while the note is
+    active (active set is already computed). Set `shadowColor` to the same hue, `shadowBlur
+    16`, draw, reset. This is at most "number of simultaneously sounding notes" draws per
+    frame (a handful), not per visible bar, so it stays within budget.
+
+  **4. Keyboard.**
+  - **Resting white key:** keep `#f2ecf8`. **Resting black key:** keep `#100b1a`. Keep the
+    `#2a2238` white-key stroke and the `#15101f` keybed fill behind them.
+  - **Active (pressed) key color = the sounding note's hue**, so the key, its falling bar, and
+    its landing flash all share one color:
+    - **Active white key fill:** `hsl(hue, 85%, 66%)` (slightly lighter than the bar so a
+      pressed key still reads as a lit surface, not a hole).
+    - **Active black key fill:** `hsl(hue, 80%, 60%)`.
+  - **Active key-face label** (white keys, issue #11): keep switching to the dark `#1a0f2b`
+    for contrast; it stays >= 4.5:1 against every active-hue fill at L66%. Resting label color
+    stays `#5b4a72`.
+
+  **5. Background / ambiance.**
+  Add a **single cheap vertical gradient** behind everything instead of `clearRect` to
+  transparent, for depth: top `#0a0712` -> bottom `#120b1f` (a hair of violet lift toward the
+  keyboard so the stage feels lit from the keys up). Build it once on `resize()` (cache the
+  CanvasGradient, it depends only on height) and `fillRect` the whole canvas each frame in
+  place of `clearRect`. No per-note cost. Do not add vignettes, noise, or radial gradients;
+  too expensive in the rAF loop for the payoff.
+
+  **6. Accessibility + performance budget (must read before implementing).**
+  - **Must not drop frames on dense passages.** The render runs every rAF over every visible
+    note. Per-bar work stays at exactly **one `fillStyle` + one `shadowColor` + one
+    `shadowBlur` + one `fill`** (same as today). Do not add per-bar gradients, per-bar
+    `measureText`, or extra shadow passes.
+  - **Reuse gradients per frame, not per note.** The landing strip gradient and the background
+    gradient are frame- or resize-scoped; never create a `createLinearGradient` inside the
+    note loop.
+  - **No `shadowBlur` on labels beyond the existing 2px text shadow.** Glow is for bars and
+    landing flashes only. Always reset `ctx.shadowBlur = 0` before any text pass.
+  - **Precompute hues if needed.** `hsl()` string building per bar is fine, but if profiling
+    shows it hot, cache a `pc -> {fill, glow}` lookup table (12 entries x white/black) at
+    module load; values are static. Prefer this table to recomputing strings each frame.
+  - **Colorblind + contrast recap:** color is reinforcement, never the only signal (label +
+    X-position + lightness carry identity); all fills clear luminance contrast on `#0a0712`;
+    white bar labels keep the dark shadow; active key-face labels flip to `#1a0f2b`.
+  - **Scope guard:** palette + bar glow recolor + active-key hue + one landing flash + bg
+    gradient. No new note metadata, no libraries, no DOM/layout changes.
+
 ## Layout
 
 - **2026-05-30 — Split view:** sheet music on top (~42% height, light panel, scrollable),

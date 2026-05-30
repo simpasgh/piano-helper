@@ -30,6 +30,31 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-30 - Visualizer colors (issue #12): pitch-class hue wheel, purple-anchored.**
+  Color math lives in `src/piano.ts` next to the label helpers and is pure/unit-testable:
+  `pitchClass(midi)` (normalizes negatives), `pitchHue(midi): number` returns
+  `(276 + pc * 30) mod 360` (276deg = brand `#b14bff`, so C/Do anchors violet), and
+  `noteColor(midi): NoteColors` returns the hsl strings (`whiteFill` 85/62, `blackFill`
+  70/50, `glow` 90/68, `activeFill` 95/72, `activeWhiteKey` 85/66, `activeBlackKey` 80/60).
+  Hue depends only on pitch class, so octaves share a hue and a key with multiple sounding
+  notes is well-defined. Tests in `src/visualizer-color.test.ts`.
+  - **Performance: a precomputed 12-entry `PITCH_CLASS_COLORS` table is built once at module
+    load** (one `buildNoteColors` per pc); `noteColor` is a table lookup, so no hsl strings
+    are built and no `measureText` runs inside the rAF loop. `noteColor(60) === noteColor(72)`
+    (same cached object). Per-bar cost stays one `fillStyle` + one `shadowColor` + one
+    `shadowBlur` + one `fill` (same as before #12). The background and resting landing-strip
+    gradients are reused per frame/resize, never per note.
+  - **Where colors land in `src/visualizer.ts`:** falling bars use white/black fill + glow
+    shadowColor per note, active bars bump to `activeFill` + shadowBlur 26 (else 18); active
+    white/black key faces use `activeWhiteKey`/`activeBlackKey`; resting strip dimmed to
+    `rgba(177,75,255,0.18)`; a new `drawLandingBloom` draws a 22px-tall rounded bloom in each
+    sounding note's glow hue (globalAlpha 0.55, shadowBlur 16) above the key, drawn before the
+    keybed/keys, at most "notes sounding" draws per frame. Background: `bgGradient` (cached in
+    `resize()`, `#0a0712` -> `#120b1f`) is `fillRect`-ed over the whole canvas each frame in
+    place of `clearRect` (the fill both clears and paints). Removed the `ACCENT` constant.
+    Label discipline from #11 is unchanged: `shadowBlur` reset to 0 before text, dark text
+    shadow only, all-or-nothing key-label floor, active bar always labeled.
+
 - **2026-05-30 - OMR code shape (issue #5): Pages Functions + R2 binding + browser poll, pure logic in `src/`.**
   Endpoints (Pages Functions, `functions/api/`): `POST /api/omr` (`functions/api/omr.ts`, `onRequestPost`)
   accepts multipart `file` (raw-body fallback), validates MIME in {png, jpeg, pdf} and size <= 12 MB,
