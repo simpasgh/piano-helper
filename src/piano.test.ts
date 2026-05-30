@@ -7,6 +7,7 @@ import {
   midiToName,
   midiToLabel,
   midiToBarLabel,
+  handFromStaffIndex,
 } from "./piano";
 
 describe("isBlackKey", () => {
@@ -74,6 +75,28 @@ describe("buildKeyLayout", () => {
     const last = whites[whites.length - 1];
     expect(last.x + last.width).toBeCloseTo(WIDTH, 6);
     expect(whites[0].width).toBeCloseTo(whiteWidth, 6);
+  });
+});
+
+describe("handFromStaffIndex", () => {
+  it("returns unknown for a single-staff part (cannot split hands)", () => {
+    expect(handFromStaffIndex(0, 1)).toBe("unknown");
+    expect(handFromStaffIndex(0, 0)).toBe("unknown");
+  });
+
+  it("returns unknown for a negative index (defensive guard)", () => {
+    expect(handFromStaffIndex(-1, 2)).toBe("unknown");
+  });
+
+  it("maps a two-staff grand staff: index 0 is right, index 1 is left", () => {
+    expect(handFromStaffIndex(0, 2)).toBe("right");
+    expect(handFromStaffIndex(1, 2)).toBe("left");
+  });
+
+  it("treats any non-first staff as the left hand", () => {
+    // A 3-staff organ part still maps index 0 to right and everything below to left.
+    expect(handFromStaffIndex(0, 3)).toBe("right");
+    expect(handFromStaffIndex(2, 3)).toBe("left");
   });
 });
 

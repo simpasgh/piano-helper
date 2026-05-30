@@ -1,5 +1,6 @@
 import type { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import type { VisNote } from "./visualizer";
+import { handFromStaffIndex } from "./piano";
 
 export interface ScoreData {
   notes: VisNote[]; // drives audio scheduling and falling notes
@@ -26,7 +27,16 @@ export function extractScore(osmd: OpenSheetMusicDisplay): ScoreData {
         if (note.isRest()) continue;
         const midi = note.halfTone + 12; // OSMD halfTone 0 = C0; MIDI C0 = 12
         const noteDuration = note.Length.RealValue * wholeNoteSeconds;
-        notes.push({ midi, time, duration: noteDuration });
+        // Tag the hand from the note's staff position within its instrument (issue #36).
+        // Grand-staff piano: staff 0 = treble = right, staff 1 = bass = left. Guard
+        // defensively so a malformed score (missing staff/instrument) degrades to
+        // "unknown" rather than throwing.
+        const staff = note.ParentStaff;
+        const staves = staff?.ParentInstrument?.Staves;
+        const hand = staves
+          ? handFromStaffIndex(staves.indexOf(staff), staves.length)
+          : "unknown";
+        notes.push({ midi, time, duration: noteDuration, hand });
         duration = Math.max(duration, time + noteDuration);
       }
     }
