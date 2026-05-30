@@ -78,6 +78,30 @@ export function handFromStaffIndex(index: number, staffCount: number): Hand {
   return index === 0 ? "right" : "left";
 }
 
+// A staff's opening clef reduced to a hand convention: treble => right hand, bass => left
+// hand, "other" => clefs with no hand convention (C, percussion).
+export type StaffClefKind = "treble" | "bass" | "other";
+
+// Reduces per-measure clef declarations into one clef per staff, keyed by the staff's
+// sheet-wide id (Staff.idInMusicSheet). A staff may redeclare its clef mid-piece, but only
+// the FIRST clef assigns the hand (a later clef change doesn't move a note to the other
+// hand), so the first declaration per staff id wins; pass declarations in score order.
+//
+// Keying by the sheet-wide staff id (not a staff's array position within a measure) is what
+// keeps hand-tagging correct for exotic multi-instrument files: a measure's staff-entry
+// index and a note's ParentStaff.idInMusicSheet coincide for a single piano (grand staff or
+// two single-staff parts) but can diverge with extra parts or unusual part order, which
+// would otherwise tag a note with another staff's clef (issue #73 / PR #82 follow-up).
+export function buildStaffClefMap(
+  declarations: Iterable<{ staffId: number; clef: StaffClefKind }>,
+): Map<number, StaffClefKind> {
+  const clefs = new Map<number, StaffClefKind>();
+  for (const { staffId, clef } of declarations) {
+    if (!clefs.has(staffId)) clefs.set(staffId, clef);
+  }
+  return clefs;
+}
+
 // Decides a note's hand from its staff (issue #36 follow-up). The clef is the primary
 // signal and is what makes this work regardless of how the file packages the piano: a
 // grand staff is sometimes ONE instrument with two staves and sometimes TWO separate
@@ -87,7 +111,7 @@ export function handFromStaffIndex(index: number, staffCount: number): Hand {
 // we fall back to staff position, and that fallback needs a multi-staff instrument to be
 // meaningful; a lone staff with such a clef stays "unknown".
 export function handFromStaff(
-  clef: "treble" | "bass" | "other" | undefined,
+  clef: StaffClefKind | undefined,
   staffIndexInInstrument: number,
   staffCountInInstrument: number,
 ): Hand {
@@ -102,7 +126,7 @@ export function handFromStaff(
 // keying off position then inverted the hands, so muting "right" silenced the bass while the
 // melody kept sounding. Clefs with no hand convention (C, percussion) return null so the
 // caller can fall back to position.
-export function handFromClef(clef: "treble" | "bass" | "other"): Hand | null {
+export function handFromClef(clef: StaffClefKind): Hand | null {
   if (clef === "treble") return "right";
   if (clef === "bass") return "left";
   return null;
