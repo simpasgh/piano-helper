@@ -92,6 +92,30 @@ describe("pollOmrResult", () => {
     ).rejects.toThrow("Could not recognize any notes");
   });
 
+  it("fails fast on a definitive client error instead of polling", async () => {
+    const fetchFn = vi.fn(async () =>
+      jsonResponse({ error: "Missing or invalid jobId." }, 400),
+    ) as unknown as typeof fetch;
+    const sleep = vi.fn(async () => {});
+
+    await expect(
+      pollOmrResult("job-1", { fetchFn, sleep, now: () => 0 }),
+    ).rejects.toThrow("Missing or invalid jobId.");
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("fails fast when OMR is not configured (503)", async () => {
+    const fetchFn = vi.fn(async () =>
+      jsonResponse({ error: "OMR is not configured." }, 503),
+    ) as unknown as typeof fetch;
+    const sleep = vi.fn(async () => {});
+
+    await expect(
+      pollOmrResult("job-1", { fetchFn, sleep, now: () => 0 }),
+    ).rejects.toThrow("OMR is not configured.");
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
   it("throws on timeout while still pending", async () => {
     const fetchFn = vi.fn(async () =>
       jsonResponse({ status: "pending" }, 404),
