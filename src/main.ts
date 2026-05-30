@@ -3,10 +3,12 @@ import * as Tone from "tone";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { Visualizer } from "./visualizer";
 import { extractScore, type ScoreData } from "./score";
+import { submitOmr, pollOmrResult } from "./omr";
 import type { LabelMode } from "./piano";
 
 const canvas = document.getElementById("stage") as HTMLCanvasElement;
 const fileInput = document.getElementById("file-input") as HTMLInputElement;
+const scanInput = document.getElementById("scan-input") as HTMLInputElement;
 const playBtn = document.getElementById("play-btn") as HTMLButtonElement;
 const namesBtn = document.getElementById("names-btn") as HTMLButtonElement;
 const trackName = document.getElementById("track-name") as HTMLSpanElement;
@@ -37,6 +39,12 @@ function ensureSynth(): Tone.PolySynth {
 
 async function loadScoreFile(file: File): Promise<void> {
   const xml = await file.text();
+  await loadScoreXml(xml, file.name);
+}
+
+// Load MusicXML into OSMD and rebuild the audio + falling-notes pipeline. Shared by
+// the direct MusicXML file path and the OMR scan result path.
+async function loadScoreXml(xml: string, name: string): Promise<void> {
   await osmd.load(xml);
   osmd.render();
   osmd.cursor.reset();
@@ -62,7 +70,7 @@ async function loadScoreFile(file: File): Promise<void> {
   part.start(0);
 
   stepIndex = 0;
-  trackName.textContent = `${file.name} (${score.notes.length} notes)`;
+  trackName.textContent = `${name} (${score.notes.length} notes)`;
   playBtn.disabled = false;
   setPlaying(false);
 }
@@ -112,6 +120,42 @@ fileInput.addEventListener("change", () => {
       alert(`Failed to load score: ${err.message}`);
     });
   }
+});
+
+let scanning = false;
+
+// Toggle the inputs and play button while a scan is in flight. The rAF render loop
+// keeps running; only the controls are disabled.
+function setScanningUI(active: boolean): void {
+  scanning = active;
+  fileInput.disabled = active;
+  scanInput.disabled = active;
+  if (active) playBtn.disabled = true;
+}
+
+async function scanSheet(file: File): Promise<void> {
+  setScanningUI(true);
+  trackName.textContent = "Scanning sheet... (this can take a minute)";
+  try {
+    const jobId = await submitOmr(file);
+    const xml = await pollOmrResult(jobId);
+    await loadScoreXml(xml, file.name);
+  } finally {
+    setScanningUI(false);
+  }
+}
+
+scanInput.addEventListener("change", () => {
+  if (scanning) return;
+  const file = scanInput.files?.[0];
+  if (!file) return;
+  scanSheet(file).catch((err) => {
+    console.error("Scan failed:", err);
+    trackName.textContent = "Scan failed.";
+    alert(`Scan failed: ${err.message}`);
+  });
+  // Allow re-selecting the same file to retry.
+  scanInput.value = "";
 });
 
 playBtn.addEventListener("click", () => togglePlay());
