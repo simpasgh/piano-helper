@@ -30,6 +30,42 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-30 - Sheet note-name labels (issue #17): HTML overlay inside the scrolled `#sheet`, positions read from OSMD SVG bboxes.**
+  Labels are an absolutely-positioned `<div id="sheet-labels">` (one `.sheet-label` span per
+  notehead) appended INSIDE `#sheet` (now `position: relative` in `src/style.css`), with
+  `pointer-events: none` and `z-index: 1`. Because the overlay lives in the same scrolled
+  content box as the OSMD SVG, it translates natively on scroll: no scroll handler needed.
+  Only re-render and resize move noteheads, so only those recompute positions.
+  - **Reading notehead geometry from OSMD (reusable):** after `osmd.render()`, walk
+    `osmd.GraphicSheet.MeasureList` (indexed `[staffLineIndex][measureIndex]`, guard undefined
+    cells) -> `measure.staffEntries` -> `staffEntry.graphicalVoiceEntries` ->
+    `voiceEntry.notes` (`GraphicalNote[]`). Skip rests via `note.sourceNote.isRest()`; MIDI is
+    `sourceNote.halfTone + 12`. The rendered `<g>` comes from `getSVGGElement()`, which is a
+    VexFlow-subclass method NOT on the public `GraphicalNote` type, so feature-detect it via a
+    narrow structural cast (`note as unknown as { getSVGGElement?(): SVGGElement | null }`) and
+    skip gracefully when null. Take its `getBoundingClientRect()` (viewport coords) and convert
+    into the `#sheet` content box: `x = rect.left - containerRect.left + scrollLeft + rect.width/2`
+    (notehead center-x), `y = rect.top - containerRect.top + scrollTop` (notehead top). This is
+    the right coordinate space for the absolutely-positioned overlay even when scrolled.
+  - **Pure layout split out for testing:** `layoutSheetLabels(notes: NotePosition[], mode): LabelItem[]`
+    in `src/sheet-labels.ts` is DOM-free. It groups noteheads sharing an x into chords (epsilon
+    0.5px), sorts each chord highest-pitch-first, and stacks labels upward: the lowest label sits
+    6px above the top notehead, each higher one +11px. Off mode returns `[]`. Density rule: if two
+    adjacent chords are closer in x than the wider of their two top-note labels (approx glyph width
+    6px), collapse the lower-priority chord to its top note only (active/cursor chord wins, else the
+    leftmost), so the melody/top line is always labeled. No octave on the sheet (uses `midiToLabel`,
+    not `midiToBarLabel`). Tests in `src/sheet-labels.test.ts` (6): single note, 3-note chord
+    stacked top-highest with 11px gap, off mode, letters vs solfege text, density drop keeping both
+    top notes, active-chord priority. The OSMD walking + `getBoundingClientRect` glue lives in
+    `src/sheet-overlay.ts` (`renderSheetLabels`) and is browser-only (not unit-tested).
+  - **Wiring (`src/main.ts`):** `renderSheetLabels(osmd, sheetContainer, labelMode)` is called
+    after `osmd.render()` in `loadScoreXml`, inside `applyLabelMode` (so the Names toggle and the
+    startup call both rebuild it; it is a safe no-op before any score renders because
+    `osmd.GraphicSheet` is falsy), and on a 150ms-debounced `window.resize` (OSMD `autoResize`
+    re-renders the SVG, moving noteheads). Reuses the existing `LabelMode` and Names toggle; no
+    second control. Color/font are pure CSS (`#7a2fd6`, `system-ui 600 9px`, triple light-halo
+    `text-shadow`). Falling-bar/key labels (#11) and the cursor sync are untouched.
+
 - **2026-05-30 - Tempo slider (issue #14): one rate scales audio bpm + visual score time, sync preserved.**
   A single `tempoRate` (1.0 = 100% = score speed) drives everything. Pure mapping lives in
   `src/tempo.ts` (`tempoPercentToRate`, `clampTempoPercent`, `rateToBpm`), unit-tested in

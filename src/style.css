@@ -197,10 +197,37 @@ button:disabled {
 }
 
 #sheet {
+  position: relative;
   height: 42%;
   overflow-y: auto;
   background: #f6f2fb;
   padding: 1rem 1.25rem;
+}
+
+/* Note-name overlay (issue #17). Lives inside the scrolled #sheet content box
+   so it scrolls natively with the SVG. Never intercepts pointer events. */
+#sheet-labels {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.sheet-label {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  color: #7a2fd6;
+  font: 600 9px system-ui, -apple-system, sans-serif;
+  letter-spacing: 0.01em;
+  line-height: 1;
+  white-space: nowrap;
+  text-align: center;
+  /* Triple-stacked light halo in the panel color so the violet stays legible
+     over ledger lines, stems, and the green cursor box. */
+  text-shadow: 0 0 2px #f6f2fb, 0 0 2px #f6f2fb, 0 0 3px #f6f2fb;
 }
 
 #sheet:empty::before {

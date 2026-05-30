@@ -5,6 +5,7 @@ import { Visualizer } from "./visualizer";
 import { extractScore, type ScoreData } from "./score";
 import { submitOmr, pollOmrResult } from "./omr";
 import { buildSalamanderSampleMap, SALAMANDER_BASE_URL } from "./sampler";
+import { renderSheetLabels } from "./sheet-overlay";
 import {
   tempoPercentToRate,
   rateToBpm,
@@ -20,6 +21,7 @@ const playBtn = document.getElementById("play-btn") as HTMLButtonElement;
 const namesBtn = document.getElementById("names-btn") as HTMLButtonElement;
 const tempoSlider = document.getElementById("tempo-slider") as HTMLInputElement;
 const tempoReadout = document.getElementById("tempo-readout") as HTMLButtonElement;
+const sheetContainer = document.getElementById("sheet") as HTMLDivElement;
 const trackName = document.getElementById("track-name") as HTMLSpanElement;
 const soundStatus = document.getElementById("sound-status") as HTMLSpanElement;
 
@@ -106,6 +108,8 @@ async function loadScoreXml(xml: string, name: string): Promise<void> {
   osmd.render();
   osmd.cursor.reset();
   osmd.cursor.show();
+  // Rebuild the note-name overlay against the freshly rendered noteheads.
+  renderSheetLabels(osmd, sheetContainer, labelMode);
 
   score = extractScore(osmd);
 
@@ -262,6 +266,8 @@ const NAME_CYCLE: Record<LabelMode, LabelMode> = {
 function applyLabelMode(mode: LabelMode): void {
   visualizer.setLabelMode(mode);
   namesBtn.textContent = NAME_LABELS[mode];
+  // Rebuild the sheet overlay to match (no-op until a score is rendered).
+  renderSheetLabels(osmd, sheetContainer, mode);
 }
 
 // localStorage can throw (Safari Private Browsing, sandboxed iframes, blocked
@@ -304,5 +310,16 @@ function frame(): void {
   visualizer.render(scoreTime);
   requestAnimationFrame(frame);
 }
+
+// Recompute overlay label positions after a resize settles. OSMD autoResize
+// re-renders the SVG (moving noteheads), so the overlay must be rebuilt off the
+// new geometry. Debounced so a drag-resize does not rebuild every pixel.
+let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+window.addEventListener("resize", () => {
+  if (resizeTimer !== undefined) clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    renderSheetLabels(osmd, sheetContainer, labelMode);
+  }, 150);
+});
 
 requestAnimationFrame(frame);
