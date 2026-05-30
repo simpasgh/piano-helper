@@ -12,6 +12,21 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
+// True only when the notes contain at least one right-hand AND at least one left-hand
+// note (issue #37). Drives whether the per-hand mute toggles are shown: single-staff and
+// audio-derived scores (all "unknown") have no hand split, so the toggles stay hidden and
+// the single master volume governs playback. Early-exits as soon as both hands are seen.
+export function hasBothHands(notes: VisNote[]): boolean {
+  let right = false;
+  let left = false;
+  for (const n of notes) {
+    if (n.hand === "right") right = true;
+    else if (n.hand === "left") left = true;
+    if (right && left) return true;
+  }
+  return false;
+}
+
 // Sorted, de-duplicated list of note onset times (seconds). Drives next/previous stepping
 // for both sheet scores and audio-transcribed scores (which have no cursor step list).
 export function uniqueOnsets(notes: VisNote[]): number[] {

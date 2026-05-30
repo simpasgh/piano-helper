@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  hasBothHands,
   uniqueOnsets,
   nextOnset,
   prevOnset,
@@ -9,8 +10,36 @@ import {
   SEEK_RANGE,
 } from "./playback";
 import type { VisNote } from "./visualizer";
+import type { Hand } from "./piano";
 
 const note = (time: number, midi = 60): VisNote => ({ midi, time, duration: 0.5 });
+const handNote = (hand: Hand, midi = 60): VisNote => ({ midi, time: 0, duration: 0.5, hand });
+
+describe("hasBothHands", () => {
+  it("is true when both a right and a left note exist", () => {
+    expect(hasBothHands([handNote("right"), handNote("left")])).toBe(true);
+  });
+
+  it("is false when only right-hand notes exist", () => {
+    expect(hasBothHands([handNote("right"), handNote("right")])).toBe(false);
+  });
+
+  it("is false when only left-hand notes exist", () => {
+    expect(hasBothHands([handNote("left"), handNote("left")])).toBe(false);
+  });
+
+  it("is false when all notes are unknown", () => {
+    expect(hasBothHands([handNote("unknown"), handNote("unknown")])).toBe(false);
+  });
+
+  it("is false for an empty list", () => {
+    expect(hasBothHands([])).toBe(false);
+  });
+
+  it("is false with a right-hand note plus only unknowns", () => {
+    expect(hasBothHands([handNote("right"), handNote("unknown")])).toBe(false);
+  });
+});
 
 describe("uniqueOnsets", () => {
   it("returns sorted, de-duplicated onset times", () => {

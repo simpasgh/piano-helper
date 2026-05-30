@@ -43,6 +43,28 @@
             </div>
             <div class="group group-settings">
               <button id="names-btn" class="toggle">Names: Solfege</button>
+              <div id="hand-mutes" class="hand-mutes" role="group" aria-label="Mute by hand" hidden>
+                <button
+                  id="mute-right-btn"
+                  class="toggle hand-toggle"
+                  type="button"
+                  aria-pressed="false"
+                  title="Mute the right hand (treble)"
+                >
+                  <span class="hand-swatch hand-swatch-right" aria-hidden="true"></span>
+                  <span class="hand-toggle-label">Right hand</span>
+                </button>
+                <button
+                  id="mute-left-btn"
+                  class="toggle hand-toggle"
+                  type="button"
+                  aria-pressed="false"
+                  title="Mute the left hand (bass)"
+                >
+                  <span class="hand-swatch hand-swatch-left" aria-hidden="true"></span>
+                  <span class="hand-toggle-label">Left hand</span>
+                </button>
+              </div>
               <div class="tempo">
                 <span class="tempo-label">Tempo</span>
                 <input

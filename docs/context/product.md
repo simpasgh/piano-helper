@@ -19,6 +19,26 @@ performance on an animated piano, with the score highlighted in sync. Make the f
 
 ## Decisions
 
+### 2026-05-30 - Issue #37 per-hand control: two mute toggles, not sliders
+
+- **Decision: ship two per-hand MUTE toggles, "Right hand" and "Left hand", both default ON
+  (audible).** Tapping one mutes that hand's AUDIO while its notes keep falling silently. Solo
+  is achieved by muting the other hand, so there is NO separate solo control. This is the
+  smallest control that delivers the ticket's core practice value ("bring up one hand, quiet
+  the other") and reads instantly.
+- **The toggles appear ONLY when the loaded score has BOTH a right-hand and a left-hand note
+  set.** For single-staff or audio-derived scores (no reliable hand split, all "unknown" per
+  #36), they stay hidden and the single master volume governs playback. This is the graceful
+  fallback the ticket asks for.
+- **OUT of scope for v1 (explicitly deferred):** per-hand volume sliders, a balance slider,
+  presets ("melody focus" / "accompaniment focus"), cross-session persistence of the mute
+  state, and per-hand timbre. Revisit only if playtests ask for partial balance rather than a
+  hard mute.
+- Builds directly on #36 (shipped), which tags every `score.notes` entry with
+  `hand: "left" | "right" | "unknown"` from the MusicXML staff (treble = right, bass = left).
+- Muting is audio-only: notes keep falling so the player still sees the muted hand's part,
+  which is what makes "watch one hand while hearing the other" work.
+
 ### 2026-05-30 - Issue #19 audio-to-score: drop YouTube, ship file-upload-only reduced slice
 
 - **YouTube URL ingestion: NO-GO.** YouTube ToS prohibit accessing content through any means

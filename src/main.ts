@@ -6,6 +6,7 @@ import { extractScore, type ScoreData } from "./score";
 import { submitOmr, pollOmrResult } from "./omr";
 import { chooseVideoFormat, buildExportFilename } from "./recorder";
 import {
+  hasBothHands,
   uniqueOnsets,
   nextOnset,
   prevOnset,
@@ -34,6 +35,9 @@ const seekSlider = document.getElementById("seek-slider") as HTMLInputElement;
 const timeReadout = document.getElementById("time-readout") as HTMLSpanElement;
 const exportBtn = document.getElementById("export-btn") as HTMLButtonElement;
 const namesBtn = document.getElementById("names-btn") as HTMLButtonElement;
+const handMutes = document.getElementById("hand-mutes") as HTMLDivElement;
+const muteRightBtn = document.getElementById("mute-right-btn") as HTMLButtonElement;
+const muteLeftBtn = document.getElementById("mute-left-btn") as HTMLButtonElement;
 const tempoSlider = document.getElementById("tempo-slider") as HTMLInputElement;
 const tempoReadout = document.getElementById("tempo-readout") as HTMLButtonElement;
 const sheetContainer = document.getElementById("sheet") as HTMLDivElement;
@@ -62,6 +66,12 @@ let userSeeking = false;
 // Whether the current score has a rendered sheet + cursor. MusicXML/OMR scores do;
 // audio-transcribed scores (issue #19) are falling-notes only, so the cursor stays hidden.
 let hasSheet = false;
+// Per-hand audio mute (issue #37). Read fresh inside the Part callback so toggling a hand
+// mutes/unmutes its audio with no Part rebuild. "unknown" notes always sound. The visualizer
+// draws every note from score.notes regardless, so muting only affects audio, not the falling
+// notes. A note already sounding when its hand is muted keeps ringing until its release
+// completes (mute applies from the next onset); that is acceptable for v1.
+const handMuted = { left: false, right: false };
 
 // Tempo (issue #14). The Part schedules notes at score seconds, which Tone converts to
 // transport ticks using the bpm at build time. We capture the default bpm once as the
@@ -145,6 +155,11 @@ function loadNotes(data: ScoreData, name: string, sheet: boolean): void {
   visualizer.setNotes(score.notes);
 
   part = new Tone.Part((time, note) => {
+    // Skip the trigger when this note's hand is muted (issue #37). The flag is read fresh
+    // each callback, so a mute toggle takes effect from the next onset with no Part rebuild.
+    // A skipped trigger has no side effects, so the export/instrument paths are unaffected.
+    if (note.hand === "left" && handMuted.left) return;
+    if (note.hand === "right" && handMuted.right) return;
     // Resolve the instrument per note so playback upgrades to the sampler as soon as it
     // loads. Timing/scheduling is unchanged: only the sound source differs.
     getInstrument().triggerAttackRelease(
@@ -152,11 +167,20 @@ function loadNotes(data: ScoreData, name: string, sheet: boolean): void {
       note.duration,
       time,
     );
-  }, score.notes.map((n) => ({ time: n.time, midi: n.midi, duration: n.duration })));
+  }, score.notes.map((n) => ({ time: n.time, midi: n.midi, duration: n.duration, hand: n.hand })));
   part.start(0);
 
   // Apply the current tempo now that the Part is built at BASE_BPM.
   transport.bpm.value = rateToBpm(tempoRate, BASE_BPM);
+
+  // Per-hand mute toggles (issue #37): shown only when the score has both a right- and a
+  // left-hand note set; hidden for single-staff/audio-derived scores. Reset on every load so
+  // a previously muted hand from another score does not silently carry over.
+  handMuted.left = false;
+  handMuted.right = false;
+  muteRightBtn.setAttribute("aria-pressed", "false");
+  muteLeftBtn.setAttribute("aria-pressed", "false");
+  handMutes.hidden = !hasBothHands(score.notes);
 
   stepIndex = 0;
   onsets = uniqueOnsets(score.notes);
@@ -588,6 +612,17 @@ applyLabelMode(labelMode);
 
 // Begin loading the sampled piano in the background. Does not block render or play.
 startSamplerLoad();
+
+// Per-hand mute toggles (issue #37): flip the hand's mute flag and reflect it in
+// aria-pressed (true = muted). The flag is read fresh by the Part callback, so no rebuild.
+muteRightBtn.addEventListener("click", () => {
+  handMuted.right = !handMuted.right;
+  muteRightBtn.setAttribute("aria-pressed", String(handMuted.right));
+});
+muteLeftBtn.addEventListener("click", () => {
+  handMuted.left = !handMuted.left;
+  muteLeftBtn.setAttribute("aria-pressed", String(handMuted.left));
+});
 
 namesBtn.addEventListener("click", () => {
   labelMode = NAME_CYCLE[labelMode];
