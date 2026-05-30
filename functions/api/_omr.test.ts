@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   MAX_UPLOAD_BYTES,
   validateUpload,
+  normalizeMime,
   uploadKey,
   resultKey,
   isUuid,
@@ -39,6 +40,22 @@ describe("validateUpload", () => {
     expect(
       validateUpload({ contentType: "image/png", size: MAX_UPLOAD_BYTES }),
     ).toEqual({ ok: true });
+  });
+
+  it("accepts a type that carries parameters or odd casing", () => {
+    expect(
+      validateUpload({ contentType: "image/png; charset=binary", size: 1024 }),
+    ).toEqual({ ok: true });
+    expect(
+      validateUpload({ contentType: "IMAGE/JPEG", size: 1024 }),
+    ).toEqual({ ok: true });
+  });
+});
+
+describe("normalizeMime", () => {
+  it("strips parameters and lowercases", () => {
+    expect(normalizeMime("application/pdf; q=0.9")).toBe("application/pdf");
+    expect(normalizeMime("  Image/PNG ")).toBe("image/png");
   });
 });
 

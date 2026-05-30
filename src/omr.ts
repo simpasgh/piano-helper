@@ -8,8 +8,19 @@ const ALLOWED_MIME = new Set<string>([
   "image/jpeg",
 ]);
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB, mirrors functions/api/_omr.ts
-const DEFAULT_INTERVAL_MS = 2500;
-const DEFAULT_MAX_ATTEMPTS = 120; // ~5 minutes at 2.5s
+const DEFAULT_INTERVAL_MS = 3000;
+// A cold oemer run on a runner (model download + inference, plus a possible homr
+// fallback and pip installs) can take several minutes, so poll generously.
+const DEFAULT_MAX_ATTEMPTS = 300; // ~15 minutes at 3s
+
+// The runner writes this sentinel MusicXML to the result key when both engines
+// fail, so the browser stops polling. Detect it and surface a real error instead
+// of silently loading a near-empty score. Kept in sync with .github/workflows/omr.yml.
+const FAILURE_SENTINEL_RE = /name="omr-status"\s*>\s*failed/;
+
+export function isFailureSentinel(xml: string): boolean {
+  return FAILURE_SENTINEL_RE.test(xml);
+}
 
 type FetchFn = (
   input: string,
@@ -82,7 +93,13 @@ export async function pollOmrResult(
     );
 
     if (res.status === 200) {
-      return await res.text();
+      const xml = await res.text();
+      if (isFailureSentinel(xml)) {
+        throw new Error(
+          "Could not recognize any notes in this sheet. Try a clearer scan.",
+        );
+      }
+      return xml;
     }
     if (res.status === 503) {
       throw new Error("OMR is not configured");

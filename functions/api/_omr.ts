@@ -13,11 +13,17 @@ export type ValidationResult =
   | { ok: true }
   | { ok: false; status: number; error: string };
 
+// Strip any parameters (e.g. "; charset=binary") and normalize case so a valid
+// upload is not rejected just because the header carried extra parameters.
+export function normalizeMime(contentType: string): string {
+  return contentType.split(";")[0].trim().toLowerCase();
+}
+
 export function validateUpload(input: {
   contentType: string;
   size: number;
 }): ValidationResult {
-  if (!ALLOWED_MIME.has(input.contentType)) {
+  if (!ALLOWED_MIME.has(normalizeMime(input.contentType))) {
     return {
       ok: false,
       status: 415,

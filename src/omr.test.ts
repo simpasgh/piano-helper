@@ -4,7 +4,13 @@ import {
   requestOmr,
   pollOmrResult,
   convertSheetToMusicXml,
+  isFailureSentinel,
 } from "./omr";
+
+const FAILURE_SENTINEL =
+  '<score-partwise><identification><miscellaneous>' +
+  '<miscellaneous-field name="omr-status">failed</miscellaneous-field>' +
+  "</miscellaneous></identification></score-partwise>";
 
 // Minimal File-like stub: jsdom is not enabled, so we fake the bits omr.ts reads.
 function fakeFile(opts: { name?: string; type: string; size: number }): File {
@@ -119,6 +125,15 @@ describe("pollOmrResult", () => {
     ).rejects.toThrow("OMR is not configured");
   });
 
+  it("rejects when the runner returns the failure sentinel", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(textResponse(200, FAILURE_SENTINEL));
+    await expect(
+      pollOmrResult("job-123", { fetch: fetchMock as any, sleep: noSleep }),
+    ).rejects.toThrow(/could not recognize/i);
+  });
+
   it("times out after maxAttempts of pending", async () => {
     const fetchMock = vi.fn(async () =>
       jsonResponse(404, { status: "pending" }),
@@ -131,6 +146,21 @@ describe("pollOmrResult", () => {
       }),
     ).rejects.toThrow(/timed out/i);
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("isFailureSentinel", () => {
+  it("detects the runner failure marker", () => {
+    expect(isFailureSentinel(FAILURE_SENTINEL)).toBe(true);
+    expect(
+      isFailureSentinel('<miscellaneous-field name="omr-status"> failed </'),
+    ).toBe(true);
+  });
+
+  it("does not flag a normal score", () => {
+    expect(isFailureSentinel("<score-partwise><part/></score-partwise>")).toBe(
+      false,
+    );
   });
 });
 

@@ -141,6 +141,7 @@ async function importSheet(file: File): Promise<void> {
     await loadMusicXml(xml, file.name);
     setOmrStatus("");
   } catch (err) {
+    console.error("Sheet import failed:", err);
     setOmrStatus(`Conversion failed: ${(err as Error).message}`, true);
   }
 }
