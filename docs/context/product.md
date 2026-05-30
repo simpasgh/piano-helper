@@ -17,6 +17,22 @@ performance on an animated piano, with the score highlighted in sync. Make the f
    (open-source [oemer](https://github.com/BreezeWhite/oemer) or the klang.io API).
 4. **Correction UI** — review and fix OMR mistakes before playback.
 
+## Decisions
+
+### 2026-05-30 - Slice 3 (OMR) is async, not instant (issue #4 spike)
+
+- OMR ships as a job-based "upload now, ready in a short wait (minutes)" flow, not real-time
+  conversion. A free GitHub Actions job runs open-source oemer (homr fallback) to produce
+  MusicXML that feeds the existing visualizer. Real-time in-browser/serverless was ruled out:
+  no free tier can run the heavy ML pipeline in a request.
+- Product/UX: upload copy and flow must set the expectation of a short processing wait, not
+  instant. Show progress/job state. Slice 4 correction UI still applies since OMR accuracy on
+  real scans is imperfect.
+- Stays within the free/uncapped constraint: no paid OMR API (klang.io ruled out on
+  cost/caps, 20s demo then paid).
+- Known UX tradeoff: the wait is a friction point. Revisit if a faster free path (mature
+  browser-WASM OMR, better free tier) appears.
+
 ## Market (researched 2026-05-30)
 
 - The pieces exist **separately**: OMR tools (Scan2Notes/klang.io, PlayScore, ScanScore,

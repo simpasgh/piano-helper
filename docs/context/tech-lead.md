@@ -30,7 +30,34 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
-- **2026-05-30 — Input is MusicXML, not MIDI.** MIDI carries no real notation (no
+- **2026-05-30 - OMR runs in GitHub Actions, not in-browser or in a serverless function (SPIKE #4).**
+  Decision: an asynchronous, job-based pipeline. User uploads a PDF/PNG of sheet music; that
+  triggers a GitHub Actions workflow that runs the open-source engine **oemer** (homr is the
+  fallback engine) headless on the runner; the job outputs **MusicXML**, which is served back as
+  a build/job artifact and fed unchanged into the existing `extractScore` -> visualizer pipeline.
+  Real-time, in-request OMR is not feasible on any free tier, so we go offline/async on purpose.
+  - **Why GitHub Actions:** the repo is public, so Actions minutes are **unlimited and free**
+    (matches the hard constraint). Runners are full Linux VMs with enough CPU/RAM/disk to run
+    oemer's PyTorch/onnx pipeline and its multi-hundred-MB models; both oemer and homr already
+    ship a headless CLI/Docker path and emit MusicXML directly. Inference is minutes-scale, which
+    is fine for an async job but fatal for a request handler.
+  - **Rejected - client-side WASM OMR:** no reusable open-source browser OMR engine exists today.
+    QuickStave proves it is possible but is proprietary and trained its own TS model; via CheerpJ,
+    Audiveris took ~170s and oemer ~100-340s in-browser. Nothing free to adopt, and the runtime
+    cost lands on the user's device.
+  - **Rejected - Cloudflare Pages Functions / Workers (or similar free serverless):** free tier is
+    10ms CPU per request, 3 MB compressed bundle, 128 MB memory. oemer/homr need heavy ML runtimes,
+    hundreds of MB of models, and minutes of compute. Categorically impossible, and pushing usage
+    up would breach the uncapped rule.
+  - **Rejected - klang.io managed API:** free tier is a 20-second demo only, then a ticket-based
+    paid subscription. Paid and capped, so it violates the free/uncapped project rule outright.
+  - **Integration shape:** input PDF/PNG -> OMR job on a GitHub Actions runner (oemer; homr fallback)
+    -> MusicXML artifact -> existing `src/score.ts` `extractScore` -> visualizer. No change to the
+    sync invariant: OMR only produces the MusicXML that the current pipeline already consumes.
+    Local dev machine can run the same oemer CLI for fast iteration. (Engine wiring + the
+    upload/trigger UX are implementation work, not part of this spike.)
+
+- **2026-05-30 - Input is MusicXML, not MIDI.** MIDI carries no real notation (no
   beaming, enharmonic spelling, voicing), so readable sheet music can't be reconstructed
   from it. MusicXML is also exactly what the future OMR stage outputs. Visualizer was
   built first (MIDI) then switched to MusicXML once the sheet view was added.
