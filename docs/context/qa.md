@@ -4,6 +4,32 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-05-30: PR #73 (fix: tag hands by clef so muting the right hand works on bass-first
+  scores) -> **PASS** on prod (https://piano-helper.pages.dev, main @ be2ccaf). Drove live in
+  real Chromium (Playwright). Reproduced the reported bug class with a hand-built bass-first
+  MusicXML: `<staves>2</staves>`, staff 1 declared FIRST but bass (F clef, C3 whole note),
+  staff 2 the treble melody (G clef, C5/D5/E5/F5). Pre-fix this inverts hands; the fix derives
+  hand from clef.
+  - Load: "Bass-First QA / 5 notes", play enabled, `#hand-mutes` visible, no console/page
+    errors (only benign autoplay AudioContext warnings).
+  - Hand tagging correct despite bass-first order: falling-note caps show the C3 bass bar with
+    a DARK (left) cap and the C5-F5 melody with LIGHT (right) caps. This is the inverse of the
+    bug.
+  - Right-hand mute: button goes aria-pressed=true (left stays false); the RIGHT melody notes
+    ghost/dim while the LEFT bass Do stays bright. Unmute restores. Left-hand mute: the mirror,
+    only the LEFT bass Do ghosts. The audio gate keys off the same `note.hand`, so correct
+    ghosting == correct audio mute. The regression (muting silences the WRONG hand) is gone.
+  - NOTE on audio: real playback advancing + actual sound output cannot be verified headlessly
+    (autoplay-gated AudioContext, no speakers). Verified instead via the on-screen hand cue and
+    per-hand ghosting, which share the exact tagging the audio mute uses. Audio audibility
+    itself remains technically unverified by automation; the tagging it depends on is verified.
+  - Gotcha found: `#track-name` always contains a hidden "No file loaded" placeholder span even
+    after a load, so do NOT gate "loaded" on its text. Gate on `#play-btn` becoming enabled.
+    Also the canvas id is `#stage` (not note-canvas). Pixel-sampling the minified canvas for cap
+    luminance was unreliable (averaged into the bg gradient); the SCREENSHOT is the authoritative
+    read for hand-cap color and ghosting. Driver + bass-first fixture: /tmp/qa-pr73/ (transient).
+
+
 - 2026-05-30: PR #62 (#42 falling-note dedup + #43 approaching-key labels) -> **PASS** on
   prod (https://piano-helper.pages.dev, commit 3b8c6a6). Drove it live in real Chromium via
   Playwright (installed locally: `npm i -D playwright` + `npx playwright install chromium`;
