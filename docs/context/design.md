@@ -10,6 +10,321 @@ relevant section, dated.
 - Falling note bars have a soft glow (canvas `shadowBlur`); white-key notes are brighter
   than black-key notes.
 
+## Top toolbar redesign (issue #34)
+
+- **2026-05-30 - Spec to redesign the top toolbar: UX, color scheme, button styling.**
+  Vanilla HTML + CSS only, no framework, no new deps. Works within the existing
+  `.topbar` / `.topbar-rows` / `.controls` / `.transport` markup plus a few wrapper divs,
+  and within the shipped 900 / 720 / 380 breakpoints (do not break #33). The slider thumb
+  mechanics from #33 stay; only their colors may change. Goal: the bar reads as intentional
+  and grouped, primary actions stand out, secondary actions recede, and the play button is
+  the visual hero of the transport row.
+
+  **Direction in one line:** keep the violet brand anchor, but stop painting *every* control
+  as a filled violet pill. Only true primary actions get the filled gradient. Everything else
+  becomes a quiet "ghost" control (transparent fill, subtle border) so the bar gains hierarchy
+  and breathing room. This is the single change that fixes the "crammed, everything shouts"
+  problem.
+
+  ### 1. Color scheme / tokens (REQUIRED)
+
+  Keep `--accent: #b14bff` as the brand anchor (no reason to move it; the whole visualizer,
+  sliders, and glow system are tuned to it). Extend `:root` with a small, named token set so
+  the toolbar stops hardcoding `rgba(177,75,255,...)` and `#7a2fd6` inline. Exact block to
+  paste into `:root` (keep the four existing tokens, add the rest):
+
+  ```css
+  :root {
+    /* existing brand anchors (unchanged) */
+    --bg: #0a0712;
+    --accent: #b14bff;
+    --accent-glow: rgba(177, 75, 255, 0.6);
+    --text: #e8e0f5;
+
+    /* brand ramp */
+    --accent-deep: #7a2fd6;            /* darker gradient stop, already used inline */
+    --accent-gradient: linear-gradient(135deg, var(--accent-deep), var(--accent));
+
+    /* toolbar surfaces */
+    --bar-surface: rgba(18, 11, 30, 0.88);   /* the topbar background */
+    --bar-border: rgba(177, 75, 255, 0.22);  /* bottom hairline + group dividers */
+
+    /* ghost / secondary controls */
+    --ghost-bg: rgba(255, 255, 255, 0.04);
+    --ghost-bg-hover: rgba(177, 75, 255, 0.14);
+    --ghost-bg-active: rgba(177, 75, 255, 0.22);
+    --ghost-border: rgba(232, 224, 245, 0.18);
+    --ghost-border-hover: rgba(177, 75, 255, 0.55);
+
+    /* text tiers */
+    --text-muted: rgba(232, 224, 245, 0.6);  /* track name, tempo label, time readout */
+    --text-faint: rgba(232, 224, 245, 0.4);  /* disabled glyphs, sound status */
+
+    /* focus ring (one ring for every control) */
+    --focus-ring: #d9a6ff;                   /* lighter violet, clears AA on the dark bar */
+  }
+  ```
+
+  Rationale for the focus ring being a separate lighter token: `--accent` at `#b14bff` on the
+  near-black bar is fine, but a focus ring sitting *next to* a filled-accent button needs to be
+  distinguishable from the button itself, so `--focus-ring: #d9a6ff` (lighter) reads clearly
+  against both the dark surface and the violet fill. Use it everywhere instead of the current
+  `outline: 2px solid var(--accent)`.
+
+  ### 2. Visual grouping (REQUIRED)
+
+  Cluster `.controls` into three labeled-by-position groups with thin dividers between them.
+  Minimal DOM: wrap runs of existing children in `<div class="group">`. New ordering of the
+  `.controls` row, left to right:
+
+  - **Group: source/input** (`<div class="group group-source">`): the three `.file-btn`
+    labels (Load MusicXML, Scan sheet, From audio) in their current order.
+  - divider
+  - **Group: output** (`<div class="group group-output">`): `#export-btn`.
+  - divider
+  - **Group: settings** (`<div class="group group-settings">`): `#names-btn` toggle, then the
+    `.tempo` group.
+  - then the flexible status text `#track-name` and `#sound-status` (NOT in a group, they sit
+    after a `margin-left: auto` push so they trail to the right and can truncate).
+
+  `.transport` stays its own row (the second `.topbar-rows` child) and is itself the fourth
+  conceptual group (play/step/scrub); it needs no inner sub-groups.
+
+  Group + divider CSS:
+
+  ```css
+  .group {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  /* vertical hairline divider between groups, drawn as a flex child */
+  .group + .group::before {
+    content: "";
+    align-self: center;
+    width: 1px;
+    height: 1.4rem;
+    margin: 0 0.25rem;
+    background: var(--bar-border);
+  }
+  /* push status text to the right so groups stay left-packed */
+  #track-name { margin-left: auto; }
+  ```
+
+  `.controls { gap }` drops from `0.75rem` to `0.6rem` because the dividers now carry the
+  visual separation that the wide gap used to fake. Within a group, controls sit at `0.5rem`
+  gap so they read as a cluster; the divider + its `0.5rem` margins give a clear ~1rem visual
+  break between groups without a big empty gap.
+
+  Note: the `.group + .group::before` divider approach means the divider belongs to the *second*
+  group and collapses cleanly when a group wraps to a new line (the pseudo-element wraps with
+  its group). This is what makes it survive the responsive breakpoints (see section 5).
+
+  ### 3. Button hierarchy + states (REQUIRED)
+
+  Two tiers. The shared `button, .file-btn` gradient rule today makes everything tier-1, which
+  is the core problem. Split it:
+
+  **Tier 1, PRIMARY (filled gradient, prominent).** Only:
+  - the three `.file-btn` loaders (loading a score is the main entry action), and
+  - `#play-btn` (the primary transport action, slightly larger than the rest).
+
+  Primary styling:
+  ```css
+  /* primary = file loaders + play */
+  .file-btn,
+  #play-btn {
+    background: var(--accent-gradient);
+    color: #ffffff;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 0.5rem 1rem;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: filter 0.15s ease, box-shadow 0.15s ease,
+                transform 0.05s ease, opacity 0.15s ease;
+  }
+  .file-btn:hover,
+  #play-btn:hover:not(:disabled) {
+    filter: brightness(1.12);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08) inset,
+                0 2px 10px rgba(122, 47, 214, 0.45);
+  }
+  .file-btn:active,
+  #play-btn:active:not(:disabled) {
+    filter: brightness(0.95);
+    transform: translateY(1px);
+    box-shadow: none;
+  }
+  #play-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  /* play is the hero of the transport: a touch larger + a resting glow */
+  #play-btn {
+    min-width: 5rem;
+    padding: 0.5rem 1.4rem;
+    box-shadow: 0 0 14px var(--accent-glow);
+  }
+  ```
+
+  **Tier 2, SECONDARY / GHOST (transparent fill + border).** Everything else: `#export-btn`,
+  `.toggle` (Names), and `.step-btn` (prev/next). They recede until hovered.
+
+  ```css
+  /* secondary / ghost = export, names toggle, step buttons */
+  #export-btn,
+  .toggle,
+  .step-btn {
+    background: var(--ghost-bg);
+    color: var(--text);
+    border: 1px solid var(--ghost-border);
+    border-radius: 8px;
+    padding: 0.45rem 0.9rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease,
+                color 0.15s ease, transform 0.05s ease, opacity 0.15s ease;
+  }
+  #export-btn:hover:not(:disabled),
+  .toggle:hover:not(:disabled),
+  .step-btn:hover:not(:disabled) {
+    background: var(--ghost-bg-hover);
+    border-color: var(--ghost-border-hover);
+    color: #ffffff;
+  }
+  #export-btn:active:not(:disabled),
+  .toggle:active:not(:disabled),
+  .step-btn:active:not(:disabled) {
+    background: var(--ghost-bg-active);
+    transform: translateY(1px);
+  }
+  #export-btn:disabled,
+  .toggle:disabled,
+  .step-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  ```
+
+  **Toggle (`#names-btn`) specifics.** It stays ghost (it is a setting, not an action). Keep it
+  slightly more compact than other ghost buttons to read as a state pill: override to
+  `padding: 0.4rem 0.75rem; font-size: 0.8rem`. The cycling label (`Names: Solfege` etc) is the
+  state indicator; no extra active-state color needed beyond the ghost `:active`.
+
+  **Step buttons (`.step-btn`).** Keep the existing `min-width: 2.4rem` and the centered glyph;
+  they inherit the ghost styling above. Because they are now ghost (not filled), prev/next read
+  as quiet satellites around the filled Play, which is exactly the intended transport hierarchy.
+
+  **Focus for ALL buttons (REQUIRED, replaces the scattered `outline: var(--accent)`):**
+  ```css
+  button:focus-visible,
+  .file-btn:focus-visible,
+  .toggle:focus-visible,
+  .step-btn:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+  ```
+  Apply the same `--focus-ring` to the slider/readout focus states (replace their
+  `outline: 2px solid var(--accent)` with `var(--focus-ring)`), so the whole bar has one
+  consistent ring color. Keep `outline-offset: 3px` on the sliders (they need the extra gap so
+  the ring clears the thumb glow).
+
+  **`#play-btn` text/icon (NICE-TO-HAVE).** v1 keeps the text label "Play" / "Pause". A play
+  triangle glyph (`&#9654;`) + the word, or icon-only, is a nice follow-up but needs the
+  Tech Lead's label-swap logic touched; not required for this pass.
+
+  ### 4. Hierarchy + polish details (REQUIRED unless marked)
+
+  - **Bar surface + depth.** `.topbar { background: var(--bar-surface) }`,
+    `border-bottom: 1px solid var(--bar-border)`, and add a soft downward shadow so the bar
+    floats above the light sheet panel: `box-shadow: 0 1px 0 rgba(255,255,255,0.03) inset,
+    0 6px 18px rgba(0,0,0,0.35)`. The inset top highlight is a 1px lit edge that makes the bar
+    read as a raised surface, not a flat block. Keep `z-index: 2`.
+  - **Backdrop blur (NICE-TO-HAVE).** The bar is static (not redrawn per frame), so a
+    `backdrop-filter: blur(8px)` is safe and makes the semi-transparent surface feel like
+    frosted glass over the stage. Add it with a graceful fallback (the solid-ish
+    `--bar-surface` already looks fine without it). Pair with
+    `-webkit-backdrop-filter: blur(8px)`. Skip if you want the focused pass; purely cosmetic.
+  - **Bar padding / height.** Keep `padding: 0.75rem 1.25rem` and the two-row stack. Bump
+    `.topbar-rows { gap: 0.6rem }` (unchanged) but tighten `.controls { gap: 0.6rem }` per
+    section 2. No fixed bar height; it stays content-sized so wrapping still works.
+  - **`<h1>` "Piano Helper" treatment.** Make it a quiet wordmark, not a heading that competes
+    with the buttons. Keep `font-size: 1.1rem; font-weight: 600` but set
+    `color: var(--accent)` with a faint glow `text-shadow: 0 0 10px var(--accent-glow)` and
+    `letter-spacing: 0.04em`. This turns the title into the one branded violet element in the
+    text layer (since the buttons are now mostly ghost), so the violet identity still leads the
+    bar. It is already hidden at <=720px (#33), so it costs nothing on phones.
+  - **Dividers.** Use the `--bar-border` hairline from section 2 (1px, `1.4rem` tall, centered).
+    Do not use full-height dividers; the short centered rule looks more intentional and matches
+    the bar's compact feel.
+  - **Tempo + readout colors.** Point `.tempo-label` and `.track-name` at `--text-muted`,
+    `.sound-status` and `.time-readout`'s dimmed text at `--text-faint` (replace the ad-hoc
+    `opacity` values where convenient; opacity-on-text is fine to keep, the tokens just unify
+    the muted greys). The slider tracks keep their existing
+    `linear-gradient(90deg, var(--accent-deep), var(--accent))` (now expressible via tokens).
+
+  ### 5. Responsive continuity (REQUIRED)
+
+  The redesign degrades cleanly through the shipped breakpoints; only small additions needed.
+
+  - **>900px (desktop).** Full layout: four groups with dividers, status text trailing right via
+    `margin-left: auto`. Play is the larger filled hero in the transport row.
+  - **900px (tablet).** Existing block tightens `.topbar` gap/padding. Groups + dividers stay;
+    nothing to change. Confirm `.controls { gap: 0.6rem }` already set here (it is); the divider
+    margins keep groups distinct at the tighter gap.
+  - **720px (phone).** `<h1>`, `#track-name`, `.sound-status` already hide (#33). Because the
+    dividers are `.group + .group::before` pseudo-elements that wrap WITH their group, they keep
+    separating groups even as `.controls` wraps to multiple lines. **REQUIRED addition:** when a
+    group wraps to its own line the leading divider can look orphaned at a line start, so hide
+    dividers at this breakpoint for cleanliness:
+    ```css
+    @media (max-width: 720px) {
+      .group + .group::before { display: none; }
+      .group { gap: 0.5rem; }
+    }
+    ```
+    Group `gap` plus the existing wrap gives enough separation on phone without the rules. Touch
+    sizing from #33 is unaffected: the `min-height: 44px` rules already target `button`,
+    `.file-btn`, `.toggle`, `.step-btn`, which still match after the tier split (the ghost
+    buttons are still `button`/`.toggle`/`.step-btn`). The `#play-btn` `min-width: 5rem` sits
+    comfortably inside the 44px-tall wrapped transport row. Verify the ghost border is still
+    visible at 44px (it is; border is unaffected by min-height).
+  - **380px (narrow phone).** No toolbar-specific change needed beyond #33's existing rules; the
+    three loaders wrap two-per-row as before, now as filled primary pills, and the settings group
+    (Names + tempo) sits below. Ghost buttons and the filled loaders both keep their 44px targets.
+
+  **One contrast check to honor:** the ghost buttons rely on a 1px `--ghost-border` at
+  `rgba(232,224,245,0.18)` for their resting affordance. On the `--bar-surface` that border is
+  faint by design (ghost), but the button TEXT is full `--text` (`#e8e0f5`) which clears AA on
+  the dark bar, so the control is never ambiguous: text carries legibility, border carries
+  "this is clickable", hover/focus make it unmistakable. Do not drop the resting border or the
+  ghost buttons become invisible flat text.
+
+  ### REQUIRED checklist (ship in this order)
+
+  1. Paste the extended `:root` token block (section 1).
+  2. Wrap `.controls` children into `.group` divs (source / output / settings) and add
+     `margin-left: auto` to `#track-name`; add the `.group` + `.group + .group::before` divider
+     CSS (section 2). Drop `.controls` gap to `0.6rem`.
+  3. Split the shared `button, .file-btn` rule into PRIMARY (`.file-btn`, `#play-btn`) and
+     GHOST (`#export-btn`, `.toggle`, `.step-btn`) with the four states each (section 3).
+  4. Make `#play-btn` the hero: `min-width: 5rem; padding: 0.5rem 1.4rem` + resting glow.
+  5. Add the unified `:focus-visible` ring using `--focus-ring`; swap the sliders' and tempo
+     readout's `outline ... var(--accent)` to `var(--focus-ring)` (keep their `offset: 3px`).
+  6. Restyle `.topbar`: `--bar-surface` bg, `--bar-border` bottom, the depth `box-shadow`.
+  7. Restyle `<h1>` as the violet wordmark (accent color + faint glow + letter-spacing).
+  8. Point muted text (`.tempo-label`, `.track-name`, `.sound-status`, `.time-readout`) at the
+     `--text-muted` / `--text-faint` tokens.
+  9. At <=720px: `.group + .group::before { display: none }`.
+
+  NICE-TO-HAVE (defer for a focused pass): `backdrop-filter: blur(8px)` on the bar; a play
+  triangle glyph on `#play-btn`; converting the remaining inline slider gradient hex to the
+  `--accent-deep` / `--accent-gradient` tokens (cosmetic refactor, no visual change).
+
 ## Visualizer color + polish (issue #12)
 
 - **2026-05-30 — Beautify the piano + falling-notes view: pitch-class palette + bar/key/
