@@ -1,0 +1,24 @@
+[Unit]
+Description=Piano Helper OMR worker (polls R2 uploads/, runs oemer/homr, writes results/)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust User and paths to match where you cloned the repo on the VM.
+User=ubuntu
+WorkingDirectory=/opt/piano-helper/omr-worker
+# The four R2 S3 credentials plus the optional poll interval live in this file, owned
+# by root and chmod 600, NOT in the repo. See README.md for its contents.
+EnvironmentFile=/etc/piano-helper-omr.env
+ExecStart=/opt/piano-helper/omr-worker/.venv/bin/python /opt/piano-helper/omr-worker/worker.py
+Restart=always
+RestartSec=5
+# Give a cold oemer run (model download + inference) plenty of room.
+TimeoutStopSec=30
+# Modest hardening; the worker only needs outbound network and its own tree.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

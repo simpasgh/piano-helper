@@ -30,7 +30,52 @@ Accounts available:
 
 ## CI/CD
 
-- **2026-05-30 - OMR runner workflow (issue #5) shipped: `.github/workflows/omr.yml`.** Trigger: `repository_dispatch` event_type `omr-job`, fired by the `/api/omr` Pages Function with `client_payload { jobId, ext }`. Steps: validate jobId against a strict UUID regex and ext against an allowlist (png/jpg/jpeg/pdf) BEFORE using either in an S3 key or filename (guards key/path injection from the untrusted payload, which arrives via `env:` vars and is referenced as `"$VAR"`, never interpolated into a script body); install `libgl1`+`libglib2.0-0` (opencv for oemer) and `poppler-utils` (pdftoppm for PDF page 1 -> PNG); `pip install oemer`; pull `uploads/<jobId>` from R2; run `oemer <img> -o out` (model weights download on first run, 25-min step timeout); push `results/<jobId>.musicxml` back. An `if: failure()` step writes `results/<jobId>.error` so the frontend can surface a 422. R2 access uses the aws CLI with `--endpoint-url $R2_S3_ENDPOINT` and the `R2_*` Actions secrets. **R2 + aws CLI v2 checksum gotcha:** recent aws CLI v2 adds request/response integrity checksums R2 rejects, so the job sets `AWS_REQUEST_CHECKSUM_CALCULATION=when_required` and `AWS_RESPONSE_CHECKSUM_VALIDATION=when_required` and passes `--checksum-algorithm CRC32` on each `cp`. Public-repo Actions minutes are unlimited, so heavy ML OMR runs here, not in the Function.
+- **2026-05-30 - OMR compute moved OFF GitHub Actions to an always-on R2-polling worker (issue #5).**
+  Reason: running OMR on Actions runners uses Actions as the app's runtime compute backend, which
+  breaks GitHub's Actions usage policy and risks account suspension. The "public repo = unlimited
+  minutes" point from the earlier spike does not make this allowed. `.github/workflows/omr.yml` was
+  DELETED. New backend: an always-on Python worker (`omr-worker/`, committed in the repo). It is
+  host-agnostic; the plan was an Oracle Cloud Always Free `VM.Standard.A1.Flex` (Ubuntu 22.04 ARM)
+  under systemd (`omr-worker.service`, restart on failure), but Oracle Madrid was capacity-exhausted,
+  so it currently runs on the owner's Mac via launchd (see the "OMR worker deployed on the Mac" entry
+  below). Cost stays $0 either way (free host + the existing free Cloudflare R2).
+  - **Trigger is now "the worker polls R2 `uploads/*`"** (default every 5s, env `OMR_POLL_SECONDS`).
+    There is NO `repository_dispatch` and NO GitHub PAT anymore. The Pages Function `POST /api/omr`
+    only validates and writes the upload to R2 and returns 202 `{jobId}`; it notifies nobody.
+  - **R2 transport contract unchanged:** input `uploads/<jobId>`, output
+    `results/<jobId>.musicxml`, plus the failure-sentinel MusicXML when both engines fail. R2 bucket
+    is still `piano-helper-omr` with the `OMR_BUCKET` Pages binding (declared in-code in
+    `wrangler.jsonc`, so no manual dashboard binding step is needed).
+  - **Credential moves:** the four R2 S3 creds (`R2_S3_ENDPOINT`, `R2_ACCESS_KEY_ID`,
+    `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`) move from GitHub Actions secrets to the worker host's env
+    (Linux: root-owned `/etc/piano-helper-omr.env`, chmod 600, loaded by the systemd unit). The Pages
+    Function secret `GITHUB_DISPATCH_TOKEN` and var `GITHUB_REPOSITORY` are now UNUSED and should be
+    removed from the Pages project; the GitHub fine-grained PAT can be revoked.
+  - **Runbook** (install deps `poppler-utils python3 python3-venv`, venv + `pip install -r
+    requirements.txt`; set the four R2 env vars; run the worker under systemd or launchd) lives in
+    `omr-worker/README.md`, with a keep-alive note for the Oracle path: Oracle reclaims Always Free
+    VMs that sit under ~20% CPU over a 7-day window, so a tiny periodic CPU nudge keeps it alive.
+  - The "OMR runner workflow shipped", "OMR Actions workflow built", and "OMR trigger ...
+    repository_dispatch" entries below are SUPERSEDED by this one (kept for history).
+
+- **2026-05-30 - OMR runner workflow (issue #5) shipped: `.github/workflows/omr.yml`. SUPERSEDED (see above), the workflow was deleted.** Trigger: `repository_dispatch` event_type `omr-job`, fired by the `/api/omr` Pages Function with `client_payload { jobId, ext }`. Steps: validate jobId against a strict UUID regex and ext against an allowlist (png/jpg/jpeg/pdf) BEFORE using either in an S3 key or filename (guards key/path injection from the untrusted payload, which arrives via `env:` vars and is referenced as `"$VAR"`, never interpolated into a script body); install `libgl1`+`libglib2.0-0` (opencv for oemer) and `poppler-utils` (pdftoppm for PDF page 1 -> PNG); `pip install oemer`; pull `uploads/<jobId>` from R2; run `oemer <img> -o out` (model weights download on first run, 25-min step timeout); push `results/<jobId>.musicxml` back. An `if: failure()` step writes `results/<jobId>.error` so the frontend can surface a 422. R2 access uses the aws CLI with `--endpoint-url $R2_S3_ENDPOINT` and the `R2_*` Actions secrets. **R2 + aws CLI v2 checksum gotcha:** recent aws CLI v2 adds request/response integrity checksums R2 rejects, so the job sets `AWS_REQUEST_CHECKSUM_CALCULATION=when_required` and `AWS_RESPONSE_CHECKSUM_VALIDATION=when_required` and passes `--checksum-algorithm CRC32` on each `cp`. Public-repo Actions minutes are unlimited, so heavy ML OMR runs here, not in the Function.
+
+- **2026-05-30 - OMR Actions workflow built + R2 bucket `piano-helper-omr` created (issue #5).**
+  Added `.github/workflows/omr.yml`: triggers ONLY on `repository_dispatch` (event_type
+  `omr-job`, fired by the Pages Function) and manual `workflow_dispatch` (a `jobId` input
+  for testing). No `pull_request`/`push` trigger, so it can never run on a PR or on a push
+  to `main` and cannot fail a required check or turn `main` red before the secrets exist.
+  `concurrency: omr-<jobId>` coalesces duplicate dispatches; `permissions: contents: read`.
+  Steps: checkout -> validate jobId (rejects anything outside `[A-Za-z0-9_-]`) -> setup
+  Python 3.10 -> install `poppler-utils` + `pip install oemer` -> `aws s3 cp` the upload
+  from `s3://$R2_BUCKET/uploads/<jobId>` (AWS CLI is preinstalled on `ubuntu-latest`) ->
+  sniff MIME and rasterize PDFs first page with `pdftoppm -png -r 300` -> run oemer ->
+  homr fallback (`pip install homr`) only if oemer fails -> if BOTH fail, write a minimal
+  valid `score-partwise` **error sentinel** MusicXML (work-title "OMR failed",
+  `omr-status=failed`) so the browser poll terminates instead of hanging -> `aws s3 cp`
+  `result.musicxml` to `s3://$R2_BUCKET/results/<jobId>.musicxml` with
+  `--content-type application/vnd.recordare.musicxml+xml`. **Something always lands at the
+  result key.**
 
 - **2026-05-30 - Deploy must omit the positional output dir.** Adding `wrangler.jsonc` with `pages_build_output_dir: "dist"` (needed to declare the `OMR_BUCKET` R2 binding on the Pages deployment) changes the deploy command: `wrangler pages deploy` now reads the output dir, R2 binding, and bundles `functions/` from config. Per Cloudflare docs, passing a positional dir (`pages deploy dist`) bypasses that config, so `deploy.yml` was changed to `pages deploy --project-name=... --branch=main` (no `dist`). CI (`ci.yml`) gained a `npx tsc -p functions/tsconfig.json` step so Function type regressions fail the PR (the root `tsc` only compiles `src/`).
 
@@ -87,3 +132,25 @@ Repo **secrets**: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`.
 - [x] Repo secret `CLOUDFLARE_API_TOKEN` set (dedicated `piano-helper-deploy` token,
       Account > Cloudflare Pages > Edit; separate from the todeo/finpilot tokens).
 - [x] Repo variable `DEPLOY_ENABLED=true` (CI deploy + prod smoke test verified green).
+
+### OMR (issue #5) setup status
+
+Architecture as of 2026-05-30: the worker polls R2; no Actions, no PAT.
+
+- [x] R2 bucket `piano-helper-omr` created (`wrangler r2 bucket create`).
+- [x] `.github/workflows/omr.yml` DELETED (OMR no longer runs on Actions; ToS reasons).
+- [x] Worker committed at `omr-worker/` (`worker.py`, `omr-worker.service`,
+      `requirements.txt`, `README.md` runbook).
+- [ ] Provision the worker host (Oracle Always Free ARM VM was the plan; currently the
+      owner's Mac via launchd) and install deps per `omr-worker/README.md`. (manual)
+- [ ] Mint R2 S3 API token (Object Read & Write, bucket `piano-helper-omr`). (manual)
+- [ ] On the host, set the four R2 env vars (Linux: `/etc/piano-helper-omr.env`, chmod 600):
+      `R2_S3_ENDPOINT`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET=piano-helper-omr`.
+- [ ] Run the worker (Linux: `systemctl enable --now omr-worker.service`; macOS: launchd).
+- [ ] On the Oracle path, add the idle keep-alive (Oracle reclaims idle Always Free VMs).
+- [ ] Bind on Pages project: R2 binding `OMR_BUCKET` -> `piano-helper-omr` (also declared in
+      `wrangler.jsonc`). (app + infra)
+- [ ] Remove the now-unused Pages secret `GITHUB_DISPATCH_TOKEN` and var
+      `GITHUB_REPOSITORY`; revoke the GitHub fine-grained PAT.
+- [ ] End-to-end smoke: upload to `uploads/<jobId>` (UUID), confirm the worker writes
+      `results/<jobId>.musicxml` and deletes the upload.

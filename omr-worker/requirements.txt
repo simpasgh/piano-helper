@@ -1,0 +1,13 @@
+# OMR worker Python dependencies. Install into a venv:  pip install -r requirements.txt
+# NOTE: poppler-utils (the pdftoppm binary) is an OS package, not pip. Install it with
+#   sudo apt-get install -y poppler-utils
+# See README.md.
+
+# Primary OMR engine (PyTorch/onnx based). Pulls in its own heavy ML stack.
+oemer
+
+# Fallback OMR engine, tried only when oemer produces nothing.
+homr
+
+# S3-compatible client used to talk to Cloudflare R2.
+boto3
