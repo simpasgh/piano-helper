@@ -30,6 +30,19 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-30 - Accidental spelling is LOST at `halfTone -> midi` (review #40).** Documented
+  during the #40 accidentals review (design.md has the full UX writeup + follow-ups). Root cause for
+  any future "show flats / enharmonic spelling" work: `extractScore` (`src/score.ts:28`) and the sheet
+  overlay (`src/sheet-overlay.ts:53`) both reduce each note to `note.halfTone + 12`, discarding OSMD's
+  notation spelling (the MusicXML `<step>` + `<alter>`, e.g. Db vs C#). Every label downstream then
+  recomputes the name from MIDI via a fixed ALWAYS-SHARP array (`LETTER_CLASSES` / `SOLFEGE_CLASSES` in
+  `src/piano.ts:92-95`), so flats never appear (no `flat`/`.alter`/`♭` anywhere in `src/`). To honor a
+  score's flats, carry the spelling (OSMD `note.Pitch` `Accidental`/`AccidentalEnum`, or step+alter)
+  alongside `midi` on `VisNote` from those two extraction points and have the label use it when present,
+  falling back to the pitch-class array only when absent (audio-transcribed scores have no spelling).
+  The label fit (#39), hue (#12), and black-key lane geometry are all MIDI-driven and correct already;
+  only the printed NAME needs the spelling. No code changed in #40 (docs-only spike).
+
 - **2026-05-30 - Muting a hand now ghosts its falling notes (#54), not audio-only.** #37 shipped a
   mute that only skipped a hand's Tone.Part triggers, so muting had zero on-screen effect; with sound
   off it read as a dead button. Fix: the visualizer learns the mute state via `setMutedHands({left,
