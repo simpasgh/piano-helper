@@ -15,6 +15,17 @@ export interface KeyGeometry {
   black: boolean;
 }
 
+// Fraction of a white key's width that a falling white-note bar occupies, so the bar
+// sits inside its lane with a small gutter on each side. Black-note bars fill their
+// (already narrow) key width. Any contact highlight at the keybed must stay within this
+// width, never the full key width, or it reads as a box sticking out past the note
+// (issue #38).
+export const WHITE_BAR_WIDTH_RATIO = 0.82;
+
+export function noteBarWidth(keyWidth: number, black: boolean): number {
+  return keyWidth * (black ? 1 : WHITE_BAR_WIDTH_RATIO);
+}
+
 // Builds left-edge x positions and widths for the keys in `[firstMidi, lastMidi]`,
 // scaled to `totalWidth`. White keys tile evenly; black keys are narrower and straddle
 // the gap between whites. The range defaults to the full 88-key piano; narrow screens

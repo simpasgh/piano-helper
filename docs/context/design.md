@@ -785,6 +785,20 @@ relevant section, dated.
 
 ## Contact glow + label move (issue #27)
 
+- **2026-05-30 - Note entry must be clean: NO element wider than the note at the keybed (#38).**
+  Follow-up correction to #27. The landing bloom that #27 kept (a soft hue pool the full key width,
+  meant to make the KEY read as lit) was visually reading as a separate rectangular strip sticking
+  out past the note on both sides at the entry point, which looked like a leftover box artifact. The
+  PM/design call: that wider-than-note pool is not worth the artifact it creates. Remove it. The
+  single contact cue at the keybed is now the #27 glow STROKE alone, which traces the note's own
+  rounded-rect outline and so is exactly the note's width, never wider. The "key looks lit" sense is
+  carried by the active-key hue fill on the keyboard itself (the key face turns the note's hue), which
+  already exists and is a cleaner signal than a bloom overhanging the lane. Rule going forward: any
+  highlight drawn at the note's point of entry into the keyboard must be constrained to the note's
+  width (use the bar width, not the full key width). The full-keybed resting glow strip is fine: it is
+  an ambient band across the whole keyboard, not a per-note box, so it never reads as one note's
+  highlight being too wide.
+
 - **2026-05-30 — Replace the note-name "label box" on the contact point with a top-anchored
   light label plus a glow-on-contact border.** Canvas-2D-ready spec for `drawFallingNotes`
   / `drawLandingBloom` in `src/visualizer.ts`. No new deps, no DOM.
