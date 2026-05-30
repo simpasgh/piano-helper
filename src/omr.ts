@@ -78,7 +78,18 @@ export async function pollOmrResult(
       }
       return xml;
     }
-    // 404 (pending) or any transient status: keep waiting until timeout.
+    // Fail fast on a definitive error (bad jobId, OMR not configured) instead of
+    // polling uselessly for the full timeout. 404 is "pending"; other 5xx are
+    // treated as transient and retried.
+    if (res.status !== 404 && res.status >= 400 && res.status < 500) {
+      const message = await readError(res, "Scan failed. Please try again.");
+      throw new Error(message);
+    }
+    if (res.status === 503) {
+      const message = await readError(res, "OMR is not available right now.");
+      throw new Error(message);
+    }
+    // 404 (pending) or a transient 5xx: keep waiting until timeout.
     if (now() - start >= timeoutMs) {
       throw new Error("Scan timed out. Please try again.");
     }
