@@ -1,5 +1,6 @@
 import {
   buildKeyLayout,
+  fitBarLabel,
   isBlackKey,
   midiToLabel,
   midiToBarLabel,
@@ -130,8 +131,10 @@ export class Visualizer {
   ): void {
     const { ctx } = this;
     // Geometry of bars worth labeling, collected during the fill pass and drawn
-    // after, so the bar glow (shadowBlur 18) never bleeds into the glyphs.
-    const labels: { x: number; y: number; text: string }[] = [];
+    // after, so the bar glow (shadowBlur 18) never bleeds into the glyphs. Each label
+    // carries its own fitted font size so short/narrow bars get a smaller name that
+    // stays within the bar's bounds (issue #39).
+    const labels: { x: number; y: number; text: string; fontSize: number }[] = [];
 
     for (const note of this.notes) {
       const delta = note.time - currentTime;
@@ -215,30 +218,37 @@ export class Visualizer {
       }
 
       if (this.labelMode !== "off") {
-        // Name rides near the TOP of the bar so it never covers the contact point at the
-        // bottom of the lane. Active key's bar is always labeled even if narrow; the
-        // player needs it now.
-        const fits = w >= 16 && barHeight >= 22;
-        if (fits || active.has(note.midi)) {
+        // The name must always FIT the bar (issue #39): scale the font to the bar size
+        // and only label when a legible name fits within both the width and the height.
+        // No forced label on tiny bars (that produced the detached/oversized-pill look);
+        // when a bar is too small, the name is omitted and position + the lit key carry
+        // the note. The name is centered INSIDE the bar so it never floats below a short
+        // bar or spills past a narrow one.
+        const text = midiToBarLabel(note.midi, this.labelMode);
+        const fit = fitBarLabel(w, barHeight, text.length);
+        if (fit.show) {
           labels.push({
             x: x + w / 2,
-            y: top + 14,
-            text: midiToBarLabel(note.midi, this.labelMode),
+            y: top + barHeight / 2,
+            text,
+            fontSize: fit.fontSize,
           });
         }
       }
     }
 
     // Reset glow before text, draw text, then reset again so nothing else inherits it.
+    // Each label sets its own fitted font size; baseline is middle so the centered name
+    // sits within the bar's vertical bounds even when the bar is only a few px tall.
     ctx.shadowBlur = 0;
     if (labels.length > 0) {
-      ctx.font = "600 11px system-ui";
       ctx.textAlign = "center";
-      ctx.textBaseline = "alphabetic";
+      ctx.textBaseline = "middle";
       ctx.fillStyle = "rgba(255,255,255,0.82)";
       ctx.shadowColor = "rgba(0,0,0,0.45)";
       ctx.shadowBlur = 2;
       for (const l of labels) {
+        ctx.font = `600 ${l.fontSize}px system-ui`;
         ctx.fillText(l.text, l.x, l.y);
       }
       ctx.shadowBlur = 0;

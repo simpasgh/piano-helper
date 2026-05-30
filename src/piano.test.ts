@@ -9,6 +9,11 @@ import {
   midiToBarLabel,
   handFromStaffIndex,
   noteBarWidth,
+  fitBarLabel,
+  MIN_LABEL_PX,
+  MAX_LABEL_PX,
+  LABEL_CHAR_WIDTH_RATIO,
+  LABEL_GUTTER,
 } from "./piano";
 
 describe("isBlackKey", () => {
@@ -206,6 +211,83 @@ describe("noteBarWidth", () => {
         // sides, so it is contained within the key and never wider than the note.
         const gutter = (keyWidth - w) / 2;
         expect(gutter).toBeGreaterThanOrEqual(0);
+      }
+    }
+  });
+});
+
+describe("fitBarLabel (issue #39: name must fit the bar)", () => {
+  // Helper: the px width the helper assumes a name of `chars` occupies at `size`.
+  const estWidth = (chars: number, size: number) =>
+    chars * size * LABEL_CHAR_WIDTH_RATIO + 2 * LABEL_GUTTER;
+
+  it("labels a normal bar at a capped, legible size", () => {
+    // A tall, wide bar (a held note) gets the max size, never larger than the old look.
+    const fit = fitBarLabel(40, 60, 2); // "Re"
+    expect(fit.show).toBe(true);
+    expect(fit.fontSize).toBe(MAX_LABEL_PX);
+  });
+
+  it("never grows the font past the MAX ceiling on a huge bar", () => {
+    const fit = fitBarLabel(200, 400, 1);
+    expect(fit.fontSize).toBe(MAX_LABEL_PX);
+  });
+
+  it("scales the font down to a short bar's height instead of overflowing", () => {
+    // A brief note ~18px tall: height ratio 0.55 -> ~9px, still >= MIN, so it shows small.
+    const fit = fitBarLabel(40, 18, 2);
+    expect(fit.show).toBe(true);
+    expect(fit.fontSize).toBeLessThan(MAX_LABEL_PX);
+    expect(fit.fontSize).toBeGreaterThanOrEqual(MIN_LABEL_PX);
+  });
+
+  it("omits the label on a very short (staccato) bar that cannot seat a legible glyph", () => {
+    // A ~6px bar: 6 * 0.55 = 3.3 -> floor 3 < MIN_LABEL_PX (8) -> omitted.
+    const fit = fitBarLabel(40, 6, 2);
+    expect(fit.show).toBe(false);
+  });
+
+  it("shrinks to fit a narrow black-key bar instead of spilling sideways", () => {
+    // Narrow bar (13px wide, the #33 small-screen black-key case), tall enough in height.
+    const fit = fitBarLabel(13, 60, 2);
+    if (fit.show) {
+      // Whatever size it chose, the estimated name width must fit within the bar width.
+      expect(estWidth(2, fit.fontSize)).toBeLessThanOrEqual(13);
+    }
+    // And it never claims to show below the legibility floor.
+    if (fit.show) expect(fit.fontSize).toBeGreaterThanOrEqual(MIN_LABEL_PX);
+  });
+
+  it("omits when even a single MIN-size glyph cannot fit the bar width", () => {
+    // A sliver 6px wide cannot hold a MIN_LABEL_PX glyph + gutters -> omit.
+    const fit = fitBarLabel(6, 60, 1);
+    expect(fit.show).toBe(false);
+  });
+
+  it("handles a long letters+octave name (e.g. Sol#4 / C#4) without overflowing", () => {
+    // 4 chars on a moderately wide, tall bar: shows, and the fitted width stays in bounds.
+    const width = 50;
+    const fit = fitBarLabel(width, 60, 4);
+    expect(fit.show).toBe(true);
+    expect(estWidth(4, fit.fontSize)).toBeLessThanOrEqual(width);
+  });
+
+  it("treats an empty name as nothing to show", () => {
+    expect(fitBarLabel(40, 60, 0).show).toBe(false);
+  });
+
+  it("never returns a shown label whose name exceeds the bar bounds (fuzz over a chord)", () => {
+    // Sweep plausible bar sizes and name lengths; any shown label must fit width.
+    for (let w = 6; w <= 60; w += 2) {
+      for (let h = 4; h <= 80; h += 4) {
+        for (let chars = 1; chars <= 4; chars++) {
+          const fit = fitBarLabel(w, h, chars);
+          if (fit.show) {
+            expect(fit.fontSize).toBeGreaterThanOrEqual(MIN_LABEL_PX);
+            expect(fit.fontSize).toBeLessThanOrEqual(MAX_LABEL_PX);
+            expect(estWidth(chars, fit.fontSize)).toBeLessThanOrEqual(w + 1e-9);
+          }
+        }
       }
     }
   });
