@@ -11,15 +11,25 @@ import {
   isHandMuted,
   noteBarWidth,
   fitBarLabel,
+  barGlyphIsDark,
   labelableFallingNotes,
   approachingKeyMidis,
   KEY_LABEL_LOOK_AHEAD,
   MIN_LABEL_PX,
+  MIN_OVERFLOW_PX,
   MAX_LABEL_PX,
   LABEL_CHAR_WIDTH_RATIO,
   LABEL_GUTTER,
   type LabelNote,
 } from "./piano";
+
+// MIDI helpers for the glyph-ink tests: pitch class 0 = C (=> Do), 60 = C4.
+const C4 = 60; // Do, violet (dark bar -> light glyph)
+const E4 = 64; // Mi, orange (light bar -> dark glyph)
+const F4 = 65; // Fa, yellow-green (light bar -> dark glyph)
+const G4 = 67; // Sol, green (light bar -> dark glyph)
+const A4 = 69; // La, cyan (light bar -> dark glyph)
+const B4 = 71; // Si, blue (dark bar -> light glyph)
 
 describe("isBlackKey", () => {
   it("flags the five accidentals in an octave", () => {
@@ -316,6 +326,81 @@ describe("fitBarLabel (issue #39: name must fit the bar)", () => {
         }
       }
     }
+  });
+});
+
+describe("fitBarLabel overflow (issue #67: narrow desktop bars keep their name)", () => {
+  const estWidth = (chars: number, size: number) =>
+    chars * size * LABEL_CHAR_WIDTH_RATIO + 2 * LABEL_GUTTER;
+
+  it("omits a 2-char name on a ~10px desktop white-key bar WITHOUT overflow", () => {
+    // Reproduces the bug: in-bounds fit drops the name because it cannot fit 10px.
+    expect(fitBarLabel(10, 60, 2, false).show).toBe(false);
+  });
+
+  it("shows that same name WITH overflow, gated by the lower floor", () => {
+    const fit = fitBarLabel(10, 60, 2, true);
+    expect(fit.show).toBe(true);
+    expect(fit.fontSize).toBeGreaterThanOrEqual(MIN_OVERFLOW_PX);
+  });
+
+  it("still omits when the bar is too SHORT to seat a legible glyph, even with overflow", () => {
+    // Height, not width, is the binding floor: a ~12px bar -> floor(12*0.55)=6 < 7 -> omit.
+    expect(fitBarLabel(10, 12, 2, true).show).toBe(false);
+  });
+
+  it("never lets the font exceed the height-derived size (no vertical overflow)", () => {
+    // Overflow only relaxes WIDTH; the font is still bound by bar height.
+    const h = 18;
+    const fit = fitBarLabel(10, h, 2, true);
+    if (fit.show) {
+      expect(fit.fontSize).toBeLessThanOrEqual(Math.floor(h * 0.55));
+    }
+  });
+
+  it("keeps the overflow within the allowed sideways budget (fuzz)", () => {
+    // Any shown overflow label must fit bar width plus 0.9 each side.
+    for (let w = 8; w <= 40; w += 2) {
+      for (let h = 14; h <= 80; h += 4) {
+        for (let chars = 1; chars <= 4; chars++) {
+          const fit = fitBarLabel(w, h, chars, true);
+          if (fit.show) {
+            expect(fit.fontSize).toBeGreaterThanOrEqual(MIN_OVERFLOW_PX);
+            expect(estWidth(chars, fit.fontSize)).toBeLessThanOrEqual(w * (1 + 2 * 0.9) + 1e-9);
+          }
+        }
+      }
+    }
+  });
+});
+
+describe("barGlyphIsDark (issue #67: contrast-aware label ink)", () => {
+  it("uses DARK ink on the light (yellow/green/cyan) hues", () => {
+    for (const midi of [E4, F4, G4, A4]) {
+      expect(barGlyphIsDark(midi, { active: false, black: false })).toBe(true);
+    }
+  });
+
+  it("uses LIGHT ink on the dark (violet/blue) hues", () => {
+    for (const midi of [C4, B4]) {
+      expect(barGlyphIsDark(midi, { active: false, black: false })).toBe(false);
+    }
+  });
+
+  it("never makes a bar LESS likely to take dark ink when it brightens (active fill)", () => {
+    // activeFill is lighter than whiteFill, so an active bar's glyph is dark whenever the
+    // resting bar's was, and may additionally flip to dark on borderline hues. Monotonic.
+    for (const midi of [C4, E4, F4, G4, A4, B4]) {
+      const resting = barGlyphIsDark(midi, { active: false, black: false });
+      const sounding = barGlyphIsDark(midi, { active: true, black: false });
+      if (resting) expect(sounding).toBe(true);
+    }
+  });
+
+  it("treats octaves of one pitch class identically (hue depends only on pitch class)", () => {
+    expect(barGlyphIsDark(F4, { active: false, black: false })).toBe(
+      barGlyphIsDark(F4 + 12, { active: false, black: false }),
+    );
   });
 });
 

@@ -118,6 +118,15 @@ export function midiToBarLabel(midi: number, mode: LabelMode): string {
 
 // Smallest legible glyph size on the dark stage; below this we omit the label.
 export const MIN_LABEL_PX = 8;
+// When a bar is too narrow to hold the name inside its own width, the name is allowed
+// to overflow horizontally (centered) rather than vanish (issue #67). The font stays
+// bound by bar HEIGHT, so it never becomes a detached pill (the #39 intent); this floor
+// only gates that overflow path. Slightly below MIN_LABEL_PX since an overflowing name
+// has the neighbouring (usually empty) columns to breathe into.
+export const MIN_OVERFLOW_PX = 7;
+// How far past each side of the bar an overflowing name may extend, as a fraction of the
+// bar width. 0.9 per side => the name can occupy up to ~1.9x the bar width, centered.
+export const MAX_OVERFLOW_RATIO = 0.9;
 // Ceiling so a tall bar's name never grows past the historical ~11-12px look.
 export const MAX_LABEL_PX = 12;
 // Font size is derived from the bar HEIGHT (the binding dimension for short notes).
@@ -139,21 +148,32 @@ export interface BarLabelFit {
 // passes the bar's drawn width/height and the name's character count, paints if `show`.
 //
 // Rule: scale the font to the bar height (clamped MIN..MAX), then shrink further if the
-// name is too wide for the bar; if it still does not fit at MIN_LABEL_PX in either axis,
-// omit the label (a bar that small reads better with no detached name than a forced one).
+// name is too wide for the allowed box; if it still does not fit at the floor, omit the
+// label (a bar that small reads better with no detached name than a forced one).
+//
+// `allowOverflow` (issue #67): on the dense desktop keybed a white key is only ~10px wide,
+// so a 2-char name can never fit INSIDE the bar and was dropped. When set, the name may
+// spill horizontally up to MAX_OVERFLOW_RATIO past each side (centered on the bar) and is
+// gated by MIN_OVERFLOW_PX instead of MIN_LABEL_PX. The font is still bound by bar HEIGHT,
+// so the name never overflows vertically and never becomes a detached pill (#39 intent).
 export function fitBarLabel(
   barWidth: number,
   barHeight: number,
   charCount: number,
+  allowOverflow = false,
 ): BarLabelFit {
   if (charCount <= 0) return { show: false, fontSize: 0 };
 
   // Start from the height-derived size, capped at MAX.
   let size = Math.min(MAX_LABEL_PX, Math.floor(barHeight * LABEL_HEIGHT_RATIO));
 
-  // The name must fit the bar width: width(size) = charCount * size * ratio + 2*gutter.
-  // Solve for the largest size that fits, then take the smaller of the two constraints.
-  const usableWidth = barWidth - 2 * LABEL_GUTTER;
+  // The name must fit the allowed width: in-bounds it is the bar width; with overflow it
+  // is the bar plus MAX_OVERFLOW_RATIO on each side. width(size) = charCount*size*ratio +
+  // 2*gutter; solve for the largest size that fits and take the smaller constraint.
+  const allowedWidth = allowOverflow
+    ? barWidth * (1 + 2 * MAX_OVERFLOW_RATIO)
+    : barWidth;
+  const usableWidth = allowedWidth - 2 * LABEL_GUTTER;
   if (usableWidth > 0) {
     const widthCap = Math.floor(usableWidth / (charCount * LABEL_CHAR_WIDTH_RATIO));
     size = Math.min(size, widthCap);
@@ -161,8 +181,9 @@ export function fitBarLabel(
     size = 0;
   }
 
-  // Too small to be legible in either axis -> omit (the #39 fallback).
-  if (size < MIN_LABEL_PX) return { show: false, fontSize: 0 };
+  // Too small to be legible -> omit. The floor relaxes by 1px on the overflow path.
+  const floor = allowOverflow ? MIN_OVERFLOW_PX : MIN_LABEL_PX;
+  if (size < floor) return { show: false, fontSize: 0 };
   return { show: true, fontSize: size };
 }
 
@@ -302,4 +323,70 @@ const PITCH_CLASS_COLORS: readonly NoteColors[] = Array.from({ length: 12 }, (_,
 // string building). Hue is a function of pitch class only.
 export function noteColor(midi: number): NoteColors {
   return PITCH_CLASS_COLORS[pitchClass(midi)];
+}
+
+// --- Falling-note label ink (issue #67): pick a glyph color that survives the bar hue. ---
+
+// Two-pole glyph ink. A fixed white name washed out on the light (yellow/green/cyan) hues;
+// we instead choose dark ink on light bars and light ink on dark bars from the bar's own
+// perceived luminance, and stroke the opposite ink as a thin halo so the name reads across
+// hue boundaries and on half-lit active bars.
+export const GLYPH_LIGHT = "rgba(255, 255, 255, 0.95)";
+export const GLYPH_DARK = "rgba(10, 7, 18, 0.92)";
+// Luminance at/above which the bar is "light" and the glyph flips to dark ink (0..1).
+const GLYPH_DARK_LUM_THRESHOLD = 0.6;
+
+// hsl(h, s%, l%) -> [r, g, b] in 0..255. Used once per pitch class at module load to
+// precompute glyph polarity; never called in the render loop.
+function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+  const sat = s / 100;
+  const lig = l / 100;
+  const c = (1 - Math.abs(2 * lig - 1)) * sat;
+  const hp = h / 60;
+  const x = c * (1 - Math.abs((hp % 2) - 1));
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  if (hp < 1) [r, g, b] = [c, x, 0];
+  else if (hp < 2) [r, g, b] = [x, c, 0];
+  else if (hp < 3) [r, g, b] = [0, c, x];
+  else if (hp < 4) [r, g, b] = [0, x, c];
+  else if (hp < 5) [r, g, b] = [x, 0, c];
+  else [r, g, b] = [c, 0, x];
+  const m = lig - c / 2;
+  return [(r + m) * 255, (g + m) * 255, (b + m) * 255];
+}
+
+// Rec. 601 perceived luminance, normalized to 0..1.
+function rgbLuminance([r, g, b]: [number, number, number]): number {
+  return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+}
+
+function fillIsLight(h: number, s: number, l: number): boolean {
+  return rgbLuminance(hslToRgb(h, s, l)) >= GLYPH_DARK_LUM_THRESHOLD;
+}
+
+// Per pitch class, whether each of the three drawn fills is light (=> dark glyph).
+// Mirrors buildNoteColors: whiteFill hsl(h,85%,62%), blackFill hsl(h,70%,50%),
+// activeFill hsl(h,95%,72%). Precomputed so the render loop reads a boolean.
+const PITCH_CLASS_GLYPH_DARK: readonly { white: boolean; black: boolean; active: boolean }[] =
+  Array.from({ length: 12 }, (_, pc) => {
+    const hue = (276 + pc * 30) % 360;
+    return {
+      white: fillIsLight(hue, 85, 62),
+      black: fillIsLight(hue, 70, 50),
+      active: fillIsLight(hue, 95, 72),
+    };
+  });
+
+// Whether a falling bar's name should be drawn in DARK ink (the bar is light). The
+// visualizer passes the state that selects the actual fill it drew: active bars use
+// activeFill, else black-key bars use blackFill, else whiteFill.
+export function barGlyphIsDark(
+  midi: number,
+  state: { active: boolean; black: boolean },
+): boolean {
+  const g = PITCH_CLASS_GLYPH_DARK[pitchClass(midi)];
+  if (state.active) return g.active;
+  return state.black ? g.black : g.white;
 }

@@ -1,5 +1,6 @@
 import {
   approachingKeyMidis,
+  barGlyphIsDark,
   buildKeyLayout,
   fitBarLabel,
   isBlackKey,
@@ -10,6 +11,8 @@ import {
   noteBarWidth,
   noteColor,
   FIRST_MIDI,
+  GLYPH_DARK,
+  GLYPH_LIGHT,
   KEY_LABEL_LOOK_AHEAD,
   LAST_MIDI,
   type KeyGeometry,
@@ -165,6 +168,7 @@ export class Visualizer {
       text: string;
       fontSize: number;
       alpha: number;
+      glyphDark: boolean; // dark ink on a light bar, else light ink (issue #67)
     }[] = [];
 
     for (let i = 0; i < this.notes.length; i++) {
@@ -262,14 +266,14 @@ export class Visualizer {
       // both hands obey one rule and a "Do Do Do" run reads as one clear name. The fit
       // check below is still the per-frame legibility guard (issue #39).
       if (this.labelMode !== "off" && this.labelableNote[i] !== false) {
-        // The name must always FIT the bar (issue #39): scale the font to the bar size
-        // and only label when a legible name fits within both the width and the height.
-        // No forced label on tiny bars (that produced the detached/oversized-pill look);
-        // when a bar is too small, the name is omitted and position + the lit key carry
-        // the note. The name is centered INSIDE the bar so it never floats below a short
-        // bar or spills past a narrow one.
+        // The font is still bound by bar HEIGHT (issue #39) so a short bar never grows a
+        // detached pill. But on the dense desktop keybed a white key is ~10px wide, too
+        // narrow to hold a 2-char name inside the bar, which dropped the name entirely; we
+        // now let the name overflow horizontally, centered on the bar, down to a 7px floor
+        // (issue #67). The name is still centered vertically so it stays within the bar's
+        // height. Ink is chosen from the bar's luminance so it reads on every hue.
         const text = midiToBarLabel(note.midi, this.labelMode);
-        const fit = fitBarLabel(w, barHeight, text.length);
+        const fit = fitBarLabel(w, barHeight, text.length, true);
         if (fit.show) {
           labels.push({
             x: x + w / 2,
@@ -277,6 +281,7 @@ export class Visualizer {
             text,
             fontSize: fit.fontSize,
             alpha,
+            glyphDark: barGlyphIsDark(note.midi, { active: isActive && !muted, black }),
           });
         }
       }
@@ -292,16 +297,21 @@ export class Visualizer {
     if (labels.length > 0) {
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillStyle = "rgba(255,255,255,0.82)";
-      ctx.shadowColor = "rgba(0,0,0,0.45)";
-      ctx.shadowBlur = 2;
+      ctx.lineJoin = "round";
+      ctx.lineWidth = 2;
+      // Each name is drawn as a two-pole glyph (issue #67): an ink chosen from the bar's
+      // luminance, haloed by the opposite ink. The halo lets the name survive hue
+      // boundaries and overflow onto the dark stage between narrow bars. Replaces the old
+      // fixed white fill + soft drop-shadow that washed out on the light (yellow/green) hues.
       for (const l of labels) {
         ctx.globalAlpha = l.alpha;
         ctx.font = `600 ${l.fontSize}px system-ui`;
+        ctx.strokeStyle = l.glyphDark ? GLYPH_LIGHT : GLYPH_DARK;
+        ctx.strokeText(l.text, l.x, l.y);
+        ctx.fillStyle = l.glyphDark ? GLYPH_DARK : GLYPH_LIGHT;
         ctx.fillText(l.text, l.x, l.y);
       }
       ctx.globalAlpha = 1;
-      ctx.shadowBlur = 0;
     }
   }
 
