@@ -30,6 +30,73 @@ Accounts available:
 
 ## CI/CD
 
+- **2026-05-30 - OMR worker is now deployed and LIVE, running locally on the owner's Mac (interim host) via launchd. Oracle Madrid confirmed capacity-exhausted.**
+  Acted on the hosting research below. Oracle Always Free in the home region eu-madrid-1 is
+  out of capacity for BOTH free shapes: a real LaunchInstance attempt for `VM.Standard.A1.Flex`
+  returned "Out of capacity for shape VM.Standard.A1.Flex in availability domain AD-1" (and
+  E2.1.Micro was already exhausted). Madrid has a single AD and Always Free only launches in the
+  home region, so there is no alternate AD/region to try. Rather than block on the capacity-retry
+  or build the Cloud Run fallback, the worker was deployed locally to ship the feature now ($0).
+  - **What runs:** `~/piano-helper-omr/` holds `worker.py` (copied from this branch, unchanged),
+    a Python 3.11 venv (`oemer` 0.1.5, `homr` 0.6.2, `boto3`), `run.sh` (sources creds, fixes
+    PATH, execs the worker), and `omr.env` (the 4 R2 creds, chmod 600, NOT in git). System dep
+    `pdftoppm` via `brew install poppler`. A **LaunchAgent** `com.pianohelper.omr`
+    (`~/Library/LaunchAgents/com.pianohelper.omr.plist`, RunAtLoad + KeepAlive) keeps it polling
+    and restarts on crash; logs to `~/piano-helper-omr/worker.log`. R2 token: a dedicated Account
+    API token scoped to the `piano-helper-omr` bucket, Object Read & Write.
+  - **Validated end to end:** uploaded a synthetic PNG to `uploads/<uuid>`; the worker downloaded
+    it, ran oemer (downloaded its model, ran clean), fell back to homr (also ran clean), both
+    correctly found no staffs on the synthetic image, wrote the failure sentinel to
+    `results/<uuid>.musicxml`, and deleted the upload. Confirms the full transport + both engines
+    are functional on Apple Silicon / Python 3.11.
+  - **Caveat / migration:** "always-on" only holds while the Mac is awake and online, so this is
+    interim, not 24/7. Migrate later to the Oracle ARM VM (via the capacity-retry below) or the
+    Cloud Run fallback; the worker code is host-agnostic so the move is config-only. Manage the
+    Mac service with `launchctl bootout/bootstrap gui/$(id -u) <plist>`.
+
+- **2026-05-30 - Worker-hosting decision: Oracle ARM stays primary; Google Cloud Run (request-based, scale-to-zero) is the fallback. Fly.io and GCP-VM rejected.**
+  Research for "where to run the always-on OMR worker for $0". Decision:
+  - **PRIMARY: keep the committed Oracle Always Free ARM VM design** and add an **automated
+    capacity-retry** to actually get the instance. Oracle ARM (A1.Flex, up to 4 OCPU / 24 GB)
+    is the only option that is permanently free AND gives a free external IP + free egress to
+    R2, and the worker already runs there unchanged (systemd + venv, ~0 rework). The blocker is
+    pure capacity ("Out of host capacity" in home region eu-madrid-1, both ARM and E2.1.Micro).
+    Always Free can only launch in the tenancy home region, so no alternate region/AD. Standard
+    fix is a retry loop hitting the LaunchInstance API every 1-5 min (OCI CLI / a small script /
+    a community tool) until a slot frees up. Realistic: people get an A1 within hours-to-days
+    this way; it is worth automating since it is free and needs no code change. Effort: ~1-2h to
+    stand up the retry script, then unattended wait.
+  - **FALLBACK (if Oracle never frees up): re-architect the worker as a Cloud Run service with
+    request-based billing, pinged by Cloud Scheduler.** Cloud Run free tier (per billing account,
+    monthly, never expires): 180,000 vCPU-s, 360,000 GiB-s, 2,000,000 requests. With
+    `min-instances=0` it scales to zero and bills ONLY while a request is in flight, so idle
+    polling costs nothing. No external IP needed (egress to R2 is outbound HTTPS; first 1 GiB/mo
+    egress free, and our payloads are tiny MusicXML + small uploads, so egress stays ~$0).
+    Cloud Scheduler free tier = 3 jobs/account; one job pings the service every 1-2 min to run a
+    single poll cycle, satisfying the 1-2 min processing SLA. Compute math: a 2 GiB / 1 vCPU
+    instance burns 1 vCPU-s + 2 GiB-s per wall-second. Idle polls (a few seconds each, ~43k/mo at
+    1/min) are trivial. The risk is heavy `oemer` inference: at ~2 GiB the 360,000 GiB-s cap is
+    the binding limit = ~180,000 instance-seconds = ~50 instance-hours/mo of actual CPU-active
+    time. That is plenty for a hobby tool (hundreds of ~1-3 min inferences/mo) but IS a real cap,
+    so it must be watched. Request timeout max is 60 min, well above a single oemer run. Effort:
+    medium (~4-8h): containerize the worker, flip the long poll loop into a one-shot "process one
+    job then exit" HTTP handler, push image, wire Cloud Scheduler + the 4 R2 env vars as secrets.
+  - **Cloud Run hidden-cost watch:** the one non-free wrinkle is **Artifact Registry**: free tier
+    is only **0.5 GB** stored, and an `oemer`/PyTorch/onnx image is multi-GB. Overage is ~$0.10/GB-
+    month, so a ~3 GB image is ~$0.25-0.30/mo, i.e. a small BUT NONZERO ongoing charge, which
+    violates the "$0, no ongoing charges" rule. Mitigations before adopting: slim the image
+    aggressively (CPU-only torch wheels, multi-stage build, strip caches) to fit closer to 0.5 GB,
+    and/or keep only the latest tag (no history) so stored bytes stay minimal. If it cannot be
+    brought to ~$0, this fallback is disqualified and Oracle retry is the only path.
+  - **Rejected:** **Fly.io** has NO free tier in 2026 (only a 2-hour / 7-day trial, then a card is
+    required; legacy Hobby allowances are grandfathered only) -> not permanently free, off the
+    table. **GCP Compute Engine e2-micro VM** rejected earlier on the ~$3-4/mo external-IPv4
+    charge. **GitHub Actions** as runtime rejected earlier (Actions ToS). Render/Railway/other free
+    PaaS spin down or are trial-only and were not pursued.
+  - Net: try to land the Oracle ARM VM via automated capacity-retry (zero rework, truly $0). Only
+    if that fails for good, do the Cloud Run rewrite, and only after proving the image can be kept
+    inside (or negligibly past) the 0.5 GB Artifact Registry free tier.
+
 - **2026-05-30 - OMR compute moved OFF GitHub Actions to an always-on R2-polling worker (issue #5).**
   Reason: running OMR on Actions runners uses Actions as the app's runtime compute backend, which
   breaks GitHub's Actions usage policy and risks account suspension. The "public repo = unlimited
