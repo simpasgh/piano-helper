@@ -159,7 +159,7 @@ export class Visualizer {
   ): void {
     const { ctx } = this;
     // Geometry of bars worth labeling, collected during the fill pass and drawn
-    // after, so the bar glow (shadowBlur 18) never bleeds into the glyphs. Each label
+    // after, so the contact stroke's glow never bleeds into the glyphs. Each label
     // carries its own fitted font size so short/narrow bars get a smaller name that
     // stays within the bar's bounds (issue #39).
     const labels: {
@@ -213,8 +213,10 @@ export class Visualizer {
         : black
           ? colors.blackFill
           : colors.whiteFill;
-      ctx.shadowColor = colors.glow;
-      ctx.shadowBlur = isActive ? 20 : 18;
+      // No body glow: a falling bar is a clean colored bar (issue #27 intent). The only
+      // glow is the #27 contact stroke below, fired solely for the bar touching the keybed,
+      // so in-flight notes stay calm and the highlight reads as the single contact moment.
+      ctx.shadowBlur = 0;
       this.roundRect(x, top, w, barHeight, 4);
       ctx.fill();
 

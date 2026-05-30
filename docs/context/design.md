@@ -3,6 +3,54 @@
 UX, visual design, interaction decisions. Append durable learnings at the top of the
 relevant section, dated.
 
+## Glow only the contact note, not every in-flight bar (issues #27, #38)
+
+- **2026-05-30 - Build-ready spec: kill the bright glow halo on EVERY falling bar; reserve
+  glow for the single note touching the keybed (the #27 contact moment).** Root cause is the
+  body fill in `drawFallingNotes` (`src/visualizer.ts` ~216-217): it sets
+  `ctx.shadowColor = colors.glow; ctx.shadowBlur = isActive ? 20 : 18;` BEFORE every bar's
+  `fill()`, so every in-flight bar wears an 18px colored halo and the whole lane reads as
+  "all highlighted". #27's actual intent was a clean colored bar while falling, glow only on
+  contact. The body hue (#12) and the #36 hand cap STAY; only the glow changes.
+
+  ### Decision 1 - non-active (still-falling) bars: shadowBlur = 0, fully flat
+
+  **Set `ctx.shadowBlur = 0` (no halo) for the body fill of non-active bars. Exact: 0px, not
+  a small residual.** A residual 4-6px halo would just be a dimmer version of the same "row of
+  glowing chips" the user is complaining about, and it muddies the gap between adjacent bars
+  and softens the hand-cap edge. The body is already a saturated hue on near-black: it does not
+  need a halo to pop, it needs clean edges so the eye can count and track individual notes.
+  Flat bars also make the ONE contact glow unmistakable by contrast.
+
+  ### Decision 2 - active/contact bars: glow lives ONLY on the #27 contact stroke
+
+  **The body fill of active bars also gets `shadowBlur = 0`. Do NOT keep any body-fill blur on
+  active bars. The glow comes solely from the existing #27 contact stroke (2px, `colors.glow`,
+  `shadowBlur 22`, alpha 0.9).** Reasons: (a) `isActive` bars are the ones at/below the keybed
+  i.e. they are already the contact bars, so a body blur here would re-introduce a halo on
+  exactly the bars that also get the stroke, double-glowing them; (b) the contact STROKE is the
+  designed "lights up on the hit" cue and it is enough on its own (a hue-colored 22px-blurred
+  outline reads clearly as a flash); (c) one glow source = one clear focal point. Net: the body
+  fill is flat for ALL bars; the only glow in the falling field is the contact stroke on the
+  bar(s) currently touching the keyboard. This is exactly #27's original wording.
+
+  ### Decision 3 - muted bars
+
+  **Muted bars (alpha 0.3, #54) keep glow OFF like everyone now (their body is flat). They are
+  already excluded from the contact stroke by `!muted` in the `inContact` guard, so a muted
+  hand's notes fall flat and dim with no glow at all.** Correct: a muted hand should look quiet,
+  and the existing `!muted` gate already does the right thing once the body halo is gone. No
+  change to the mute path; it just stops inheriting the body halo.
+
+  ### Build note
+
+  In the body-fill block, replace `ctx.shadowColor = colors.glow; ctx.shadowBlur = isActive ?
+  20 : 18;` with `ctx.shadowBlur = 0;` (one line). Everything below is unchanged: the #36 cap
+  already sets `shadowBlur = 0`, the #27 contact stroke sets its own `shadowColor` + `shadowBlur
+  22`, and the post-loop reset to 0 stays. No per-bar `measureText`, strictly cheaper in the rAF
+  loop (one fewer shadow setup per bar; the GPU skips the blur pass on every non-contact bar).
+  Verify on a rendered frame that the contact note still flashes and mid-screen bars are flat.
+
 ## Falling-note name legibility: contrast-aware glyph + narrow-bar overflow (issue #67)
 
 - **2026-05-30 - Build-ready spec for two reported legibility defects on falling-note names:
