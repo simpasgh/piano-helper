@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { noteEventsToVisNotes } from "./transcribe";
+import {
+  noteEventsToVisNotes,
+  validateAudioFileSize,
+  validateAudioDuration,
+  MAX_AUDIO_BYTES,
+  MAX_AUDIO_SECONDS,
+} from "./transcribe";
 import type { NoteEventTime } from "@spotify/basic-pitch";
 
 function event(
@@ -55,5 +61,43 @@ describe("noteEventsToVisNotes", () => {
 
   it("returns an empty array for no events", () => {
     expect(noteEventsToVisNotes([])).toEqual([]);
+  });
+});
+
+describe("validateAudioFileSize", () => {
+  it("accepts a file at or under the limit", () => {
+    expect(validateAudioFileSize(MAX_AUDIO_BYTES)).toBeNull();
+    expect(validateAudioFileSize(1024)).toBeNull();
+  });
+
+  it("rejects a file over the limit with a message mentioning MB", () => {
+    const msg = validateAudioFileSize(MAX_AUDIO_BYTES + 1);
+    expect(msg).toBeTypeOf("string");
+    expect(msg).toContain("too large");
+    expect(msg).toContain("MB");
+  });
+
+  it("honors a custom limit", () => {
+    expect(validateAudioFileSize(2048, 1024)).toContain("too large");
+    expect(validateAudioFileSize(512, 1024)).toBeNull();
+  });
+});
+
+describe("validateAudioDuration", () => {
+  it("accepts audio at or under the limit", () => {
+    expect(validateAudioDuration(MAX_AUDIO_SECONDS)).toBeNull();
+    expect(validateAudioDuration(10)).toBeNull();
+  });
+
+  it("rejects audio over the limit with a message mentioning the cap", () => {
+    const msg = validateAudioDuration(MAX_AUDIO_SECONDS + 1);
+    expect(msg).toBeTypeOf("string");
+    expect(msg).toContain("too long");
+    expect(msg).toContain(String(MAX_AUDIO_SECONDS));
+  });
+
+  it("honors a custom limit", () => {
+    expect(validateAudioDuration(120, 60)).toContain("too long");
+    expect(validateAudioDuration(30, 60)).toBeNull();
   });
 });
