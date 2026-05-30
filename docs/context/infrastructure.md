@@ -1,0 +1,56 @@
+# Infrastructure context
+
+Hosting, CI/CD, release workflow, tooling, costs. Append durable learnings at the top of
+the relevant section, dated.
+
+## Hard constraint: everything free
+
+All infra/tooling must be **free with no caps or only very large ones**. Never add a paid
+service or a tier that could realistically hit a ceiling. Call out any cap explicitly.
+
+Accounts available:
+- **Cloudflare** — owns the `todeo.app` domain. Host = **Cloudflare Pages** (free:
+  unlimited bandwidth/requests, 500 builds/month).
+- **Vercel** — free Hobby only (100 GB/mo, non-commercial). Caps; not the primary host.
+- **GitHub** — free; repo is **public**, so **GitHub Actions minutes are unlimited**.
+
+## Hosting
+
+- **Cloudflare Pages**, deployed to the free `*.pages.dev` URL (no DNS setup). A custom
+  `todeo.app` subdomain can be added later.
+- Build command `npm run build`, output dir `dist/`.
+
+## CI/CD
+
+- **CI (`.github/workflows/ci.yml`)** runs on every PR/push: typecheck + build + unit tests.
+  This is the required status check that gates merges.
+- **Deploy (`.github/workflows/deploy.yml`)** runs on push to `main`: build -> deploy to
+  Cloudflare Pages (wrangler) -> **smoke test the live prod URL**.
+- **Code review runs locally** through the Claude Code subscription (Tech Lead + /code-review),
+  NOT a CI Claude action, to avoid Anthropic API charges.
+
+## Release / merge rules
+
+See [../workflow.md](../workflow.md). Summary: trunk-based, short-lived branches rebased on
+`main`; PR + passing CI + up-to-date + linear history required before merge; deploy + prod
+smoke test after merge.
+
+## Deploy gating (so `main` stays green before infra exists)
+
+`deploy.yml` is guarded by `if: vars.DEPLOY_ENABLED == 'true'`. Until that repo variable is
+set, the deploy job is skipped, so merging to `main` never fails on missing Cloudflare
+secrets. Flip it to `true` only after the Cloudflare project + secrets are in place.
+
+Repo **variables** (Settings -> Secrets and variables -> Actions -> Variables):
+- `DEPLOY_ENABLED` = `true` to turn deploys on.
+- `CF_PAGES_PROJECT` = Cloudflare Pages project name (defaults to `piano-helper` if unset).
+- `PROD_URL` = stable prod URL to smoke-test (defaults to the per-deploy URL Cloudflare returns).
+
+Repo **secrets**: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`.
+
+## One-time setup still required (manual, by the user)
+
+- [ ] Create the Cloudflare Pages project (e.g. `wrangler pages project create piano-helper`).
+- [ ] Add GitHub repo secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
+- [ ] Add repo variable `PROD_URL` (the `*.pages.dev` URL) once known.
+- [ ] Set repo variable `DEPLOY_ENABLED=true` to enable the deploy workflow.
