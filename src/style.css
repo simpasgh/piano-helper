@@ -415,16 +415,34 @@ button:focus-visible,
   border-color: rgba(232, 224, 245, 0.4);
 }
 
-/* Muted state shown by MORE than color (colorblind-safe): strikethrough label + dim,
-   plus a "Muted" cue is implied by aria-pressed for assistive tech. */
+/* The visible "muted" word (set in JS). Hidden until the hand is muted, then shown as a
+   bold accent chip so the toggle reads as an engaged state, not a faded/disabled control. */
+.hand-toggle-state {
+  display: none;
+}
+
+/* Muted state shown by MORE than color (colorblind-safe): an explicit "muted" word plus a
+   strikethrough name. Kept at full opacity with an accent fill so the active (muted) toggle
+   looks engaged rather than disabled (issue #37 follow-up: the old 0.55 dim read as a no-op). */
 .hand-toggle[aria-pressed="true"] {
-  opacity: 0.55;
-  background: var(--ghost-bg-active);
-  border-color: var(--ghost-border);
+  opacity: 1;
+  background: rgba(177, 75, 255, 0.28);
+  border-color: var(--accent);
+  color: var(--text);
 }
 
 .hand-toggle[aria-pressed="true"] .hand-toggle-label {
   text-decoration: line-through;
+  opacity: 0.7;
+}
+
+.hand-toggle[aria-pressed="true"] .hand-toggle-state {
+  display: inline;
+  font-weight: 600;
+  font-size: 0.85em;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .hand-toggle[aria-pressed="true"] .hand-swatch {

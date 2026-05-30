@@ -38,6 +38,14 @@ const namesBtn = document.getElementById("names-btn") as HTMLButtonElement;
 const handMutes = document.getElementById("hand-mutes") as HTMLDivElement;
 const muteRightBtn = document.getElementById("mute-right-btn") as HTMLButtonElement;
 const muteLeftBtn = document.getElementById("mute-left-btn") as HTMLButtonElement;
+
+// Reflect a hand's mute state on its toggle button: aria-pressed for assistive tech plus a
+// visible "muted" word, so a click reads as an unmistakable state change (not a no-op).
+function reflectHandMute(btn: HTMLButtonElement, muted: boolean): void {
+  btn.setAttribute("aria-pressed", String(muted));
+  const state = btn.querySelector(".hand-toggle-state");
+  if (state) state.textContent = muted ? "muted" : "";
+}
 const tempoSlider = document.getElementById("tempo-slider") as HTMLInputElement;
 const tempoReadout = document.getElementById("tempo-readout") as HTMLButtonElement;
 const sheetContainer = document.getElementById("sheet") as HTMLDivElement;
@@ -178,8 +186,8 @@ function loadNotes(data: ScoreData, name: string, sheet: boolean): void {
   // a previously muted hand from another score does not silently carry over.
   handMuted.left = false;
   handMuted.right = false;
-  muteRightBtn.setAttribute("aria-pressed", "false");
-  muteLeftBtn.setAttribute("aria-pressed", "false");
+  reflectHandMute(muteRightBtn, false);
+  reflectHandMute(muteLeftBtn, false);
   visualizer.setMutedHands(handMuted);
   handMutes.hidden = !hasBothHands(score.notes);
 
@@ -618,12 +626,12 @@ startSamplerLoad();
 // aria-pressed (true = muted). The flag is read fresh by the Part callback, so no rebuild.
 muteRightBtn.addEventListener("click", () => {
   handMuted.right = !handMuted.right;
-  muteRightBtn.setAttribute("aria-pressed", String(handMuted.right));
+  reflectHandMute(muteRightBtn, handMuted.right);
   visualizer.setMutedHands(handMuted);
 });
 muteLeftBtn.addEventListener("click", () => {
   handMuted.left = !handMuted.left;
-  muteLeftBtn.setAttribute("aria-pressed", String(handMuted.left));
+  reflectHandMute(muteLeftBtn, handMuted.left);
   visualizer.setMutedHands(handMuted);
 });
 
