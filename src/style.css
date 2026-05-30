@@ -325,6 +325,55 @@ button:focus-visible,
   font-size: 0.8rem;
 }
 
+/* Per-hand mute toggles (issue #37). Shown only when the score has both hands; reuse the
+   ghost-pill `.toggle` base. Pressed (aria-pressed="true") = that hand's audio is muted. */
+.hand-mutes {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.hand-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* A small swatch matching the #36 falling-note rail colors: right = near-white,
+   left = near-dark. Border keeps the near-dark swatch visible on the dark bar. */
+.hand-swatch {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  border: 1px solid var(--ghost-border);
+  flex: none;
+}
+
+.hand-swatch-right {
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.hand-swatch-left {
+  background: rgba(10, 7, 18, 0.85);
+  border-color: rgba(232, 224, 245, 0.4);
+}
+
+/* Muted state shown by MORE than color (colorblind-safe): strikethrough label + dim,
+   plus a "Muted" cue is implied by aria-pressed for assistive tech. */
+.hand-toggle[aria-pressed="true"] {
+  opacity: 0.55;
+  background: var(--ghost-bg-active);
+  border-color: var(--ghost-border);
+}
+
+.hand-toggle[aria-pressed="true"] .hand-toggle-label {
+  text-decoration: line-through;
+}
+
+.hand-toggle[aria-pressed="true"] .hand-swatch {
+  opacity: 0.5;
+}
+
 .tempo {
   display: inline-flex;
   align-items: center;

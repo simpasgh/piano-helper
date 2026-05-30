@@ -10,6 +10,45 @@ relevant section, dated.
 - Falling note bars have a soft glow (canvas `shadowBlur`); white-key notes are brighter
   than black-key notes.
 
+## Per-hand mute toggles (issue #37)
+
+- **2026-05-30 - Spec for the two per-hand MUTE toggles.** CSS-first, no new JS menu, no new
+  deps. PM-decided behavior: two toggles, "Right hand" and "Left hand", both default ON
+  (audible); tapping one mutes that hand's AUDIO while its notes keep falling silently. Solo =
+  mute the other hand (no separate solo control). Shown ONLY when the score has both a right-
+  and a left-hand note set; single-staff and audio-derived scores keep them hidden and the
+  single master volume governs playback.
+
+  **Placement.** Inside the settings `.group` of the toolbar (the #34 source/output/settings
+  cluster), between the Names toggle and the `.tempo` group. They live in a
+  `<div id="hand-mutes" class="hand-mutes" role="group" aria-label="Mute by hand" hidden>`.
+  The container's `hidden` attribute is removed by the Tech Lead's `loadNotes` only when the
+  score has both hands, so on single-staff/audio scores the row simply is not there. The
+  `.hand-mutes` flex wraps with the rest of `.controls` at <=720px (#33), so it never crowds.
+
+  **Each toggle is a real `<button class="toggle hand-toggle" aria-pressed="false">`** reusing
+  the existing #34 ghost-pill `.toggle` base (so it matches the Names button), with a text
+  label ("Right hand" / "Left hand", not icon-only) and a small color swatch. `aria-pressed`
+  is the state: `true` = that hand is muted. Tap target stays >=44px on phones because
+  `.toggle` already gets `min-height: 44px` in the #33 720px block.
+
+  **Muted affordance is MORE than color (colorblind-safe).** When `aria-pressed="true"`:
+  (a) `opacity: 0.55` dims the whole pill, (b) the label gets `text-decoration: line-through`
+  (a strikethrough = "this hand is silenced"), and (c) the swatch dims to `opacity: 0.5`. The
+  `aria-pressed` state itself is the screen-reader cue. So muted is signalled by dim + strike +
+  swatch fade, never by hue alone.
+
+  **Swatch matches the #36 rail colors** so the control ties back to the falling-note hand cue:
+  right = near-white `rgba(255, 255, 255, 0.92)`, left = near-dark `rgba(10, 7, 18, 0.85)`.
+  Both are 11px rounded squares with a faint border so the near-dark left swatch stays visible
+  on the dark bar. This is the same dark-left / light-right luminance pairing the rails use.
+
+  **Why mute, not sliders (v1 scope).** Volume sliders / balance / presets / per-hand timbre /
+  cross-session persistence are explicitly OUT for v1 (PM decision). A binary mute per hand is
+  the smallest control that delivers "practice one hand at a time" and reads instantly; sliders
+  would add a second axis of fiddliness for marginal practice value. Revisit only if playtests
+  ask for partial balance.
+
 ## Top toolbar redesign (issue #34)
 
 - **2026-05-30 - Spec to redesign the top toolbar: UX, color scheme, button styling.**

@@ -30,6 +30,43 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-30 - Per-hand mute SHIPPED (#37): skip the trigger, never rebuild the Part.**
+  Two per-hand audio mute toggles (Right/Left), built on the #36 `VisNote.hand` tag. Pieces:
+  - **Pure helper `hasBothHands(notes: VisNote[]): boolean`** in `src/playback.ts` (true only
+    if at least one `"right"` AND at least one `"left"` note exists; early-exits the loop once
+    both are seen). 6 unit tests in `src/playback.test.ts` (both -> true; right-only,
+    left-only, all-unknown, empty, right+unknown -> false). This gates the toggles' visibility.
+  - **Mute is a per-callback skip, not a Part rebuild.** A module-level
+    `const handMuted = { left: false, right: false }` in `src/main.ts` is read FRESH at the top
+    of the `Tone.Part` callback: `if (note.hand === "left" && handMuted.left) return;` and the
+    same for right, before `triggerAttackRelease`. `"unknown"` always sounds. Toggling a hand
+    flips the flag and takes effect from the NEXT onset with zero rescheduling, so it is live
+    and cheap. The Part's note projection gained `hand: n.hand` (was `{ time, midi, duration }`).
+  - **Why skip-in-callback over a per-hand Tone channel/volume node:** a skipped trigger has no
+    downstream side effects, so the sampler/synth swap (`getInstrument`) and the export-video
+    path (which records the master output) need NO change. Routing each hand through its own
+    gain node would have meant two instruments or a mid-graph split and re-plumbing the export
+    tee; the skip is one branch and keeps the single-instrument, single-destination graph.
+  - **Visibility + reset in `loadNotes` (`src/main.ts`):** compute `hasBothHands(score.notes)`;
+    `handMutes.hidden = !hasBothHands(...)`. On EVERY load reset `handMuted` to
+    `{left:false,right:false}` and both buttons' `aria-pressed` to `"false"`, so a hand muted
+    on a previous score never silently carries into the next one. Button clicks flip the flag
+    and reflect it in `aria-pressed` (true = muted), mirroring the existing `#names-btn` wiring.
+  - **Correctness:** muting does NOT stop notes from falling; the visualizer draws from
+    `score.notes` by time, fully independent of audio (untouched). A note already sounding when
+    its hand is muted keeps ringing until its release completes (mute applies from the next
+    onset); accepted for v1, no active-voice tracking added.
+  - **Markup/CSS** per the Designer spec in design.md: `#hand-mutes` container (`hidden` by
+    default) in the settings `.group`, two `<button class="toggle hand-toggle" aria-pressed>`
+    reusing the #34 ghost-pill, muted shown by dim + label strikethrough + swatch fade (more
+    than color), swatches matching the #36 rails (right near-white, left near-dark).
+  - **Verification caveat:** the preview tool is bound to a different worktree in this setup and
+    jsdom is not a project dep, so live in-browser checking was not possible from the agent
+    worktree. Covered instead by the 6 `hasBothHands` unit tests (full suite 114 green),
+    `npm run build` + the functions typecheck green, a headless run of the mute-gate logic, and
+    confirming the built `dist` contains the markup, CSS, and aria-pressed wiring. The skip path
+    is plain control flow with no Tone/canvas state, so unit coverage is representative.
+
 - **2026-05-30 - Left/right-hand distinction SHIPPED (#36).** Falling notes now carry which hand plays them and draw a hand cue. Pieces:
   - **Hand derivation.** Pure helper `handFromStaffIndex(index, staffCount): Hand` in `src/piano.ts` (`Hand = "left" | "right" | "unknown"`): `staffCount < 2` or `index < 0` -> `"unknown"`; else index 0 = `"right"` (treble), 1+ = `"left"` (bass). `extractScore` (`src/score.ts`) reads `note.ParentStaff.ParentInstrument.Staves.indexOf(staff)` and `.length` to tag each pushed note, all behind optional-chaining so a malformed score degrades to `"unknown"` instead of throwing. Gotcha: do NOT derive hand from `VoiceEntry.ParentVoice.VoiceId` (a single staff can hold multiple voices); staff index is the right axis. Use `instrument.Staves.indexOf(staff)` (relative), not `staff.idInMusicSheet` (a global counter across instruments, only equal to the staff index for a single-instrument piano).
   - **Type.** `VisNote.hand?: Hand` is optional, so `transcribe.ts` (audio path) and existing tests/callers compile untouched; a missing hand reads as `"unknown"`.
