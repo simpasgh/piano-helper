@@ -16,11 +16,43 @@
           <div class="controls">
             <div class="group group-source">
               <label class="file-btn">
-                Load MusicXML
+                <svg
+                  class="btn-icon"
+                  viewBox="0 0 24 24"
+                  width="18"
+                  height="18"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                  focusable="false"
+                >
+                  <path d="M19.5 14.25V11.625C19.5 9.76104 17.989 8.25 16.125 8.25H14.625C14.0037 8.25 13.5 7.74632 13.5 7.125V5.625C13.5 3.76104 11.989 2.25 10.125 2.25H8.25M15 14.25L12 11.25M12 11.25L9 14.25M12 11.25L12 17.25M10.5 2.25H5.625C5.00368 2.25 4.5 2.75368 4.5 3.375V20.625C4.5 21.2463 5.00368 21.75 5.625 21.75H18.375C18.9963 21.75 19.5 21.2463 19.5 20.625V11.25C19.5 6.27944 15.4706 2.25 10.5 2.25Z" />
+                </svg>
+                <span class="btn-label">Load MusicXML</span>
                 <input id="file-input" type="file" accept=".xml,.musicxml" hidden />
               </label>
               <label class="file-btn">
-                Scan sheet (PDF/image)
+                <svg
+                  class="btn-icon"
+                  viewBox="0 0 24 24"
+                  width="18"
+                  height="18"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                  focusable="false"
+                >
+                  <path d="M6.82689 6.1749C6.46581 6.75354 5.86127 7.13398 5.186 7.22994C4.80655 7.28386 4.42853 7.34223 4.05199 7.40497C2.99912 7.58042 2.25 8.50663 2.25 9.57402V18C2.25 19.2426 3.25736 20.25 4.5 20.25H19.5C20.7426 20.25 21.75 19.2426 21.75 18V9.57403C21.75 8.50664 21.0009 7.58043 19.948 7.40498C19.5715 7.34223 19.1934 7.28387 18.814 7.22995C18.1387 7.13398 17.5342 6.75354 17.1731 6.17491L16.3519 4.85889C15.9734 4.25237 15.3294 3.85838 14.6155 3.82005C13.7496 3.77355 12.8775 3.75 12 3.75C11.1225 3.75 10.2504 3.77355 9.3845 3.82005C8.6706 3.85838 8.02658 4.25237 7.64809 4.85889L6.82689 6.1749Z" />
+                  <path d="M16.5 12.75C16.5 15.2353 14.4853 17.25 12 17.25C9.51472 17.25 7.5 15.2353 7.5 12.75C7.5 10.2647 9.51472 8.25 12 8.25C14.4853 8.25 16.5 10.2647 16.5 12.75Z" />
+                  <path d="M18.75 10.5H18.7575V10.5075H18.75V10.5Z" />
+                </svg>
+                <span class="btn-label">Scan sheet (PDF/image)</span>
                 <input
                   id="scan-input"
                   type="file"
@@ -29,7 +61,22 @@
                 />
               </label>
               <label class="file-btn">
-                From audio (MP3/WAV)
+                <svg
+                  class="btn-icon"
+                  viewBox="0 0 24 24"
+                  width="18"
+                  height="18"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                  focusable="false"
+                >
+                  <path d="M9 9L19.5 6M19.5 12.5528V16.3028C19.5 17.3074 18.834 18.1903 17.8681 18.4663L16.5481 18.8434C15.3964 19.1724 14.25 18.3077 14.25 17.1099C14.25 16.305 14.7836 15.5975 15.5576 15.3764L17.8681 14.7163C18.834 14.4403 19.5 13.5574 19.5 12.5528ZM19.5 12.5528V2.25L9 5.25V15.5528M9 15.5528V19.3028C9 20.3074 8.33405 21.1903 7.36812 21.4663L6.04814 21.8434C4.89645 22.1724 3.75 21.3077 3.75 20.1099C3.75 19.305 4.2836 18.5975 5.05757 18.3764L7.36812 17.7163C8.33405 17.4403 9 16.5574 9 15.5528Z" />
+                </svg>
+                <span class="btn-label">From audio (MP3/WAV)</span>
                 <input
                   id="audio-input"
                   type="file"
@@ -39,10 +86,45 @@
               </label>
             </div>
             <div class="group group-output">
-              <button id="export-btn" disabled>Export video</button>
+              <button id="export-btn" disabled>
+                <svg
+                  class="btn-icon"
+                  viewBox="0 0 24 24"
+                  width="18"
+                  height="18"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                  focusable="false"
+                >
+                  <path d="M3 16.5V18.75C3 19.9926 4.00736 21 5.25 21H18.75C19.9926 21 21 19.9926 21 18.75V16.5M16.5 12L12 16.5M12 16.5L7.5 12M12 16.5V3" />
+                </svg>
+                <span class="btn-label">Export video</span>
+              </button>
             </div>
             <div class="group group-settings">
-              <button id="names-btn" class="toggle">Names: Solfege</button>
+              <button id="names-btn" class="toggle">
+                <svg
+                  class="btn-icon"
+                  viewBox="0 0 24 24"
+                  width="16"
+                  height="16"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                  focusable="false"
+                >
+                  <path d="M2.03555 12.3224C1.96647 12.1151 1.9664 11.8907 2.03536 11.6834C3.42372 7.50972 7.36079 4.5 12.0008 4.5C16.6387 4.5 20.5742 7.50692 21.9643 11.6776C22.0334 11.8849 22.0335 12.1093 21.9645 12.3166C20.5761 16.4903 16.6391 19.5 11.9991 19.5C7.36119 19.5 3.42564 16.4931 2.03555 12.3224Z" />
+                  <path d="M15 12C15 13.6569 13.6569 15 12 15C10.3431 15 9 13.6569 9 12C9 10.3431 10.3431 9 12 9C13.6569 9 15 10.3431 15 12Z" />
+                </svg>
+                <span class="btn-label" id="names-label">Names: Solfege</span>
+              </button>
               <div id="hand-mutes" class="hand-mutes" role="group" aria-label="Mute by hand" hidden>
                 <button
                   id="mute-right-btn"
@@ -98,15 +180,32 @@
                   viewBox="0 0 24 24"
                   width="20"
                   height="20"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                  focusable="false"
+                >
+                  <path d="M21 16.8115C21 17.6753 20.0668 18.2169 19.3169 17.7883L12.2094 13.7269C11.4536 13.295 11.4536 12.2052 12.2094 11.7733L19.3169 7.7119C20.0668 7.28334 21 7.82487 21 8.68867V16.8115Z" />
+                  <path d="M11.25 16.8115C11.25 17.6753 10.3168 18.2169 9.56685 17.7883L2.45936 13.7269C1.70357 13.295 1.70357 12.2052 2.45936 11.7733L9.56685 7.7119C10.3168 7.28334 11.25 7.82487 11.25 8.68867L11.25 16.8115Z" />
+                </svg>
+              </button>
+              <button id="play-btn" title="Play / pause (Space)" aria-label="Play" disabled>
+                <svg
+                  class="btn-icon play-icon"
+                  viewBox="0 0 24 24"
+                  width="18"
+                  height="18"
                   fill="currentColor"
                   aria-hidden="true"
                   focusable="false"
                 >
-                  <rect x="5" y="5" width="2.4" height="14" rx="1" />
-                  <path d="M19 5.5v13a.8.8 0 0 1-1.23.67l-9.5-6.5a.8.8 0 0 1 0-1.34l9.5-6.5A.8.8 0 0 1 19 5.5z" />
+                  <path d="M4.5 5.65257C4.5 4.22644 6.029 3.32239 7.2786 4.00967L18.8192 10.357C20.1144 11.0694 20.1144 12.9304 18.8192 13.6428L7.2786 19.9901C6.029 20.6774 4.5 19.7733 4.5 18.3472V5.65257Z" />
                 </svg>
+                <span class="btn-label" id="play-label">Play</span>
               </button>
-              <button id="play-btn" title="Play / pause (Space)" disabled>Play</button>
               <button
                 id="next-note-btn"
                 class="step-btn"
@@ -119,12 +218,16 @@
                   viewBox="0 0 24 24"
                   width="20"
                   height="20"
-                  fill="currentColor"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
                   aria-hidden="true"
                   focusable="false"
                 >
-                  <path d="M5 5.5v13a.8.8 0 0 0 1.23.67l9.5-6.5a.8.8 0 0 0 0-1.34l-9.5-6.5A.8.8 0 0 0 5 5.5z" />
-                  <rect x="16.6" y="5" width="2.4" height="14" rx="1" />
+                  <path d="M3 8.68867C3 7.82487 3.93317 7.28334 4.68316 7.7119L11.7906 11.7733C12.5464 12.2052 12.5464 13.295 11.7906 13.7269L4.68316 17.7883C3.93317 18.2169 3 17.6753 3 16.8115V8.68867Z" />
+                  <path d="M12.75 8.68867C12.75 7.82487 13.6832 7.28334 14.4332 7.7119L21.5406 11.7733C22.2964 12.2052 22.2964 13.295 21.5406 13.7269L14.4332 17.7883C13.6832 18.2169 12.75 17.6753 12.75 16.8115V8.68867Z" />
                 </svg>
               </button>
             </div>

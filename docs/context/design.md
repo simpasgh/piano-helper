@@ -111,6 +111,58 @@ relevant section, dated.
      #1; once spelling is threaded through, solfege mode needs flat tokens, not just the current
      always-sharp `SOLFEGE_CLASSES`. Captured so the solfege side of the flats work is not forgotten.
 
+## Heroicons across the toolbar/transport (issue #48)
+
+- **2026-05-30 - Adopted Heroicons (MIT) as the toolbar/transport icon language.** Follow-up to
+  #46. Every toolbar/transport control now carries an inline Heroicons SVG so the bar speaks one
+  consistent, professional icon language instead of ad-hoc glyphs. The #46 three-tier palette
+  (one filled-violet Play hero, raised-neutral loaders, ghost utilities) and grouping are
+  unchanged; this layer is icons + a small amount of icon/label layout CSS.
+
+  ### Icon mapping (control -> Heroicon -> variant -> why)
+
+  | Control | Heroicon | Variant | Rationale |
+  | --- | --- | --- | --- |
+  | Play | `play` | solid | Primary action; solid = the active/primary cue, and the hero is the one filled control |
+  | Pause | `pause` | solid | Same hero, filled state; swapped in-place by JS (see below) |
+  | Previous note | `backward` | outline | Conventional skip-back double-triangle; ghost satellite of Play |
+  | Next note | `forward` | outline | Conventional skip-forward double-triangle; ghost satellite of Play |
+  | Load MusicXML | `document-arrow-up` | outline | Upload a document (the .xml/.musicxml file) |
+  | Scan sheet (PDF/image) | `camera` | outline | Capture/scan a sheet image |
+  | From audio (MP3/WAV) | `musical-note` | outline | Audio source |
+  | Export video | `arrow-down-tray` | outline | Download/export the rendered output |
+  | Names toggle | `eye` | outline | Show/hide note names = a visibility toggle |
+
+  ### Convention (standardized)
+
+  - **Outline is the default; solid is reserved for the single Play/Pause hero.** Outline =
+    "available action / utility"; solid = "the one primary, active control". This keeps the #46
+    "one accent per viewport" read: the only filled icon sits on the only filled button.
+  - **Sizing.** 18px in labeled action buttons (loaders, Export, Play); 16px in the compact Names
+    pill; 20px in the square step satellites (prev/next), matching their larger glyph slot.
+  - **Stroke weight 1.5** (the Heroicons native outline weight), kept as authored so icons look
+    correct at any size.
+  - **Color via `currentColor`.** Every icon inherits its button's tier color through
+    `currentColor`, so hover/active/disabled (which change the button's text color/opacity) carry
+    the icon for free. NO icon hardcodes a hue, so a future re-theme of the palette tokens moves
+    the icons too. (Heroicons ship a hardcoded `#0F172A`; the inlined copies strip it.)
+  - **Icon + label rows.** The loaders, Export, Play, and Names keep their text labels next to the
+    icon (icon-then-text, gap ~0.45rem; ~0.35rem for the compact Names pill). Prev/next stay
+    icon-only with `aria-label`. Play's label/aria-label/icon path are all swapped together by JS
+    on play<->pause.
+  - **Accessibility.** Icons are `aria-hidden="true" focusable="false"`; the button's own text
+    label or `aria-label` carries the meaning, so the icon swap is purely visual.
+
+  ### Verification caveat
+
+  Same preview-port limit as #46/#36/#37: the dev preview server (port 5173) is bound to a
+  different worktree, so no live in-browser pass from this agent worktree. Verified by a real
+  WebKit static render (qlmanage) of the built CSS + header (all nine icons read correctly: the
+  document-up loader, camera, musical note, download tray, eye, skip-back/forward triangles, and
+  the solid Play triangle on the violet hero), the 11 new markup guards, and `npm run build`
+  green. The 720px breakpoint and the live play<->pause icon swap remain for the post-merge QA
+  gate.
+
 ## Toolbar redesign v2 (issue #46)
 
 - **2026-05-30 - Research-led fix for the all-violet toolbar + broken step buttons.** The #34
