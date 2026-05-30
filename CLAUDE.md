@@ -16,6 +16,7 @@ context stays split and focused.
 | **Product Manager** | `product-manager` | [docs/context/product.md](docs/context/product.md) | Market, competitors, features, business, roadmap |
 | **IT / DevOps** | `it-support` | [docs/context/infrastructure.md](docs/context/infrastructure.md) | Hosting, CI/CD, releases, tooling, costs |
 | **Designer** | `designer` | [docs/context/design.md](docs/context/design.md) | UX, visual design, interaction |
+| **QA** | `qa` | [docs/context/qa.md](docs/context/qa.md) | Smoke testing every change in a real browser, catching broken-but-green releases |
 
 The main agent plans and integrates; it hands bounded work to these roles (Operator /
 Agent-Teams pattern).
@@ -51,6 +52,10 @@ Full SOP: [docs/workflow.md](docs/workflow.md). Non-negotiables:
 5. **Release = `/release`.** It rebases, runs tests + review, opens/merges the PR, then
    deploy + a **prod smoke test** (`/smoke-test`) run automatically. Investigate any smoke
    failure immediately; `main` must stay green.
+6. **Live QA after merge.** CI and the smoke test do not click the actual feature. The
+   **QA role** drives every user-visible change in a real browser on `main` and files a bug
+   on any failure. A change is "done" only after this pass, not when CI goes green. See the
+   post-merge QA gate in [docs/workflow.md](docs/workflow.md).
 
 Do not push or merge directly to `main` outside this flow.
 

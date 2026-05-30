@@ -58,6 +58,23 @@ Run **`/release [version]`**. It performs, in order:
 7. **Prod smoke test** runs against the live `*.pages.dev` URL (`/smoke-test`). Any failure
    is a release-blocker; fix forward immediately so `main` stays green.
 
+## Post-merge live QA gate (mandatory)
+
+CI proves typecheck/build/unit tests; the prod smoke test only proves the app loads and
+plays. Neither one exercises the actual feature, so a change can be fully green and still be
+visibly broken. To close that gap, **every user-visible change gets a live QA pass on
+`main` after merge**, owned by the **QA** role:
+
+1. Sync the preview-capable worktree to the just-merged `main`.
+2. Drive the app in a real browser: load a representative score, then actually click,
+   toggle, seek, and play the specific feature the change shipped.
+3. Capture evidence (screenshot of the relevant state + a clean browser console) and check
+   the standing checklist in [docs/context/qa.md](context/qa.md) for regressions.
+4. PASS or FAIL. On FAIL, file or reopen a bug immediately and fix forward; `main` stays
+   green. Never record a visual/interactive pass that was not actually observed.
+
+A change is only "done" once it has cleared this gate, not when CI goes green.
+
 ## Hotfix
 
 Same flow on a `fix/...` branch. Do not skip tests or smoke test; speed comes from a small
