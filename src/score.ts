@@ -2,7 +2,7 @@ import type { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { ClefEnum, ClefInstruction } from "opensheetmusicdisplay";
 import type { VisNote } from "./visualizer";
 import type { Hand } from "./piano";
-import { handFromClef, handFromStaffIndex } from "./piano";
+import { handFromStaff } from "./piano";
 
 export interface ScoreData {
   notes: VisNote[]; // drives audio scheduling and falling notes
@@ -58,20 +58,21 @@ export function extractScore(osmd: OpenSheetMusicDisplay): ScoreData {
         if (note.isRest()) continue;
         const midi = note.halfTone + 12; // OSMD halfTone 0 = C0; MIDI C0 = 12
         const noteDuration = note.Length.RealValue * wholeNoteSeconds;
-        // Tag the hand for grand-staff piano (issue #36). The clef is the primary signal
-        // (treble => right, bass => left) so the split is correct even when the file lists
-        // its staves bass-first; staff position is only a fallback for clefs with no hand
-        // convention. Single-staff parts can't be split, so they stay "unknown". Guard
+        // Tag the hand for piano (issue #36). The clef is the primary signal (treble =>
+        // right, bass => left) so the split is correct even when the file lists its staves
+        // bass-first, AND whether the piano is one instrument with two staves or two
+        // separate single-staff parts (music21 fragments do the latter; issue #70 follow-up).
+        // Staff position is only a fallback for clefs with no hand convention. Guard
         // defensively so a malformed score (missing staff/instrument) degrades to "unknown".
         const staff = note.ParentStaff;
         const staves = staff?.ParentInstrument?.Staves;
-        let hand: Hand = "unknown";
-        if (staff && staves && staves.length >= 2) {
-          const clef = staffClefs.get(staff.idInMusicSheet);
-          hand =
-            (clef && handFromClef(clef)) ||
-            handFromStaffIndex(staves.indexOf(staff), staves.length);
-        }
+        const hand: Hand = staff
+          ? handFromStaff(
+              staffClefs.get(staff.idInMusicSheet),
+              staves ? staves.indexOf(staff) : -1,
+              staves?.length ?? 1,
+            )
+          : "unknown";
         notes.push({ midi, time, duration: noteDuration, hand });
         duration = Math.max(duration, time + noteDuration);
       }
