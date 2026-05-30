@@ -19,6 +19,31 @@ performance on an animated piano, with the score highlighted in sync. Make the f
 
 ## Decisions
 
+### 2026-05-30 - Issue #19 audio-to-score: drop YouTube, ship file-upload-only reduced slice
+
+- **YouTube URL ingestion: NO-GO.** YouTube ToS prohibit accessing content through any means
+  other than the playback page, embed player, or explicitly authorized means, and bar
+  third-party download/extraction tools. A hosted public app that pulls audio from a pasted
+  YouTube URL is a clear ToS breach (breach of contract) and a known DMCA/anti-circumvention
+  risk. Google actively enforces (blocks/DMCA against downloader services). Independent of
+  legality, our runtime can't do it anyway: Cloudflare Workers can't run yt-dlp/ffmpeg/native
+  binaries, so YouTube extraction is also technically off-table here.
+- **Decision: drop YouTube from #19 scope entirely (option a), do NOT block the whole ticket.**
+  File upload of audio the user owns (MP3/WAV) carries no YouTube-ToS problem and is the part
+  that delivers value. No human legal gate is needed to ship audio-file upload. Revisit
+  YouTube only if we ever embed the official player without extracting audio (different
+  feature, different value).
+- **First slice (demo-grade, free/client-side):** file-upload MP3/WAV -> in-browser pitch
+  detection producing a single-line melody track that feeds the existing score.ts ->
+  visualizer + synced sheet pipeline. Use a client-side model (e.g. Spotify Basic Pitch /
+  ONNX in-browser, or a monophonic pitch-detector like pYIN/CREPE-tiny via WASM) so transcription
+  runs on the user's device at zero hosting cost and within the no-native-binary constraint.
+  Scope it as **monophonic / dominant-melody transcription**, not full polyphonic piano.
+  Full polyphonic two-hand transcription is a research project, explicitly out of this slice.
+- **Set expectations in copy:** "best for single-melody clips", show a correction step (reuse
+  slice 4 correction UI rationale), since automatic transcription is approximate.
+- **Recommendation to orchestrator: SHIP-REDUCED-SLICE (file-upload-only, monophonic).**
+
 ### 2026-05-30 - Slice 3 (OMR) is async, not instant (issue #4 spike)
 
 - OMR ships as a job-based "upload now, ready in a short wait (minutes)" flow, not real-time

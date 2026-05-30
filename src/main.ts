@@ -17,6 +17,7 @@ import type { LabelMode } from "./piano";
 const canvas = document.getElementById("stage") as HTMLCanvasElement;
 const fileInput = document.getElementById("file-input") as HTMLInputElement;
 const scanInput = document.getElementById("scan-input") as HTMLInputElement;
+const audioInput = document.getElementById("audio-input") as HTMLInputElement;
 const playBtn = document.getElementById("play-btn") as HTMLButtonElement;
 const namesBtn = document.getElementById("names-btn") as HTMLButtonElement;
 const tempoSlider = document.getElementById("tempo-slider") as HTMLInputElement;
@@ -38,6 +39,9 @@ let part: Tone.Part | null = null;
 let score: ScoreData | null = null;
 let stepIndex = 0;
 let playing = false;
+// Whether the current score has a rendered sheet + cursor. MusicXML/OMR scores do;
+// audio-transcribed scores (issue #19) are falling-notes only, so the cursor stays hidden.
+let hasSheet = false;
 
 // Tempo (issue #14). The Part schedules notes at score seconds, which Tone converts to
 // transport ticks using the bpm at build time. We capture the default bpm once as the
@@ -101,17 +105,12 @@ async function loadScoreFile(file: File): Promise<void> {
   await loadScoreXml(xml, file.name);
 }
 
-// Load MusicXML into OSMD and rebuild the audio + falling-notes pipeline. Shared by
-// the direct MusicXML file path and the OMR scan result path.
-async function loadScoreXml(xml: string, name: string): Promise<void> {
-  await osmd.load(xml);
-  osmd.render();
-  osmd.cursor.reset();
-  osmd.cursor.show();
-  // Rebuild the note-name overlay against the freshly rendered noteheads.
-  renderSheetLabels(osmd, sheetContainer, labelMode);
-
-  score = extractScore(osmd);
+// Rebuild the audio + falling-notes pipeline from a ScoreData. Shared by the MusicXML
+// path (which also renders a sheet + cursor) and the audio path (falling notes only).
+// `sheet` records whether a sheet/cursor is active so rewind/sync can skip cursor work.
+function loadNotes(data: ScoreData, name: string, sheet: boolean): void {
+  score = data;
+  hasSheet = sheet;
 
   const transport = Tone.getTransport();
   transport.stop();
@@ -145,6 +144,42 @@ async function loadScoreXml(xml: string, name: string): Promise<void> {
   setPlaying(false);
 }
 
+// Load MusicXML into OSMD and rebuild the pipeline. Shared by the direct MusicXML file
+// path and the OMR scan result path.
+async function loadScoreXml(xml: string, name: string): Promise<void> {
+  await osmd.load(xml);
+  osmd.render();
+  osmd.cursor.reset();
+  osmd.cursor.show();
+  // Rebuild the note-name overlay against the freshly rendered noteheads.
+  renderSheetLabels(osmd, sheetContainer, labelMode);
+
+  loadNotes(extractScore(osmd), name, true);
+}
+
+// Transcribe an uploaded audio file (issue #19) into falling notes. There is no sheet
+// view for audio yet, so we clear any previously rendered sheet and its overlay and run
+// the player in cursor-less mode.
+async function loadAudioFile(file: File): Promise<void> {
+  // The cursor only exists once a sheet has been loaded; it is undefined on a fresh page.
+  osmd.cursor?.hide();
+  try {
+    osmd.clear();
+  } catch {
+    // Nothing was rendered yet; clearing is a no-op.
+  }
+  renderSheetLabels(osmd, sheetContainer, labelMode); // empties the overlay too
+
+  // Lazy-load the transcription module (TensorFlow.js + Basic Pitch is ~3 MB) so it is
+  // fetched only when a user actually transcribes audio, not on every page load.
+  const { transcribeAudioFile } = await import("./transcribe");
+  const notes = await transcribeAudioFile(file, (fraction) => {
+    trackName.textContent = `Transcribing audio... ${Math.round(fraction * 100)}%`;
+  });
+  const duration = notes.reduce((max, n) => Math.max(max, n.time + n.duration), 0);
+  loadNotes({ notes, stepTimes: [], duration }, file.name, false);
+}
+
 function setPlaying(value: boolean): void {
   playing = value;
   playBtn.textContent = value ? "Pause" : "Play";
@@ -167,8 +202,10 @@ function rewind(): void {
   transport.stop();
   transport.position = 0;
   stepIndex = 0;
-  osmd.cursor.reset();
-  osmd.cursor.show();
+  if (hasSheet) {
+    osmd.cursor.reset();
+    osmd.cursor.show();
+  }
   setPlaying(false);
 }
 
@@ -192,31 +229,32 @@ fileInput.addEventListener("change", () => {
   }
 });
 
-let scanning = false;
+let busy = false;
 
-// Toggle the inputs and play button while a scan is in flight. The rAF render loop
-// keeps running; only the controls are disabled.
-function setScanningUI(active: boolean): void {
-  scanning = active;
+// Toggle the inputs and play button while a long job (OMR scan or audio transcription)
+// is in flight. The rAF render loop keeps running; only the controls are disabled.
+function setBusyUI(active: boolean): void {
+  busy = active;
   fileInput.disabled = active;
   scanInput.disabled = active;
+  audioInput.disabled = active;
   if (active) playBtn.disabled = true;
 }
 
 async function scanSheet(file: File): Promise<void> {
-  setScanningUI(true);
+  setBusyUI(true);
   trackName.textContent = "Scanning sheet... (this can take a minute)";
   try {
     const jobId = await submitOmr(file);
     const xml = await pollOmrResult(jobId);
     await loadScoreXml(xml, file.name);
   } finally {
-    setScanningUI(false);
+    setBusyUI(false);
   }
 }
 
 scanInput.addEventListener("change", () => {
-  if (scanning) return;
+  if (busy) return;
   const file = scanInput.files?.[0];
   if (!file) return;
   scanSheet(file).catch((err) => {
@@ -226,6 +264,29 @@ scanInput.addEventListener("change", () => {
   });
   // Allow re-selecting the same file to retry.
   scanInput.value = "";
+});
+
+async function transcribeAudio(file: File): Promise<void> {
+  setBusyUI(true);
+  trackName.textContent = "Transcribing audio... (this can take a minute)";
+  try {
+    await loadAudioFile(file);
+  } finally {
+    setBusyUI(false);
+  }
+}
+
+audioInput.addEventListener("change", () => {
+  if (busy) return;
+  const file = audioInput.files?.[0];
+  if (!file) return;
+  transcribeAudio(file).catch((err) => {
+    console.error("Transcription failed:", err);
+    trackName.textContent = "Transcription failed.";
+    alert(`Could not transcribe audio: ${err.message}`);
+  });
+  // Allow re-selecting the same file to retry.
+  audioInput.value = "";
 });
 
 playBtn.addEventListener("click", () => togglePlay());
