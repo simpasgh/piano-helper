@@ -30,6 +30,75 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-30 - Audio-to-score SHIPPED (#19), falling-notes-only slice. Two gotchas worth remembering.**
+  Implemented per the spike below. `src/transcribe.ts` owns the model glue: `transcribeAudioFile(file,
+  onProgress)` decodes via `AudioContext.decodeAudioData`, resamples to mono 22050 Hz with an
+  `OfflineAudioContext`, runs `BasicPitch.evaluateModel`, and maps results through the pure, unit-tested
+  `noteEventsToVisNotes` (rounds MIDI, drops out-of-88-key / non-positive-duration notes, sorts by time).
+  `loadScoreXml` was split into a shared `loadNotes(ScoreData, name, sheet)` core; the audio path calls it
+  with `stepTimes: []` and `sheet=false`.
+  - **Gotcha 1 (bundle size):** importing `@spotify/basic-pitch` statically pulls all of TensorFlow.js into
+    the main chunk (~3.3 MB / 677 KB gzip on the initial load). Fixed by **lazy `await import("./transcribe")`**
+    inside `loadAudioFile`, so tfjs is a separate ~1.8 MB chunk fetched only when a user actually transcribes.
+    Keep any future heavy ML deps behind a dynamic import for the same reason.
+  - **Gotcha 2 (OSMD cursor is undefined until a sheet loads):** `osmd.cursor` does not exist on a fresh page
+    (no MusicXML loaded yet). The audio path must use `osmd.cursor?.hide()` and gate cursor work behind a
+    `hasSheet` flag; `rewind()` only resets/shows the cursor when `hasSheet`. Verified end to end: a synthetic
+    C-D-E-F-G WAV transcribes to exactly 5 ascending falling notes that play back, no console errors.
+  - **Model hosting:** the ~1 MB weights are streamed from jsDelivr
+    (`cdn.jsdelivr.net/npm/@spotify/basic-pitch@1.0.1/model/model.json`), same "CDN not repo binaries" pattern
+    as the Salamander samples. TFJS resolves the weight shard relative to that URL.
+
+- **2026-05-30 - Audio-to-score runs CLIENT-SIDE with Spotify basic-pitch (TF.js), not on a server (SPIKE #19).**
+  Decision: transcribe uploaded audio (MP3/WAV) to note events fully in the browser with
+  **`@spotify/basic-pitch`** (the `basic-pitch-ts` port), then build `VisNote[]` directly for a
+  falling-notes-only first slice. No sheet view in slice 1. This mirrors the OMR spike's "heavy ML
+  can't run in a Pages Function" finding, but here the model is small enough to run on-device, so
+  we do NOT need the GitHub Actions detour: transcription happens entirely client-side, no R2, no
+  dispatch, no Function.
+  - **Model + license:** `@spotify/basic-pitch` is a TensorFlow.js port of Spotify's Basic Pitch,
+    **Apache-2.0** (free/permissive, satisfies the hard constraint). The TF.js model is tiny:
+    `group1-shard1of1.bin` ~742 KB + `model.json` ~175 KB, so well under 1 MB of weights. Runs in
+    the browser via tfjs (WebGL/WASM/CPU backends); no native binaries, no server compute. Polyphonic
+    by design (includes onset+offset detectors), so it also covers monophonic piano.
+  - **API + output shape (confirmed from source):** `new BasicPitch(model)` then
+    `await basicPitch.evaluateModel(audioBuffer, frameCb, percentCb)` accumulates frames/onsets/contours;
+    then `noteFramesToTime(addPitchBendsToNoteEvents(contours, outputToNotesPoly(frames, onsets, onsetThresh,
+    frameThresh)))` yields `NoteEventTime[] = { pitchMidi, startTimeSeconds, durationSeconds, amplitude }`.
+    Input audio may be any sample rate; basic-pitch **resamples to 22050 Hz** internally. The library even
+    has a `noteEventsToMidi`-style mapping that already emits `{ midi: pitchMidi, time: startTimeSeconds,
+    duration: durationSeconds, velocity: amplitude }`, which is almost exactly our `VisNote`.
+  - **Output -> pipeline (the key call): build `VisNote[]` DIRECTLY, bypass OSMD/MusicXML for slice 1.**
+    `NoteEventTime` maps 1:1 onto `VisNote`: `{ midi: pitchMidi, time: startTimeSeconds, duration:
+    durationSeconds }`. That feeds `visualizer.setNotes` + the `Tone.Part` build (the audio/falling-notes
+    path in `loadScoreXml`) with zero notation work. **Cost: no synced sheet view** for audio uploads,
+    because the sheet cursor needs OSMD-rendered MusicXML (`stepTimes` comes from the OSMD iterator in
+    `src/score.ts`). To get the sheet back later (slice 2) we would quantize note events to a beat grid
+    and emit MusicXML (tempo/key/time-sig estimation, note spelling, voice assignment), which is a large
+    second effort and inherently lossy. Recommendation: ship falling-notes-only first, treat sheet view
+    as a follow-up ticket. The sync invariant is NOT at risk in slice 1: with no cursor, falling notes
+    are driven by the same `VisNote.time` values the Part is scheduled from, one timestamp source.
+  - **Refactor needed:** `loadScoreXml` currently couples OSMD render + `extractScore` + Part build +
+    `setNotes`. Split out a `loadNotes(notes: VisNote[], { name, duration })` that does the Part rebuild +
+    `visualizer.setNotes` + transport reset, with NO cursor/sheet steps. The MusicXML path keeps calling
+    the OSMD branch; the audio path calls `loadNotes` directly. `score.duration` for the frame-loop rewind
+    is `max(time + duration)` over the notes (same formula as `extractScore`).
+  - **Decode path:** use the Web Audio API `AudioContext.decodeAudioData` (handles MP3/WAV natively in
+    browsers) to get an `AudioBuffer`, take channel 0 (mono) at 22050 Hz (resample via an
+    `OfflineAudioContext` or let basic-pitch resample). All standard browser APIs, no extra deps beyond
+    `@spotify/basic-pitch` + `@tensorflow/tfjs`.
+  - **Riskiest unknowns:** (1) **transcription quality** is the single biggest risk: basic-pitch on a clean
+    solo-piano recording is decent but produces spurious/missed notes, octave errors, and ragged on/off
+    times; "demo-grade" is realistic, "accurate" is not, and quality degrades hard on dense/poly or noisy
+    audio. (2) **tempo/timing**: events are in absolute seconds (good for our seconds-based Part), but there
+    is no beat grid, so notes won't look quantized; fine for falling-notes, fatal for clean sheet output.
+    (3) **bundle/runtime weight**: tfjs adds a few hundred KB of JS and a WebGL warmup; the model itself is
+    sub-1 MB. (4) basic-pitch's npm package pins a tfjs major; verify it coexists with our Vite build.
+  - **Verdict: FEASIBLE FIRST SLICE in one ticket** for a demo-grade monophonic/clean-piano MP3/WAV upload
+    that plays as falling notes (no sheet), entirely within free tooling. Biggest risk = transcription
+    accuracy, so scope the ticket as "demo-grade, clean solo piano" and set expectations accordingly. Sheet
+    view from audio is a separate, larger NEEDS-MORE effort (quantize -> MusicXML).
+
 - **2026-05-30 - Sheet note-name labels (issue #17): HTML overlay inside the scrolled `#sheet`, positions read from OSMD SVG bboxes.**
   Labels are an absolutely-positioned `<div id="sheet-labels">` (one `.sheet-label` span per
   notehead) appended INSIDE `#sheet` (now `position: relative` in `src/style.css`), with
