@@ -75,6 +75,11 @@ button:disabled {
   cursor: not-allowed;
 }
 
+.toggle {
+  padding: 0.4rem 0.75rem;
+  font-size: 0.8rem;
+}
+
 .track-name {
   font-size: 0.85rem;
   opacity: 0.65;

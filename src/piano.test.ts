@@ -5,6 +5,8 @@ import {
   isBlackKey,
   buildKeyLayout,
   midiToName,
+  midiToLabel,
+  midiToBarLabel,
 } from "./piano";
 
 describe("isBlackKey", () => {
@@ -73,5 +75,77 @@ describe("midiToName", () => {
   it("uses sharps for accidentals", () => {
     expect(midiToName(61)).toBe("C#4");
     expect(midiToName(70)).toBe("A#4");
+  });
+});
+
+describe("midiToLabel", () => {
+  it("maps every pitch class to its letter (always sharp, never flat)", () => {
+    const letters = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    // C4..B4 covers all 12 pitch classes once.
+    for (let pc = 0; pc < 12; pc++) {
+      expect(midiToLabel(60 + pc, "letters")).toBe(letters[pc]);
+    }
+  });
+
+  it("maps every pitch class to its fixed-Do solfege syllable (Si, not Ti)", () => {
+    const solfege = [
+      "Do", "Do#", "Re", "Re#", "Mi", "Fa", "Fa#", "Sol", "Sol#", "La", "La#", "Si",
+    ];
+    for (let pc = 0; pc < 12; pc++) {
+      expect(midiToLabel(60 + pc, "solfege")).toBe(solfege[pc]);
+    }
+  });
+
+  it("never carries an octave on the pitch-class label, in either mode", () => {
+    expect(midiToLabel(21, "letters")).toBe("A"); // A0
+    expect(midiToLabel(108, "letters")).toBe("C"); // C8
+    expect(midiToLabel(60, "solfege")).toBe("Do");
+    expect(midiToLabel(72, "solfege")).toBe("Do"); // one octave up, same syllable
+  });
+
+  it("is octave-invariant for the same pitch class", () => {
+    for (let m = FIRST_MIDI; m <= LAST_MIDI - 12; m++) {
+      expect(midiToLabel(m, "letters")).toBe(midiToLabel(m + 12, "letters"));
+      expect(midiToLabel(m, "solfege")).toBe(midiToLabel(m + 12, "solfege"));
+    }
+  });
+
+  it("returns an empty string in off mode", () => {
+    expect(midiToLabel(60, "off")).toBe("");
+    expect(midiToLabel(61, "off")).toBe("");
+  });
+
+  it("spells the boundary pitch classes correctly", () => {
+    expect(midiToLabel(60, "letters")).toBe("C"); // pc 0
+    expect(midiToLabel(71, "letters")).toBe("B"); // pc 11
+    expect(midiToLabel(60, "solfege")).toBe("Do");
+    expect(midiToLabel(71, "solfege")).toBe("Si");
+  });
+});
+
+describe("midiToBarLabel", () => {
+  it("appends the octave in letters mode using the midiToName convention", () => {
+    expect(midiToBarLabel(60, "letters")).toBe("C4"); // middle C
+    expect(midiToBarLabel(21, "letters")).toBe("A0");
+    expect(midiToBarLabel(108, "letters")).toBe("C8");
+    expect(midiToBarLabel(61, "letters")).toBe("C#4");
+    expect(midiToBarLabel(70, "letters")).toBe("A#4");
+  });
+
+  it("matches midiToName for the letter-with-octave bar label", () => {
+    for (let m = FIRST_MIDI; m <= LAST_MIDI; m++) {
+      expect(midiToBarLabel(m, "letters")).toBe(midiToName(m));
+    }
+  });
+
+  it("never appends an octave in solfege mode", () => {
+    expect(midiToBarLabel(60, "solfege")).toBe("Do");
+    expect(midiToBarLabel(61, "solfege")).toBe("Do#");
+    expect(midiToBarLabel(72, "solfege")).toBe("Do");
+    expect(midiToBarLabel(71, "solfege")).toBe("Si");
+  });
+
+  it("returns an empty string in off mode", () => {
+    expect(midiToBarLabel(60, "off")).toBe("");
   });
 });

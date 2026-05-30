@@ -45,3 +45,31 @@ export function midiToName(midi: number): string {
   const octave = Math.floor(midi / 12) - 1;
   return `${names[((midi % 12) + 12) % 12]}${octave}`;
 }
+
+export type LabelMode = "solfege" | "letters" | "off";
+
+// Always-sharp spellings; "Si" (not "Ti") for the 7th degree per the solfege spec.
+const LETTER_CLASSES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+const SOLFEGE_CLASSES = [
+  "Do", "Do#", "Re", "Re#", "Mi", "Fa", "Fa#", "Sol", "Sol#", "La", "La#", "Si",
+];
+
+// Pitch-class label only (no octave). Returns "" for off mode.
+// Callers that want an octave (letter-mode falling bars) use midiToBarLabel.
+export function midiToLabel(midi: number, mode: LabelMode): string {
+  if (mode === "off") return "";
+  const pc = ((midi % 12) + 12) % 12;
+  return mode === "solfege" ? SOLFEGE_CLASSES[pc] : LETTER_CLASSES[pc];
+}
+
+// Label for a falling bar: solfege has no octave; letters append the octave
+// (scientific pitch), e.g. "C4". Octave convention matches midiToName.
+export function midiToBarLabel(midi: number, mode: LabelMode): string {
+  if (mode === "off") return "";
+  const base = midiToLabel(midi, mode);
+  if (mode === "letters") {
+    const octave = Math.floor(midi / 12) - 1;
+    return `${base}${octave}`;
+  }
+  return base;
+}
