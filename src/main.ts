@@ -369,7 +369,7 @@ async function exportVideo(): Promise<void> {
     await new Promise<void>((resolve) => {
       const id = setInterval(() => {
         const scoreTime = transport.seconds * tempoRate;
-        const reachedEnd = score !== null && scoreTime >= score.duration;
+        const reachedEnd = score !== null && score.duration > 0 && scoreTime >= score.duration;
         if (!playing || transport.state !== "started" || reachedEnd) {
           clearInterval(id);
           resolve();
