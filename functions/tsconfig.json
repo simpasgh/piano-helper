@@ -1,0 +1,18 @@
+{
+  // Standalone typecheck config for Cloudflare Pages Functions. The root build
+  // (tsconfig.json) compiles only src/, so functions/ never enters the vite build.
+  // This config exists so the Function code can be typechecked on its own with the
+  // Cloudflare Workers types, without polluting the browser app's DOM-typed build.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022"],
+    "types": ["@cloudflare/workers-types"],
+    "strict": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "skipLibCheck": true
+  },
+  "include": ["**/*.ts", "../src/omr-server.ts"]
+}

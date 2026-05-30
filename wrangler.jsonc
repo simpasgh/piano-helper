@@ -1,0 +1,13 @@
+{
+  // Cloudflare Pages config. Only wrangler reads this; vite build/dev ignore it.
+  // Binds the R2 bucket so Pages Functions (functions/) can read and write OMR files.
+  "name": "piano-helper",
+  "compatibility_date": "2025-01-01",
+  "pages_build_output_dir": "dist",
+  "r2_buckets": [
+    {
+      "binding": "OMR_BUCKET",
+      "bucket_name": "piano-helper-omr"
+    }
+  ]
+}

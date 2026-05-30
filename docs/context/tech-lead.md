@@ -30,6 +30,41 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-30 - OMR code shape (issue #5): Pages Functions + R2 binding + browser poll, pure logic in `src/`.**
+  Endpoints (Pages Functions, `functions/api/`): `POST /api/omr` (`functions/api/omr.ts`, `onRequestPost`)
+  accepts multipart `file` (raw-body fallback), validates MIME in {png, jpeg, pdf} and size <= 12 MB,
+  writes raw bytes to R2 `uploads/<jobId>` (jobId = `crypto.randomUUID()`), fires `repository_dispatch`
+  to `simpasgh/piano-helper` (event_type `omr-job`, client_payload `{ jobId, ext }`, ext in
+  png|jpg|jpeg|pdf), returns 202 `{ jobId }`. On dispatch failure it best-effort deletes the upload and
+  returns 502; bad type/size returns 400 `{ error }`. `GET /api/omr/result?jobId=`
+  (`functions/api/omr/result.ts`, `onRequestGet`) returns 200 + MusicXML
+  (`application/vnd.recordare.musicxml+xml`) when `results/<jobId>.musicxml` exists, 422 `{ error }` from
+  `results/<jobId>.error`, else 404 `{ status: "pending" }`. R2 binding name is `OMR_BUCKET` (set in
+  `wrangler.jsonc` at repo root; wrangler-only file, vite ignores it). Token secret `GITHUB_DISPATCH_TOKEN`.
+  - **Pure logic in `src/` so tests run without Cloudflare runtime:** `src/omr-server.ts` holds
+    MIME->ext, `validateUpload`, `buildDispatchRequest`, and the R2 key helpers; the Functions import it
+    and stay thin. `src/omr.ts` is the DOM-free browser client: `submitOmr(file, fetchFn=fetch)` and
+    `pollOmrResult(jobId, { fetchFn, intervalMs, timeoutMs, sleep, now })` with injected sleep/now/fetch
+    so `src/omr.test.ts` runs instantly with fakes. Tests live in `src/` (Vitest default glob only picked
+    up the three `src/*.test.ts`).
+  - **`functions/` typechecking is isolated from the app build.** Root `tsconfig.json` has
+    `include: ["src"]`, so `tsc` (the `build` step) never compiles `functions/` and the Workers types
+    never leak into the DOM-typed app build. A separate `functions/tsconfig.json` (types
+    `@cloudflare/workers-types`, lib ES2022 only, no DOM) typechecks the Functions on demand via
+    `npx tsc -p functions/tsconfig.json`. Each Function file also has a `/// <reference types="@cloudflare/workers-types" />`.
+    Gotcha: this `@cloudflare/workers-types` version narrows `FormData.get()` to `string | null` (no File),
+    so an `instanceof File` check fails to typecheck. Fix: cast the entry to `unknown` and feature-detect a
+    `arrayBuffer` method (`isFilePart`) in `functions/api/omr.ts`. The Workers runtime does return a File for
+    file fields, so this is type-only, not behavioral.
+  - **`loadScoreXml` refactor in `src/main.ts`:** extracted `loadScoreXml(xml, name)` containing
+    everything from `osmd.load` through the OSMD render, `extractScore`, Tone.Part rebuild,
+    `visualizer.setNotes`, trackName, and playBtn enable. `loadScoreFile` now just reads `file.text()` then
+    calls it; the OMR path calls the same function with the scan result. Scan UI: a second `.file-btn` file
+    input (`#scan-input`), handler disables both inputs + play button while `submitOmr`/`pollOmrResult`
+    runs, shows status in the track-name span, restores on success/error; the rAF loop is never blocked.
+    `vite dev` does not run Pages Functions, so the live POST path needs `wrangler pages dev` to exercise;
+    the contract is covered by unit tests + the functions typecheck.
+
 - **2026-05-30 - Note-name labels (issue #11): piano.ts produces strings, visualizer is presentation-only.**
   Two helpers sit next to `midiToName` in `src/piano.ts`: `midiToLabel(midi, mode)` returns the
   pitch-class token only (no octave) for both key faces and solfege, and `midiToBarLabel(midi, mode)`

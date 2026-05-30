@@ -1,0 +1,129 @@
+name: OMR
+
+# Runs the open-source OMR engine (oemer) on a GitHub-hosted runner in response
+# to a repository_dispatch fired by the Cloudflare Pages Function (/api/omr).
+# Reads the uploaded image/PDF from R2, emits MusicXML back to R2. Public-repo
+# Actions minutes are unlimited and free, which is why heavy ML OMR runs here
+# and not in a request handler. See docs/context/infrastructure.md.
+on:
+  repository_dispatch:
+    types: [omr-job]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: omr-${{ github.event.client_payload.jobId }}
+  cancel-in-progress: false
+
+jobs:
+  transcribe:
+    name: Transcribe sheet to MusicXML
+    runs-on: ubuntu-latest
+    env:
+      # R2 is S3-compatible. Recent aws CLI v2 adds request/response integrity
+      # checksums that R2 rejects, so force them to "when_required".
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      AWS_EC2_METADATA_DISABLED: "true"
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+      R2_S3_ENDPOINT: ${{ secrets.R2_S3_ENDPOINT }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      # Raw, untrusted payload. Validated before any use as a key or filename.
+      RAW_JOB_ID: ${{ github.event.client_payload.jobId }}
+      RAW_EXT: ${{ github.event.client_payload.ext }}
+    steps:
+      - name: Validate job inputs
+        id: validate
+        run: |
+          set -euo pipefail
+          # Strict UUID guard prevents path/key injection into S3 object keys.
+          if ! printf '%s' "$RAW_JOB_ID" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'; then
+            echo "Rejecting invalid jobId"
+            exit 1
+          fi
+          case "$RAW_EXT" in
+            png|jpg|jpeg|pdf) ;;
+            *) echo "Rejecting invalid ext"; exit 1 ;;
+          esac
+          echo "job_id=$RAW_JOB_ID" >> "$GITHUB_OUTPUT"
+          echo "ext=$RAW_EXT" >> "$GITHUB_OUTPUT"
+
+      - name: Install system dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          # libgl1 + libglib for opencv (used by oemer); poppler-utils for pdftoppm (PDF -> image).
+          sudo apt-get install -y --no-install-recommends libgl1 libglib2.0-0 poppler-utils
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install oemer
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install oemer
+
+      - name: Download upload from R2
+        env:
+          JOB_ID: ${{ steps.validate.outputs.job_id }}
+        run: |
+          set -euo pipefail
+          aws s3 cp "s3://${R2_BUCKET}/uploads/${JOB_ID}" ./input_raw \
+            --endpoint-url "$R2_S3_ENDPOINT" --checksum-algorithm CRC32
+
+      - name: Prepare image for oemer
+        id: prep
+        env:
+          EXT: ${{ steps.validate.outputs.ext }}
+        run: |
+          set -euo pipefail
+          if [ "$EXT" = "pdf" ]; then
+            # Convert only the first page; -singlefile drops the page suffix.
+            pdftoppm -png -singlefile -r 300 input_raw input
+            echo "image=input.png" >> "$GITHUB_OUTPUT"
+          else
+            cp input_raw "input.${EXT}"
+            echo "image=input.${EXT}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run oemer
+        timeout-minutes: 25
+        env:
+          IMAGE: ${{ steps.prep.outputs.image }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          # oemer downloads model weights on first run, then writes <basename>.musicxml into -o.
+          oemer "$IMAGE" -o out
+          result="$(ls out/*.musicxml 2>/dev/null | head -n1 || true)"
+          if [ -z "$result" ]; then
+            echo "oemer produced no MusicXML"
+            exit 1
+          fi
+          cp "$result" result.musicxml
+
+      - name: Upload MusicXML result to R2
+        env:
+          JOB_ID: ${{ steps.validate.outputs.job_id }}
+        run: |
+          set -euo pipefail
+          aws s3 cp result.musicxml "s3://${R2_BUCKET}/results/${JOB_ID}.musicxml" \
+            --content-type "application/vnd.recordare.musicxml+xml" \
+            --endpoint-url "$R2_S3_ENDPOINT" --checksum-algorithm CRC32
+
+      - name: Report failure to R2
+        if: failure() && steps.validate.outputs.job_id != ''
+        env:
+          JOB_ID: ${{ steps.validate.outputs.job_id }}
+        run: |
+          set -euo pipefail
+          printf 'OMR failed for this image. The scan may be too complex or low quality. Try a clearer, single-page score.' > result.error
+          aws s3 cp result.error "s3://${R2_BUCKET}/results/${JOB_ID}.error" \
+            --content-type "text/plain; charset=utf-8" \
+            --endpoint-url "$R2_S3_ENDPOINT" --checksum-algorithm CRC32

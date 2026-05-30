@@ -33,6 +33,9 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Typecheck Pages Functions
+        run: npx tsc -p functions/tsconfig.json
+
       - name: Unit tests
         run: npm test
 

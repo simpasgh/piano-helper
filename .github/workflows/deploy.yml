@@ -42,7 +42,10 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy dist --project-name=${{ vars.CF_PAGES_PROJECT || 'piano-helper' }} --branch=main
+          # Output dir comes from pages_build_output_dir in wrangler.jsonc, which
+          # also applies the OMR_BUCKET R2 binding and bundles functions/. Passing a
+          # positional dir here bypasses that config, so we omit it.
+          command: pages deploy --project-name=${{ vars.CF_PAGES_PROJECT || 'piano-helper' }} --branch=main
 
       - name: Smoke-test production
         env:
