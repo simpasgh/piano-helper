@@ -2,7 +2,8 @@ import type { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { ClefEnum, ClefInstruction } from "opensheetmusicdisplay";
 import type { VisNote } from "./visualizer";
 import type { Hand } from "./piano";
-import { handFromStaff } from "./piano";
+import { handFromStaff, buildStaffClefMap } from "./piano";
+import type { StaffClefKind } from "./piano";
 
 export interface ScoreData {
   notes: VisNote[]; // drives audio scheduling and falling notes
@@ -10,32 +11,36 @@ export interface ScoreData {
   duration: number; // total seconds
 }
 
-// Reads the first clef declared on each staff (keyed by the staff's sheet-wide index) so a
-// note can be assigned a hand from its clef rather than its staff position. Treble => right,
-// bass => left. We only need the opening clef of each staff: later clef changes don't move a
-// note to the other hand. Returns "other" for clefs with no hand convention (C, percussion).
+// Reads the first clef declared on each staff so a note can be assigned a hand from its clef
+// rather than its staff position. Treble => right, bass => left, "other" for clefs with no
+// hand convention (C, percussion). The map is keyed by the staff's sheet-wide id
+// (Staff.idInMusicSheet) so it matches the lookup at the call site: the per-measure
+// staff-entry index can diverge from that id for exotic multi-instrument files, so we
+// resolve each entry back to its ParentStaff rather than trusting array position (issue #73
+// / PR #82 follow-up). buildStaffClefMap keeps the first clef seen per staff id.
 function readStaffClefs(
   osmd: OpenSheetMusicDisplay,
-): Map<number, "treble" | "bass" | "other"> {
-  const clefs = new Map<number, "treble" | "bass" | "other">();
+): Map<number, StaffClefKind> {
+  const declarations: { staffId: number; clef: StaffClefKind }[] = [];
   for (const measure of osmd.Sheet.SourceMeasures) {
-    measure.FirstInstructionsStaffEntries?.forEach((entry, staffIndex) => {
-      if (!entry || clefs.has(staffIndex)) return;
+    measure.FirstInstructionsStaffEntries?.forEach((entry) => {
+      const staffId = entry?.ParentStaff?.idInMusicSheet;
+      if (entry == null || staffId == null) return;
       for (const instruction of entry.Instructions) {
         if (instruction instanceof ClefInstruction) {
-          const kind =
+          const clef: StaffClefKind =
             instruction.ClefType === ClefEnum.G
               ? "treble"
               : instruction.ClefType === ClefEnum.F
                 ? "bass"
                 : "other";
-          clefs.set(staffIndex, kind);
+          declarations.push({ staffId, clef });
           break;
         }
       }
     });
   }
-  return clefs;
+  return buildStaffClefMap(declarations);
 }
 
 // Walks the score with a cloned iterator (so the visible cursor isn't disturbed),

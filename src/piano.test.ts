@@ -10,6 +10,7 @@ import {
   handFromStaffIndex,
   handFromClef,
   handFromStaff,
+  buildStaffClefMap,
   handFromPitch,
   HAND_SPLIT_MIDI,
   isHandMuted,
@@ -161,6 +162,53 @@ describe("handFromStaff (clef-first, works for grand staff AND two single-staff 
   it("leaves a lone hand-less staff unknown (nothing to split a single staff into)", () => {
     expect(handFromStaff("other", 0, 1)).toBe("unknown");
     expect(handFromStaff(undefined, -1, 1)).toBe("unknown");
+  });
+});
+
+describe("buildStaffClefMap (keys clefs by sheet-wide staff id, not array position)", () => {
+  it("maps a single grand staff: treble id 0 => right, bass id 1 => left", () => {
+    const map = buildStaffClefMap([
+      { staffId: 0, clef: "treble" },
+      { staffId: 1, clef: "bass" },
+    ]);
+    expect(handFromStaff(map.get(0), 0, 2)).toBe("right");
+    expect(handFromStaff(map.get(1), 1, 2)).toBe("left");
+  });
+
+  it("maps two single-staff parts the same way (staff ids 0 and 1)", () => {
+    const map = buildStaffClefMap([
+      { staffId: 0, clef: "treble" },
+      { staffId: 1, clef: "bass" },
+    ]);
+    expect(handFromStaff(map.get(0), 0, 1)).toBe("right");
+    expect(handFromStaff(map.get(1), 0, 1)).toBe("left");
+  });
+
+  it("keeps a note's hand right when staff ids do not match measure array position", () => {
+    // Exotic multi-instrument file: a lead part (staff id 0) sits before the piano, whose
+    // treble is staff id 1 and bass is staff id 2. With the old index-keyed lookup the
+    // bass note (idInMusicSheet 2) read the clef stored under array index 2, which need not
+    // be the bass; keyed by staff id it resolves correctly regardless of part order.
+    const map = buildStaffClefMap([
+      { staffId: 0, clef: "treble" }, // lead instrument
+      { staffId: 2, clef: "bass" }, // piano left hand, declared before the right here
+      { staffId: 1, clef: "treble" }, // piano right hand
+    ]);
+    expect(map.get(0)).toBe("treble");
+    expect(map.get(1)).toBe("treble");
+    expect(map.get(2)).toBe("bass");
+    // The piano bass note still tags as the left hand.
+    expect(handFromStaff(map.get(2), 1, 2)).toBe("left");
+  });
+
+  it("keeps the first clef per staff: a later clef change does not retag the staff", () => {
+    const map = buildStaffClefMap([
+      { staffId: 0, clef: "treble" },
+      { staffId: 1, clef: "bass" },
+      { staffId: 0, clef: "bass" }, // mid-piece clef change on the treble staff: ignored
+    ]);
+    expect(map.get(0)).toBe("treble");
+    expect(map.get(1)).toBe("bass");
   });
 });
 
