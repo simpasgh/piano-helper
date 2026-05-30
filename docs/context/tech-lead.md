@@ -30,6 +30,32 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-30 - Tempo slider (issue #14): one rate scales audio bpm + visual score time, sync preserved.**
+  A single `tempoRate` (1.0 = 100% = score speed) drives everything. Pure mapping lives in
+  `src/tempo.ts` (`tempoPercentToRate`, `clampTempoPercent`, `rateToBpm`), unit-tested in
+  `src/tempo.test.ts` (9 tests): 100% -> 1.0 -> `BASE_BPM`, 50 -> 0.5, 200 -> 2.0, range
+  endpoints, clamp to [25,200] (and NaN/Infinity -> default 100).
+  - **Mechanism (`src/main.ts`):** capture `BASE_BPM = transport.bpm.value` once at startup
+    (Tone default 120). Audio speed is driven by `transport.bpm.value = BASE_BPM * tempoRate`;
+    Tone live-scales the spacing of the already-scheduled seconds-based `Tone.Part` events, so
+    NO Part rebuild on a tempo change. The frame loop computes
+    `scoreTime = transport.seconds * tempoRate` and passes THAT (not raw seconds) to
+    `visualizer.render`, `syncCursor`, and the `>= score.duration` rewind check. Why it stays
+    in sync: Tone's transport is tick-based, so `transport.seconds = ticks*60/(PPQ*bpm)`;
+    multiplying by `tempoRate = bpm/BASE_BPM` yields `ticks*60/(PPQ*BASE_BPM)`, independent of
+    the current bpm. Score time is therefore continuous across a live tempo change (no jump),
+    and audio + falling notes + cursor scale in lockstep.
+  - **Build-at-baseline subtlety:** a `Tone.Part` built from numeric (seconds) times converts
+    them to ticks using the bpm AT BUILD TIME. So in `loadScoreXml` we set `transport.bpm.value
+    = BASE_BPM` BEFORE constructing the Part, then reapply `rateToBpm(tempoRate, BASE_BPM)`
+    right after `part.start(0)`. This makes note tick positions rate-independent and keeps sync
+    correct even when the tempo was changed before any score was loaded. `rewind()` stops the
+    transport and resets position but leaves bpm alone, so the chosen tempo survives a rewind.
+  - **UI:** native `<input type="range" min=25 max=200 step=5>` plus a `<button id="tempo-readout">`
+    that snaps back to 100% on click/Enter, styled per design.md. `applyTempo(percent)` clamps,
+    updates rate + live bpm + slider + readout; wired to slider `input` and readout `click`, and
+    called once at startup. Works both before and during playback (live, no rebuild).
+
 - **2026-05-30 - Sampled piano (issue #13): Tone.Sampler with Salamander Grand, lazy-loaded, synth fallback.**
   Swapped the sound source only; no timing/scheduling change, so the sync invariant holds.
   - **Sample set + license:** Salamander Grand Piano by Alexander Holm, **CC-BY 3.0** (free to use and

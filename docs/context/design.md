@@ -222,8 +222,57 @@ relevant section, dated.
   function lives next to `midiToName` in `src/piano.ts` (add `midiToLabel(midi, mode)` so the
   visualizer asks piano.ts for the string and stays presentation-only).
 
+## Tempo slider (issue #14)
+
+- **2026-05-30 — Spec for the playback-speed slider.** Ready to implement, no new deps. A
+  native `<input type="range">` styled to match the violet pills; behavior wiring is the Tech
+  Lead's.
+
+  **1. Placement.** Add a `.tempo` control group inside `.controls`, **after the Names toggle,
+  before `#track-name`**. Group is `display: inline-flex; align-items: center; gap: 0.5rem`.
+  Order inside: a small static label `Tempo`, then the slider, then the numeric readout. The
+  readout is the reset affordance (see 4), so it is the last item the eye lands on.
+
+  **2. Range / default / step.** `min="25" max="200" value="100" step="5"`. Percent of notated
+  score tempo. Step 5 gives clean keyboard increments (arrow = 5%, the practical practice
+  granularity) and lands exactly on 100. Readout **is** a percentage.
+
+  **3. Readout.** A `<span id="tempo-readout">` showing e.g. `100%`. Sits immediately right of
+  the slider. Font `600 0.8rem`, color `var(--text)` at `opacity: 0.85`, `min-width: 3.2ch`,
+  `text-align: right` so the row does not jitter as digits change. The `Tempo` label left of
+  the slider is `0.8rem`, `opacity: 0.55` (matches `.track-name` muted weight).
+
+  **4. Reset.** **Click the readout to snap back to 100%.** Simplest discoverable affordance
+  (double-click on a thin slider track is easy to miss). Give the readout `cursor: pointer`,
+  `title="Reset to 100%"`, and make it a real `<button>` (so it is keyboard/Enter operable and
+  focusable) styled flat: no gradient, transparent background, no border, inherit the readout
+  type above; add a subtle `:hover { opacity: 1 }`.
+
+  **5. Visual styling (match the violet pills).** Slider width `120px` (`max-width: 120px`).
+  - **Track:** height `4px`, `border-radius: 2px`, background
+    `linear-gradient(90deg, #7a2fd6, var(--accent))` (same gradient the buttons use), so the
+    track reads as part of the brand.
+  - **Thumb:** `16px` circle, `background: #f2ecf8` (the white-key tone), `border: 2px solid
+    var(--accent)`, `border-radius: 50%`, `box-shadow: 0 0 6px var(--accent-glow)` for the neon
+    halo. `cursor: pointer`. Style for both `::-webkit-slider-thumb` (with
+    `-webkit-appearance: none`) and `::-moz-range-thumb`; set `appearance: none` on the input.
+  - **Focus:** keyboard focus on the slider shows `outline: 2px solid var(--accent); outline-
+    offset: 3px` (do not remove the default outline without replacing it). Same outline on the
+    readout button when focused.
+  - **Accessibility:** `aria-label="Playback tempo, percent of score speed"` on the input;
+    `aria-valuetext` is provided natively by the range. Thumb is 16px and the input has
+    `padding: 6px 0` so the vertical hit target clears ~28px (>= 24px AA target). Track gradient
+    on `--bg` and the `#f2ecf8` thumb both clear 4:1 contrast. Reset button label is the visible
+    `%` text plus the `title`.
+
+  **6. Responsive.** When the header gets narrow, the **`Tempo` text label hides first**
+  (`@media (max-width: 720px) { .tempo > .tempo-label { display: none } }`) since the slider +
+  `%` readout are self-explanatory together. Below that, the slider shrinks to `max-width: 88px`
+  before anything wraps. `#track-name` is already the flexible/truncating element, so the tempo
+  group keeps its intrinsic size and the track name gives way. Do not let the slider drop under
+  `72px` wide (thumb travel gets too coarse for 5% steps).
+
 ## Open UX questions
 
 - Seek/scrub control and a progress/time indicator.
-- Tempo control (playback speed) separate from the score's notated tempo.
 - Hand/voice coloring (left vs right hand) like Synthesia.
