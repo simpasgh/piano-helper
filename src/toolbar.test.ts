@@ -23,6 +23,8 @@ describe("toolbar markup invariants (issue #46)", () => {
     "names-btn",
     "tempo-slider",
     "tempo-readout",
+    "balance-slider",
+    "balance-readout",
     "prev-note-btn",
     "play-btn",
     "next-note-btn",

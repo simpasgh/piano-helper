@@ -22,6 +22,7 @@ import {
   clampTempoPercent,
   TEMPO_DEFAULT_PERCENT,
 } from "./tempo";
+import { handGains, formatBalance, BALANCE_DEFAULT } from "./balance";
 import type { LabelMode } from "./piano";
 import {
   deriveDefaultSheetName,
@@ -46,6 +47,8 @@ const playIcon = playBtn.querySelector(".play-icon") as SVGSVGElement | null;
 const handMutes = document.getElementById("hand-mutes") as HTMLDivElement;
 const muteRightBtn = document.getElementById("mute-right-btn") as HTMLButtonElement;
 const muteLeftBtn = document.getElementById("mute-left-btn") as HTMLButtonElement;
+const balanceSlider = document.getElementById("balance-slider") as HTMLInputElement;
+const balanceReadout = document.getElementById("balance-readout") as HTMLButtonElement;
 
 // Reflect a hand's mute state on its toggle button: aria-pressed for assistive tech, plus a
 // state-explicit tooltip ("audible. Click to mute." vs "muted. Click to unmute.") so the
@@ -103,6 +106,19 @@ let nameEditing = false;
 // notes. A note already sounding when its hand is muted keeps ringing until its release
 // completes (mute applies from the next onset); that is acceptable for v1.
 const handMuted = { left: false, right: false };
+
+// Per-hand volume balance (issue #70). Integer percent in [-100, 100]: 0 = even, positive
+// favours the right hand (left quieter), negative the left. Read fresh inside the Part
+// callback and applied as the per-note velocity, so dragging the slider takes effect from
+// the next onset with no Part rebuild. Layered under the mute flags: a muted hand returns
+// early before velocity is ever computed. "unknown" notes ignore balance (always full).
+let handBalance = BALANCE_DEFAULT;
+
+// Sync the readout text to the current balance. The slider position is set separately so
+// programmatic resets (per load) and the reset button both reflect cleanly.
+function reflectBalance(): void {
+  balanceReadout.textContent = formatBalance(handBalance);
+}
 
 // Tempo (issue #14). The Part schedules notes at score seconds, which Tone converts to
 // transport ticks using the bpm at build time. We capture the default bpm once as the
@@ -193,12 +209,19 @@ function loadNotes(data: ScoreData, name: string, sheet: boolean): void {
     // A skipped trigger has no side effects, so the export/instrument paths are unaffected.
     if (note.hand === "left" && handMuted.left) return;
     if (note.hand === "right" && handMuted.right) return;
+    // Per-hand balance (issue #70): scale this note's velocity by its hand's gain. Read
+    // fresh each callback so slider drags apply from the next onset. "unknown" notes are
+    // unaffected (full velocity).
+    const gains = handGains(handBalance);
+    const velocity =
+      note.hand === "left" ? gains.left : note.hand === "right" ? gains.right : 1;
     // Resolve the instrument per note so playback upgrades to the sampler as soon as it
     // loads. Timing/scheduling is unchanged: only the sound source differs.
     getInstrument().triggerAttackRelease(
       Tone.Frequency(note.midi, "midi").toFrequency(),
       note.duration,
       time,
+      velocity,
     );
   }, score.notes.map((n) => ({ time: n.time, midi: n.midi, duration: n.duration, hand: n.hand })));
   part.start(0);
@@ -214,6 +237,11 @@ function loadNotes(data: ScoreData, name: string, sheet: boolean): void {
   reflectHandMute(muteRightBtn, false);
   reflectHandMute(muteLeftBtn, false);
   visualizer.setMutedHands(handMuted);
+  // Reset the hand balance to even on every load so a previous score's split does not carry
+  // over (issue #70).
+  handBalance = BALANCE_DEFAULT;
+  balanceSlider.value = String(BALANCE_DEFAULT);
+  reflectBalance();
   handMutes.hidden = !hasBothHands(score.notes);
 
   stepIndex = 0;
@@ -760,6 +788,19 @@ muteLeftBtn.addEventListener("click", () => {
   handMuted.left = !handMuted.left;
   reflectHandMute(muteLeftBtn, handMuted.left);
   visualizer.setMutedHands(handMuted);
+});
+
+// Hand balance slider (issue #70): update the live balance and readout on input. The Part
+// callback reads handBalance fresh, so the new split applies from the next onset with no
+// rebuild. The readout button resets to even.
+balanceSlider.addEventListener("input", () => {
+  handBalance = Number(balanceSlider.value);
+  reflectBalance();
+});
+balanceReadout.addEventListener("click", () => {
+  handBalance = BALANCE_DEFAULT;
+  balanceSlider.value = String(BALANCE_DEFAULT);
+  reflectBalance();
 });
 
 // Inline sheet rename (issue #44): the name button opens the edit field; Enter commits,
