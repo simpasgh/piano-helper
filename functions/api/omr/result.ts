@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 
-import { resultKey, errorKey } from "../../../src/omr-server";
+import { resultKey, errorKey, isValidJobId } from "../../../src/omr-server";
 
 interface Env {
   OMR_BUCKET: R2Bucket;
@@ -16,8 +16,8 @@ function json(body: unknown, status: number): Response {
 export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
   const url = new URL(request.url);
   const jobId = url.searchParams.get("jobId");
-  if (!jobId) {
-    return json({ error: "Missing jobId." }, 400);
+  if (!isValidJobId(jobId)) {
+    return json({ error: "Missing or invalid jobId." }, 400);
   }
 
   const xml = await env.OMR_BUCKET.get(resultKey(jobId));

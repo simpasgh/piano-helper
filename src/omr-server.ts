@@ -88,6 +88,13 @@ export function buildDispatchRequest(
   };
 }
 
+// A jobId is always a crypto.randomUUID() we minted. Validate the shape before
+// using it as an R2 key so the result endpoint never reads an attacker-shaped key.
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const isValidJobId = (jobId: string | null | undefined): jobId is string =>
+  typeof jobId === "string" && UUID_RE.test(jobId);
+
 export const uploadKey = (jobId: string): string => `uploads/${jobId}`;
 export const resultKey = (jobId: string): string => `results/${jobId}.musicxml`;
 export const errorKey = (jobId: string): string => `results/${jobId}.error`;

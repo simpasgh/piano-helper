@@ -7,7 +7,23 @@ import {
   uploadKey,
   resultKey,
   errorKey,
+  isValidJobId,
 } from "./omr-server";
+
+describe("isValidJobId", () => {
+  it("accepts a crypto.randomUUID shape", () => {
+    expect(isValidJobId(crypto.randomUUID())).toBe(true);
+    expect(isValidJobId("3f2504e0-4f89-41d3-9a0c-0305e82c3301")).toBe(true);
+  });
+
+  it("rejects empty, malformed, or injection-shaped ids", () => {
+    expect(isValidJobId(null)).toBe(false);
+    expect(isValidJobId("")).toBe(false);
+    expect(isValidJobId("../results/secret")).toBe(false);
+    expect(isValidJobId("not-a-uuid")).toBe(false);
+    expect(isValidJobId("3f2504e0-4f89-41d3-9a0c-0305e82c3301.musicxml")).toBe(false);
+  });
+});
 
 describe("mimeToExt", () => {
   it("maps accepted MIME types to extensions", () => {
