@@ -30,6 +30,47 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-30 - Falling-note name now ALWAYS fits the bar (#39): pure `fitBarLabel` helper + center-anchor.**
+  Fixed the note name overflowing/detaching on short or narrow falling bars. Root cause was the #27
+  label rule: a fixed `600 11px` glyph at a fixed `y = top + 14` with a coarse `w >= 16 && barHeight
+  >= 22` gate AND an "always label the active note" override. On a brief note (a few px tall),
+  `top + 14` placed the name below the bar's bottom edge (detached); the active override stamped a
+  full 11px name onto a ~6px bar (taller+wider than the note, the "oversized pill"); and 11px could
+  exceed a narrow black-key bar's width (sideways spill). Pieces:
+  - **Pure helper `fitBarLabel(barWidth, barHeight, charCount): { show, fontSize }`** in `src/piano.ts`
+    (next to the label helpers). Font derives from bar HEIGHT: `size = min(MAX_LABEL_PX 12,
+    floor(height * LABEL_HEIGHT_RATIO 0.55))`, then capped by WIDTH: `min(size, floor((width - 2*gutter)
+    / (charCount * LABEL_CHAR_WIDTH_RATIO)))` with `LABEL_CHAR_WIDTH_RATIO 0.62`, `LABEL_GUTTER 2`. If
+    the result `< MIN_LABEL_PX (8)`, return `show:false` (omit). All constants exported for the tests.
+    The char-width estimate (0.62 * size per glyph) is a deliberate upper bound for system-ui so the
+    fit math needs NO `ctx.measureText` in the rAF loop (the #12 perf budget: no per-bar measureText).
+  - **Visualizer (`src/visualizer.ts`) consumes the result only.** The label-collection block now calls
+    `fitBarLabel(w, barHeight, text.length)` and pushes `{x, y, text, fontSize}` only when `show`. The
+    "always label active note" override is REMOVED (it was the source of the forced oversized label).
+    Anchor moved from `y = top + 14` (alphabetic baseline) to `y = top + barHeight/2` with
+    `textBaseline = "middle"`, so the centered name sits INSIDE the bar at any height instead of
+    floating below a short one. The text pass sets `ctx.font` per-label (`600 ${fontSize}px system-ui`)
+    inside the loop since sizes now vary; everything else (shadow reset discipline, the
+    rgba(255,255,255,0.82) fill + 2px dark text shadow) is unchanged from #27.
+  - **Does not regress the neighbors.** Centered + width-constrained label can never exceed the bar
+    width, honoring #38's no-wider-than-note rule. The #27 contact stroke and #36 hand stripe are
+    untouched (label is collected after the fill/stripe/stroke pass, drawn last with glow off). Off-range
+    #33 bars still `continue` before the label block, so they stay name-free.
+  - **Tests: 10 new in `src/piano.test.ts`** (`fitBarLabel` describe): normal bar -> MAX size, huge bar
+    capped at MAX, short ~18px bar scales below MAX but >= MIN, ~6px staccato omitted, narrow 13px
+    black-key bar fits-or-omits within width, 6px sliver omitted, 4-char letters+octave name fits, empty
+    name omitted, and a fuzz sweep over widths 6-60 / heights 4-80 / 1-4 chars asserting every shown
+    label stays within [MIN,MAX] and never exceeds the bar width. Canvas paint stays untested (pure
+    geometry is the testable core, same pattern as #38's `noteBarWidth`). Full suite 148 green,
+    `npm run build` green.
+  - **Gotcha:** `transcribe.test.ts` fails with "Failed to load url @spotify/basic-pitch" if
+    `node_modules` is stale in a fresh worktree; `npm install` pulls the dep and the suite goes 148
+    green. Not related to any source change.
+  - **Verification caveat:** preview MCP server is bound to a DIFFERENT worktree (port 5173,
+    gifted-fermi) and reuses it, so no live in-browser visual pass from this agent worktree. Verified by
+    the 10 unit tests + the fuzz sweep (the label-fit decision is fully captured in the pure helper),
+    `npm run build` green, and code reasoning that the centered+fitted glyph is bounded by the bar.
+
 - **2026-05-30 - Note-entry artifact FIXED (#38): removed `drawLandingBloom`, the only contact
   element wider than the note.** The "rectangular layer wider than the note, sticking out on both
   sides at the keyboard entry" was the per-active-key landing bloom in `src/visualizer.ts`

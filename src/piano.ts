@@ -103,6 +103,58 @@ export function midiToBarLabel(midi: number, mode: LabelMode): string {
   return base;
 }
 
+// --- Falling-note label fit (issue #39): the name must always fit the bar. ---
+
+// Smallest legible glyph size on the dark stage; below this we omit the label.
+export const MIN_LABEL_PX = 8;
+// Ceiling so a tall bar's name never grows past the historical ~11-12px look.
+export const MAX_LABEL_PX = 12;
+// Font size is derived from the bar HEIGHT (the binding dimension for short notes).
+export const LABEL_HEIGHT_RATIO = 0.55;
+// Per-character width estimate as a fraction of font size (safe upper bound for
+// system-ui letters/digits at these sizes), used to fit the name to the bar width
+// without a canvas measureText in the hot loop.
+export const LABEL_CHAR_WIDTH_RATIO = 0.62;
+// Breathing room kept on each side of the name inside the bar.
+export const LABEL_GUTTER = 2;
+
+export interface BarLabelFit {
+  show: boolean;
+  fontSize: number; // px; only meaningful when show is true
+}
+
+// Decides whether a falling note's name fits its bar and at what font size, so the
+// label never exceeds the note's bounds (issue #39). Pure and DOM-free: the visualizer
+// passes the bar's drawn width/height and the name's character count, paints if `show`.
+//
+// Rule: scale the font to the bar height (clamped MIN..MAX), then shrink further if the
+// name is too wide for the bar; if it still does not fit at MIN_LABEL_PX in either axis,
+// omit the label (a bar that small reads better with no detached name than a forced one).
+export function fitBarLabel(
+  barWidth: number,
+  barHeight: number,
+  charCount: number,
+): BarLabelFit {
+  if (charCount <= 0) return { show: false, fontSize: 0 };
+
+  // Start from the height-derived size, capped at MAX.
+  let size = Math.min(MAX_LABEL_PX, Math.floor(barHeight * LABEL_HEIGHT_RATIO));
+
+  // The name must fit the bar width: width(size) = charCount * size * ratio + 2*gutter.
+  // Solve for the largest size that fits, then take the smaller of the two constraints.
+  const usableWidth = barWidth - 2 * LABEL_GUTTER;
+  if (usableWidth > 0) {
+    const widthCap = Math.floor(usableWidth / (charCount * LABEL_CHAR_WIDTH_RATIO));
+    size = Math.min(size, widthCap);
+  } else {
+    size = 0;
+  }
+
+  // Too small to be legible in either axis -> omit (the #39 fallback).
+  if (size < MIN_LABEL_PX) return { show: false, fontSize: 0 };
+  return { show: true, fontSize: size };
+}
+
 // --- Color (issue #12): pitch-class hue wheel, purple-anchored. ---
 
 // Pitch class 0..11 (C..B), handling negative midi defensively.

@@ -785,6 +785,48 @@ relevant section, dated.
 
 ## Contact glow + label move (issue #27)
 
+- **2026-05-30 - Note name must always FIT the falling bar: scale font to the bar, anchor INSIDE it, omit when truly too small (#39).**
+  Correction to the #27 label rule. The #27 spec used a fixed `600 11px` glyph at a fixed
+  `y = top + 14` with a coarse `w >= 16 && barHeight >= 22` gate PLUS an "always label the
+  active note" override. On short/small bars this broke three ways: (a) a brief note is only a
+  few px tall, so `top + 14` placed the name BELOW the bar's bottom edge (detached, floating in
+  the lane); (b) the active-note override forced a full-size 11px name onto a ~6px bar, so the
+  label was taller AND wider than the note it belonged to (the "oversized pill" look); (c) the
+  fixed 11px width could exceed a narrow black-key bar, spilling sideways. Fix = the simplest of
+  the ticket's suggested approaches, combined:
+  - **Scale the font to the bar, with a floor and a ceiling.** Font size is derived from the bar
+    HEIGHT (the binding dimension for short notes): `size = clamp(MIN_LABEL_PX, floor(height *
+    LABEL_HEIGHT_RATIO), MAX_LABEL_PX)`, with `MIN_LABEL_PX = 8`, `MAX_LABEL_PX = 12`,
+    `LABEL_HEIGHT_RATIO = 0.55`. A tall note keeps the familiar ~11-12px name; a short note shrinks
+    its name to match instead of overflowing. The ceiling means we never grow the name larger than
+    the old look on a fat bar.
+  - **Then also fit the WIDTH; shrink further or drop.** Estimate glyph width as `size *
+    LABEL_CHAR_WIDTH_RATIO` per character (`0.62`, a safe monospace-ish upper bound for system-ui
+    digits/letters), plus a `LABEL_GUTTER` (2px) each side. If the name does not fit the bar width
+    at the height-derived size, reduce the size until it does; if it still does not fit at
+    `MIN_LABEL_PX`, OMIT the label. So a name never spills past the bar's left/right edges.
+  - **Anchor the name INSIDE the bar, vertically centered.** New baseline is the bar's vertical
+    center (`y = top + height/2`, `textBaseline middle`), not a fixed offset from the top. On a
+    short bar the centered name sits squarely within the (small) bar; on a tall bar it rides near
+    the upper-middle, still clear of the contact point at the bottom edge. `x = x + w/2`,
+    `textAlign center` unchanged.
+  - **Fallback when truly too small = omit (no forced label).** The "always label the active note"
+    override is REMOVED: forcing a legible-min name onto a sub-8px bar is exactly the bug. When a
+    bar cannot seat a single `MIN_LABEL_PX` glyph within BOTH its width and height, the name is
+    omitted for that note. Identity is still carried by horizontal position (a piano is a position
+    display), the active-key hue fill + key-face label at the keybed, and the sheet-view labels
+    (#17). A staccato note simply shows no in-bar name, which reads as intentional, not broken.
+  - **Why not truncate/abbreviate:** solfege/letter names are already 1-4 chars (e.g. "Sol#",
+    "C#4"); truncating "Sol#" to "S" loses the note, so on a bar too small for the whole name,
+    omit beats a one-letter stub. Width-fit handles the common narrow-bar case by shrinking, and
+    omit is the clean floor. No ellipsis, no per-char truncation logic.
+  - **Pure + testable:** the whole decision is a DOM-free helper `fitBarLabel(barWidth, barHeight,
+    charCount)` in `src/piano.ts` returning `{ show, fontSize }`, unit-tested across very short
+    notes, normal notes, narrow black-key bars, and long (letters+octave) names. The visualizer
+    only consumes the result and paints. Effects untouched: #27 contact stroke, #36 hand stripe,
+    #38 no-wider-than-note rule (the label is centered and width-constrained, so it can never
+    exceed the bar), and the #33 off-range dimmed bars (still no label).
+
 - **2026-05-30 - Note entry must be clean: NO element wider than the note at the keybed (#38).**
   Follow-up correction to #27. The landing bloom that #27 kept (a soft hue pool the full key width,
   meant to make the KEY read as lit) was visually reading as a separate rectangular strip sticking
