@@ -4,6 +4,21 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-05-30: PR #78 (Bug 1: in-flight falling notes glow halo removed; only the keybed
+  contact note glows) -> **PASS** on `main` (merge commit 2533c9c, deployed to
+  https://piano-helper.pages.dev, smoke green). Drove live against the merged code (grand-staff
+  MusicXML, Play, mid-playback frame): mid-screen falling pills (Re/La/Fa/Sol/Mi/Do at various
+  heights) render as flat solid colored bars with NO halo; the bars touching the keyboard
+  (purple Do, green Sol) show the bright #27 contact glow border. Console clean.
+  - Bug 1 acceptance MET: in-flight bars calm, only the contact note highlighted.
+  - Code delta is a single `ctx.shadowBlur` 18/20 -> 0 on the body fill (visualizer.ts:219);
+    every neighbor reads its own state independently so the blast radius is just the body glow.
+  - Regression checklist, no concerns: #27 contact glow still fires (shadowBlur 22, only when
+    isActive && !muted && bar at keybed, visualizer.ts:255-265) and was observed bright on the
+    contact bars; #36 hand caps render (light=R/dark=L, visualizer.ts:231-242); pitch hues and
+    #67 two-pole name labels render; #54 muted ghosting and #33 off-range dim untouched.
+  - No independent re-drive required: the observed frame exercises exactly the changed path.
+
 - 2026-05-30: PR #75 (#70 per-hand volume Balance slider) -> **FAIL** on `main`
   (commit 95bfcb5), bug filed as #76. Drove it live in real Chromium via Playwright against
   the local preview synced to merged `main`. Injected a 2-staff grand MusicXML (treble C6-G6
