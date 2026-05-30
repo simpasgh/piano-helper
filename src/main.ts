@@ -4,12 +4,15 @@ import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { Visualizer } from "./visualizer";
 import { extractScore, type ScoreData } from "./score";
 import type { LabelMode } from "./piano";
+import { pollOmrResult, requestOmr, validateSheetFile } from "./omr";
 
 const canvas = document.getElementById("stage") as HTMLCanvasElement;
 const fileInput = document.getElementById("file-input") as HTMLInputElement;
+const sheetInput = document.getElementById("sheet-input") as HTMLInputElement;
 const playBtn = document.getElementById("play-btn") as HTMLButtonElement;
 const namesBtn = document.getElementById("names-btn") as HTMLButtonElement;
 const trackName = document.getElementById("track-name") as HTMLSpanElement;
+const omrStatus = document.getElementById("omr-status") as HTMLSpanElement;
 
 const visualizer = new Visualizer(canvas);
 const osmd = new OpenSheetMusicDisplay("sheet", {
@@ -35,8 +38,7 @@ function ensureSynth(): Tone.PolySynth {
   return synth;
 }
 
-async function loadScoreFile(file: File): Promise<void> {
-  const xml = await file.text();
+async function loadMusicXml(xml: string, label: string): Promise<void> {
   await osmd.load(xml);
   osmd.render();
   osmd.cursor.reset();
@@ -62,9 +64,14 @@ async function loadScoreFile(file: File): Promise<void> {
   part.start(0);
 
   stepIndex = 0;
-  trackName.textContent = `${file.name} (${score.notes.length} notes)`;
+  trackName.textContent = `${label} (${score.notes.length} notes)`;
   playBtn.disabled = false;
   setPlaying(false);
+}
+
+async function loadScoreFile(file: File): Promise<void> {
+  const xml = await file.text();
+  await loadMusicXml(xml, file.name);
 }
 
 function setPlaying(value: boolean): void {
@@ -110,6 +117,40 @@ fileInput.addEventListener("change", () => {
     loadScoreFile(file).catch((err) => {
       console.error("Failed to load score:", err);
       alert(`Failed to load score: ${err.message}`);
+    });
+  }
+});
+
+function setOmrStatus(text: string, isError = false): void {
+  omrStatus.textContent = text;
+  omrStatus.classList.toggle("error", isError);
+}
+
+async function importSheet(file: File): Promise<void> {
+  const invalid = validateSheetFile(file);
+  if (invalid) {
+    setOmrStatus(invalid, true);
+    return;
+  }
+  try {
+    setOmrStatus("Uploading sheet...");
+    const { jobId } = await requestOmr(file);
+    setOmrStatus("Converting (this can take a few minutes)...");
+    const xml = await pollOmrResult(jobId);
+    setOmrStatus("Rendering score...");
+    await loadMusicXml(xml, file.name);
+    setOmrStatus("");
+  } catch (err) {
+    setOmrStatus(`Conversion failed: ${(err as Error).message}`, true);
+  }
+}
+
+sheetInput.addEventListener("change", () => {
+  const file = sheetInput.files?.[0];
+  if (file) {
+    importSheet(file).finally(() => {
+      // Allow re-importing the same file by clearing the input value.
+      sheetInput.value = "";
     });
   }
 });

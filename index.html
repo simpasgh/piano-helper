@@ -14,9 +14,19 @@
             Load MusicXML
             <input id="file-input" type="file" accept=".xml,.musicxml" hidden />
           </label>
+          <label class="file-btn">
+            Import sheet (PDF/image)
+            <input
+              id="sheet-input"
+              type="file"
+              accept="application/pdf,image/png,image/jpeg"
+              hidden
+            />
+          </label>
           <button id="play-btn" disabled>Play</button>
           <button id="names-btn" class="toggle">Names: Solfege</button>
           <span id="track-name" class="track-name">No file loaded</span>
+          <span id="omr-status" class="omr-status"></span>
         </div>
       </header>
       <div id="sheet"></div>

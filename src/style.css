@@ -85,6 +85,20 @@ button:disabled {
   opacity: 0.65;
 }
 
+.omr-status {
+  font-size: 0.85rem;
+  color: var(--accent);
+  opacity: 0.9;
+}
+
+.omr-status:empty {
+  display: none;
+}
+
+.omr-status.error {
+  color: #ff7a7a;
+}
+
 #sheet {
   height: 42%;
   overflow-y: auto;

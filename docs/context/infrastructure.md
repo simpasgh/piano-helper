@@ -22,6 +22,85 @@ Accounts available:
 
 ## CI/CD
 
+- **2026-05-30 - OMR Actions workflow built + R2 bucket `piano-helper-omr` created (issue #5).**
+  Added `.github/workflows/omr.yml`: triggers ONLY on `repository_dispatch` (event_type
+  `omr-job`, fired by the Pages Function) and manual `workflow_dispatch` (a `jobId` input
+  for testing). No `pull_request`/`push` trigger, so it can never run on a PR or on a push
+  to `main` and cannot fail a required check or turn `main` red before the secrets exist.
+  `concurrency: omr-<jobId>` coalesces duplicate dispatches; `permissions: contents: read`.
+  Steps: checkout -> validate jobId (rejects anything outside `[A-Za-z0-9_-]`) -> setup
+  Python 3.10 -> install `poppler-utils` + `pip install oemer` -> `aws s3 cp` the upload
+  from `s3://$R2_BUCKET/uploads/<jobId>` (AWS CLI is preinstalled on `ubuntu-latest`) ->
+  sniff MIME and rasterize PDFs first page with `pdftoppm -png -r 300` -> run oemer ->
+  homr fallback (`pip install homr`) only if oemer fails -> if BOTH fail, write a minimal
+  valid `score-partwise` **error sentinel** MusicXML (work-title "OMR failed",
+  `omr-status=failed`) so the browser poll terminates instead of hanging -> `aws s3 cp`
+  `result.musicxml` to `s3://$R2_BUCKET/results/<jobId>.musicxml` with
+  `--content-type application/vnd.recordare.musicxml+xml`. **Something always lands at the
+  result key.**
+
+  **R2 bucket `piano-helper-omr` was created** via local OAuth wrangler:
+  `npx wrangler r2 bucket create piano-helper-omr` (Standard storage; confirmed via
+  `wrangler r2 bucket list`). The default-bound binding name wrangler suggests is
+  `piano_helper_omr`, but the Pages Function contract requires the binding be named
+  **`OMR_BUCKET`** (set that name when adding the R2 binding to the Pages project).
+
+  **Interface contract (must match the Pages Function the app agent built):**
+  - R2 keys: input `uploads/<jobId>` (raw bytes, original content-type),
+    output `results/<jobId>.musicxml` (UTF-8 MusicXML).
+  - Dispatch: `repository_dispatch` event_type `omr-job`,
+    client_payload `{ jobId, contentType, filename }`.
+
+  **Secret/var names, BOTH sides:**
+  - Actions secrets the workflow reads (4): `R2_S3_ENDPOINT`, `R2_ACCESS_KEY_ID`,
+    `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` (value `piano-helper-omr`). The workflow maps
+    the first three onto `AWS_*` env and sets `AWS_DEFAULT_REGION=auto`.
+  - Pages Function (app agent owns; documented here only): R2 binding **`OMR_BUCKET`**,
+    secret `GITHUB_DISPATCH_TOKEN` (fine-grained PAT, this repo, Actions read+write),
+    var `GITHUB_REPOSITORY` = `simpasgh/piano-helper`.
+
+  **RUNBOOK (copy-paste; run from the repo root). Tokens are NOT minted here on purpose;
+  each must be created by hand in the dashboard, then wired in.**
+
+  1) R2 bucket (DONE, listed here for reproducibility):
+  ```bash
+  npx wrangler r2 bucket create piano-helper-omr
+  ```
+
+  2) Mint the R2 S3 API token: Cloudflare dashboard -> R2 -> "Manage R2 API Tokens" ->
+     "Create API token". Permission **Object Read & Write**, scope to bucket
+     `piano-helper-omr`. Copy the **Access Key ID**, **Secret Access Key**, and the
+     **S3 endpoint** (`https://<ACCOUNT_ID>.r2.cloudflarestorage.com`). Then set the four
+     Actions secrets:
+  ```bash
+  gh secret set R2_S3_ENDPOINT      --body 'https://<ACCOUNT_ID>.r2.cloudflarestorage.com'
+  gh secret set R2_ACCESS_KEY_ID    --body '<R2_ACCESS_KEY_ID>'
+  gh secret set R2_SECRET_ACCESS_KEY --body '<R2_SECRET_ACCESS_KEY>'
+  gh secret set R2_BUCKET           --body 'piano-helper-omr'
+  ```
+
+  3) Mint the GitHub fine-grained PAT for the Pages Function: GitHub -> Settings ->
+     Developer settings -> Fine-grained tokens -> "Generate new token". Resource owner
+     `simpasgh`, repository access = only `simpasgh/piano-helper`, Repository permissions:
+     **Actions: Read and write** (this is what allows firing `repository_dispatch`). Copy
+     the token; it is the Pages Function's `GITHUB_DISPATCH_TOKEN`.
+
+  4) Wire the Pages Function bindings (Cloudflare dashboard -> Workers & Pages ->
+     `piano-helper` -> Settings):
+     - Functions -> R2 bucket bindings: add binding **`OMR_BUCKET`** -> bucket
+       `piano-helper-omr` (do this for Production, and Preview if used).
+     - Environment variables and secrets:
+       - secret `GITHUB_DISPATCH_TOKEN` = the PAT from step 3 (encrypt),
+       - var `GITHUB_REPOSITORY` = `simpasgh/piano-helper`.
+     - Note: the R2 binding can also be declared in `wrangler.toml` /
+       `wrangler.jsonc` under `[[r2_buckets]]` with `binding = "OMR_BUCKET"`,
+       `bucket_name = "piano-helper-omr"` if the Function build reads config from file.
+
+  5) Smoke-test the runner path without the Function: upload any PNG to
+     `uploads/<jobId>` in R2, then
+     `gh workflow run omr.yml -f jobId=<jobId>`, and check that
+     `results/<jobId>.musicxml` appears.
+
 - **2026-05-30 - OMR trigger (planned, not built) adds a Cloudflare Pages Function proxy + a GitHub PAT secret + an R2 bucket, all free.** The async OMR pipeline (issue #5) will be triggered by a Pages Function in this same Pages project (`functions/api/`), so no separate Worker or project. It needs: a GitHub fine-grained PAT (minimal scope: this repo, Actions read/write) stored as a Function secret to fire `repository_dispatch`; an R2 binding on the Function, plus an R2 S3 API token as an Actions secret so the runner can read the upload and write the result. Pages Functions bill on the Workers free tier (100k requests/day shared with Workers, 10ms CPU/invocation), which a thin dispatch + R2-put proxy stays well under (OMR itself runs on the runner). R2 free tier: 10 GB-month storage, 1M Class A + 10M Class B ops/month, used for both the upload and the MusicXML result. Caps to watch (both very large for a hobby OMR tool): the 100k/day combined Functions+Workers request quota and the R2 monthly op counts. Full rationale and rejected alternatives are in tech-lead.md (same date).
 
 - **2026-05-30:** Bumped all JS actions to their Node 24-native majors ahead of GitHub's
@@ -75,3 +154,17 @@ Repo **secrets**: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`.
 - [x] Repo secret `CLOUDFLARE_API_TOKEN` set (dedicated `piano-helper-deploy` token,
       Account > Cloudflare Pages > Edit; separate from the todeo/finpilot tokens).
 - [x] Repo variable `DEPLOY_ENABLED=true` (CI deploy + prod smoke test verified green).
+
+### OMR (issue #5) setup status
+
+- [x] R2 bucket `piano-helper-omr` created (`wrangler r2 bucket create`).
+- [x] `.github/workflows/omr.yml` added (dispatch-only, never runs on PR/push, so it
+      cannot break CI or turn `main` red before secrets exist).
+- [ ] Mint R2 S3 API token (Object Read & Write, bucket `piano-helper-omr`). (manual)
+- [ ] Set Actions secrets `R2_S3_ENDPOINT`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`,
+      `R2_BUCKET=piano-helper-omr` (`gh secret set ...`). (needs the token above)
+- [ ] Mint GitHub fine-grained PAT (this repo, Actions read+write) for the Pages Function.
+- [ ] Bind on Pages project: R2 binding `OMR_BUCKET` -> `piano-helper-omr`, secret
+      `GITHUB_DISPATCH_TOKEN`, var `GITHUB_REPOSITORY=simpasgh/piano-helper`. (app + infra)
+- [ ] End-to-end smoke: upload to `uploads/<jobId>`, `gh workflow run omr.yml -f jobId=...`,
+      confirm `results/<jobId>.musicxml` lands.
