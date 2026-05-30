@@ -85,6 +85,8 @@ body {
   padding: 8px 0;
   background: transparent;
   cursor: pointer;
+  /* Let a touch drag move the thumb instead of scrolling the page (issue #33). */
+  touch-action: none;
 }
 
 #seek-slider::-webkit-slider-runnable-track {
@@ -218,6 +220,7 @@ button:disabled {
   padding: 6px 0;
   background: transparent;
   cursor: pointer;
+  touch-action: none;
 }
 
 /* The track is painted via the runnable-track pseudo-elements so the 4px line sits
@@ -287,7 +290,36 @@ button:disabled {
   outline-offset: 3px;
 }
 
+/* Tablet: tighten the toolbar before the phone breakpoint kicks in (issue #33). */
+@media (max-width: 900px) {
+  .topbar {
+    gap: 1rem;
+    padding: 0.6rem 1rem;
+  }
+
+  .controls {
+    gap: 0.6rem;
+  }
+}
+
+/* Phone: stack-friendly toolbar, touch-sized targets, shorter sheet pane. */
 @media (max-width: 720px) {
+  .topbar {
+    gap: 0.6rem;
+    padding: 0.55rem 0.75rem;
+  }
+
+  /* Reclaim horizontal space on small screens. */
+  .topbar h1,
+  .track-name,
+  .sound-status {
+    display: none;
+  }
+
+  .transport {
+    flex-wrap: wrap;
+  }
+
   .tempo > .tempo-label {
     display: none;
   }
@@ -302,8 +334,97 @@ button:disabled {
     display: none;
   }
 
+  /* >=44px tap targets (Apple HIG) for every control on touch screens. */
+  button,
+  .file-btn,
+  .toggle,
   .step-btn {
-    min-width: 2.1rem;
+    min-height: 44px;
+  }
+
+  .step-btn {
+    min-width: 44px;
+  }
+
+  /* Grow the slider thumbs and their hit padding so they are draggable by thumb.
+     margin-top recenters the thumb over the track: -(thumb - track) / 2. */
+  #seek-slider,
+  #tempo-slider {
+    padding: 10px 0;
+  }
+
+  #seek-slider::-webkit-slider-thumb {
+    width: 24px;
+    height: 24px;
+    margin-top: -9.5px;
+  }
+
+  #seek-slider::-moz-range-thumb {
+    width: 24px;
+    height: 24px;
+  }
+
+  #tempo-slider::-webkit-slider-thumb {
+    width: 24px;
+    height: 24px;
+    margin-top: -10px;
+  }
+
+  #tempo-slider::-moz-range-thumb {
+    width: 24px;
+    height: 24px;
+  }
+
+  #sheet {
+    height: 34%;
+    overflow-x: auto;
+  }
+}
+
+/* Narrow phone: give the keyboard/visualizer a touch more vertical room. */
+@media (max-width: 380px) {
+  #sheet {
+    height: 30%;
+  }
+}
+
+/* "Rotate to landscape" hint (issue #33): a non-blocking pill shown only on a narrow
+   portrait phone. It never intercepts touches, fades out on its own after 4s, and the
+   orientation media query below hides it once the phone is in landscape. CSS only. */
+#rotate-hint {
+  position: fixed;
+  left: 50%;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 1rem);
+  transform: translateX(-50%);
+  z-index: 5;
+  display: none;
+  max-width: calc(100% - 2rem);
+  padding: 0.55rem 0.9rem;
+  border-radius: 999px;
+  background: rgba(20, 12, 32, 0.92);
+  border: 1px solid rgba(177, 75, 255, 0.4);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
+  color: var(--text);
+  font-size: 0.8rem;
+  font-weight: 600;
+  white-space: nowrap;
+  pointer-events: none;
+  animation: rotate-hint-fade 4s ease forwards;
+}
+
+@media (max-width: 540px) and (orientation: portrait) {
+  #rotate-hint {
+    display: block;
+  }
+}
+
+@keyframes rotate-hint-fade {
+  0%,
+  70% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
   }
 }
 

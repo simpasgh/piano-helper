@@ -62,6 +62,19 @@ describe("buildKeyLayout", () => {
       expect(Math.abs(ratio - Math.round(ratio))).toBeCloseTo(0, 6);
     }
   });
+
+  it("restricts to a sub-range and tiles its white keys across the full width", () => {
+    // C2..C7 (issue #33 narrow window): 36..96, endpoints inclusive and both C.
+    const window = buildKeyLayout(WIDTH, 36, 96);
+    expect(window[0].midi).toBe(36);
+    expect(window[window.length - 1].midi).toBe(96);
+    const whites = window.filter((k) => !k.black);
+    const whiteWidth = WIDTH / whites.length;
+    expect(whites[0].x).toBeCloseTo(0, 6);
+    const last = whites[whites.length - 1];
+    expect(last.x + last.width).toBeCloseTo(WIDTH, 6);
+    expect(whites[0].width).toBeCloseTo(whiteWidth, 6);
+  });
 });
 
 describe("midiToName", () => {
