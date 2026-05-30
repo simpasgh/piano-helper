@@ -47,12 +47,16 @@ const handMutes = document.getElementById("hand-mutes") as HTMLDivElement;
 const muteRightBtn = document.getElementById("mute-right-btn") as HTMLButtonElement;
 const muteLeftBtn = document.getElementById("mute-left-btn") as HTMLButtonElement;
 
-// Reflect a hand's mute state on its toggle button: aria-pressed for assistive tech plus a
-// visible "muted" word, so a click reads as an unmistakable state change (not a no-op).
+// Reflect a hand's mute state on its toggle button: aria-pressed for assistive tech, plus a
+// state-explicit tooltip ("audible. Click to mute." vs "muted. Click to unmute.") so the
+// control never relies on the ambiguous "pressed" alone. The speaker-slash glyph and accent
+// fill are driven purely by aria-pressed in CSS, so no glyph swap is needed here.
 function reflectHandMute(btn: HTMLButtonElement, muted: boolean): void {
   btn.setAttribute("aria-pressed", String(muted));
-  const state = btn.querySelector(".hand-toggle-state");
-  if (state) state.textContent = muted ? "muted" : "";
+  const name = btn.querySelector(".hand-toggle-label")?.textContent ?? "This hand";
+  btn.title = muted
+    ? `${name}: muted. Click to unmute.`
+    : `${name}: audible. Click to mute.`;
 }
 const tempoSlider = document.getElementById("tempo-slider") as HTMLInputElement;
 const tempoReadout = document.getElementById("tempo-readout") as HTMLButtonElement;

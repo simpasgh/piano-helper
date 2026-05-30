@@ -196,22 +196,25 @@ export class Visualizer {
       this.roundRect(x, top, w, barHeight, 4);
       ctx.fill();
 
-      // Hand accent stripe (issue #36): a thin neutral rail on one edge of the bar so the
-      // eye reads which hand plays it without disturbing the pitch hue. Dark rail on the
-      // LEFT edge = left hand; light rail on the RIGHT edge = right hand. Drawn after the
-      // body fill, with the glow off, and before the contact stroke. It inherits the bar's
-      // current globalAlpha, so off-range bars (0.35) keep a dimmed stripe. "unknown" draws
-      // nothing, so single-staff and audio-derived scores render exactly as before.
+      // Hand cue (issue #36, redesigned): a bold full-width cap on the bar's LEADING (top)
+      // edge so the eye reads which hand plays it without overriding the pitch hue (hue still
+      // owns the body). Light cap = right hand, dark cap = left hand. A 1px opposite-luminance
+      // divider runs under the cap so each cap carries BOTH luminance poles and can never wash
+      // out against the hue beneath it (a white cap still reads on pale yellow, a dark cap on
+      // deep violet). Drawn after the body fill with the glow off, before the contact stroke;
+      // inherits the bar's globalAlpha so off-range bars (0.35) keep a dimmed cap. "unknown"
+      // draws nothing, so single-staff and audio-derived scores render exactly as before.
       if (note.hand === "left" || note.hand === "right") {
-        const stripeW = Math.max(3, Math.min(6, w * 0.16));
+        const capH = Math.max(5, Math.min(8, barHeight * 0.18));
+        const capFill =
+          note.hand === "right" ? "rgba(255, 255, 255, 0.95)" : "rgba(10, 7, 18, 0.92)";
+        const dividerColor =
+          note.hand === "right" ? "rgba(10, 7, 18, 0.9)" : "rgba(255, 255, 255, 0.9)";
         ctx.shadowBlur = 0;
-        if (note.hand === "left") {
-          ctx.fillStyle = "rgba(10, 7, 18, 0.85)";
-          ctx.fillRect(x + 1, top + 1, stripeW, barHeight - 2);
-        } else {
-          ctx.fillStyle = "rgba(255, 255, 255, 0.92)";
-          ctx.fillRect(x + w - 1 - stripeW, top + 1, stripeW, barHeight - 2);
-        }
+        ctx.fillStyle = capFill;
+        ctx.fillRect(x + 1, top + 1, w - 2, capH);
+        ctx.fillStyle = dividerColor;
+        ctx.fillRect(x + 1, top + 1 + capH, w - 2, 1);
       }
 
       // Clamped off-window bars get neither the contact glow nor a label: they are a
