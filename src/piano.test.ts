@@ -11,10 +11,14 @@ import {
   isHandMuted,
   noteBarWidth,
   fitBarLabel,
+  labelableFallingNotes,
+  approachingKeyMidis,
+  KEY_LABEL_LOOK_AHEAD,
   MIN_LABEL_PX,
   MAX_LABEL_PX,
   LABEL_CHAR_WIDTH_RATIO,
   LABEL_GUTTER,
+  type LabelNote,
 } from "./piano";
 
 describe("isBlackKey", () => {
@@ -312,5 +316,136 @@ describe("fitBarLabel (issue #39: name must fit the bar)", () => {
         }
       }
     }
+  });
+});
+
+// Helper: build a LabelNote with sane defaults so each test only states what matters.
+function ln(partial: Partial<LabelNote> & { midi: number; time: number }): LabelNote {
+  return { duration: 0.5, ...partial };
+}
+
+describe("labelableFallingNotes (issue #42: one label per repeated run, both hands)", () => {
+  it("labels the first of a repeated same-pitch run and skips the repeats", () => {
+    // Do Do Do (same pitch, same hand) -> only the first is labeled.
+    const notes = [
+      ln({ midi: 60, time: 0, hand: "right" }),
+      ln({ midi: 60, time: 1, hand: "right" }),
+      ln({ midi: 60, time: 2, hand: "right" }),
+    ];
+    expect(labelableFallingNotes(notes)).toEqual([true, false, false]);
+  });
+
+  it("re-labels when the pitch changes, then again on a new run", () => {
+    // Do Do Re Re Do -> label at each pitch change (run start).
+    const notes = [
+      ln({ midi: 60, time: 0, hand: "right" }),
+      ln({ midi: 60, time: 1, hand: "right" }),
+      ln({ midi: 62, time: 2, hand: "right" }),
+      ln({ midi: 62, time: 3, hand: "right" }),
+      ln({ midi: 60, time: 4, hand: "right" }),
+    ];
+    expect(labelableFallingNotes(notes)).toEqual([true, false, true, false, true]);
+  });
+
+  it("applies the SAME rule to both hands: each is labeled identically (issue #42 bug)", () => {
+    // A repeated run in the LEFT hand and an identical repeated run in the RIGHT hand
+    // must produce the same label pattern; the old code dropped right-hand repeats only
+    // as an accident of bar height, which this fixes.
+    const left = [
+      ln({ midi: 48, time: 0, hand: "left" }),
+      ln({ midi: 48, time: 1, hand: "left" }),
+      ln({ midi: 50, time: 2, hand: "left" }),
+    ];
+    const right = [
+      ln({ midi: 72, time: 0, hand: "right" }),
+      ln({ midi: 72, time: 1, hand: "right" }),
+      ln({ midi: 74, time: 2, hand: "right" }),
+    ];
+    expect(labelableFallingNotes(left)).toEqual([true, false, true]);
+    expect(labelableFallingNotes(right)).toEqual([true, false, true]);
+  });
+
+  it("dedupes each hand independently so one hand never suppresses the other", () => {
+    // Right C repeats while left C also repeats, interleaved in time. Each lane keeps its
+    // own run, so the right C and the left C are each labeled on their first occurrence
+    // even though they share a pitch.
+    const notes = [
+      ln({ midi: 60, time: 0, hand: "right" }),
+      ln({ midi: 60, time: 0, hand: "left" }),
+      ln({ midi: 60, time: 1, hand: "right" }),
+      ln({ midi: 60, time: 1, hand: "left" }),
+    ];
+    expect(labelableFallingNotes(notes)).toEqual([true, true, false, false]);
+  });
+
+  it("decides by playback time, not array order, and maps back to input indices", () => {
+    // Same pitch, but the array is out of time order. The earliest-by-time note is the
+    // run start; the result stays index-aligned to the input array.
+    const notes = [
+      ln({ midi: 60, time: 2, hand: "right" }), // index 0, latest
+      ln({ midi: 60, time: 0, hand: "right" }), // index 1, earliest -> run start
+      ln({ midi: 60, time: 1, hand: "right" }), // index 2, middle
+    ];
+    expect(labelableFallingNotes(notes)).toEqual([false, true, false]);
+  });
+
+  it("treats absent hand as a single 'unknown' lane (single-staff / audio scores)", () => {
+    const notes = [
+      ln({ midi: 64, time: 0 }),
+      ln({ midi: 64, time: 1 }),
+      ln({ midi: 65, time: 2 }),
+    ];
+    expect(labelableFallingNotes(notes)).toEqual([true, false, true]);
+  });
+
+  it("handles an empty score", () => {
+    expect(labelableFallingNotes([])).toEqual([]);
+  });
+});
+
+describe("approachingKeyMidis (issue #43: only label keys with an approaching note)", () => {
+  it("labels nothing when no note is within the look-ahead window", () => {
+    // Note starts at t=10, window is 4s, current time 0 -> not yet approaching.
+    const notes = [ln({ midi: 60, time: 10, duration: 1 })];
+    expect(approachingKeyMidis(notes, 0).size).toBe(0);
+  });
+
+  it("includes a key once its note enters the look-ahead window", () => {
+    const notes = [ln({ midi: 60, time: 4, duration: 1 })];
+    // At t=0 the note's start (4) is exactly one window away -> in window.
+    expect([...approachingKeyMidis(notes, 0)]).toEqual([60]);
+    // Just before the window opens (note at t=5, t=0) -> not yet.
+    expect(approachingKeyMidis([ln({ midi: 60, time: 5, duration: 1 })], 0).size).toBe(0);
+  });
+
+  it("keeps a currently-sounding note's key labeled until it finishes", () => {
+    const notes = [ln({ midi: 60, time: 0, duration: 2 })];
+    expect([...approachingKeyMidis(notes, 1)]).toEqual([60]); // mid-note
+    expect(approachingKeyMidis(notes, 2.5).size).toBe(0); // after release
+  });
+
+  it("labels every pitch of an approaching chord (readable chords)", () => {
+    const notes = [
+      ln({ midi: 60, time: 1, duration: 1 }),
+      ln({ midi: 64, time: 1, duration: 1 }),
+      ln({ midi: 67, time: 1, duration: 1 }),
+    ];
+    expect([...approachingKeyMidis(notes, 0)].sort((a, b) => a - b)).toEqual([60, 64, 67]);
+  });
+
+  it("respects a custom look-ahead window", () => {
+    const notes = [ln({ midi: 60, time: 3, duration: 1 })];
+    expect(approachingKeyMidis(notes, 0, 2).size).toBe(0); // 3 > 0 + 2
+    expect([...approachingKeyMidis(notes, 0, 4)]).toEqual([60]); // 3 <= 0 + 4
+  });
+
+  it("defaults the window to KEY_LABEL_LOOK_AHEAD and that matches the visible lane (4s)", () => {
+    expect(KEY_LABEL_LOOK_AHEAD).toBe(4);
+    const notes = [ln({ midi: 72, time: 4, duration: 1 })];
+    expect([...approachingKeyMidis(notes, 0)]).toEqual([72]);
+  });
+
+  it("returns an empty set for an empty score", () => {
+    expect(approachingKeyMidis([], 5).size).toBe(0);
   });
 });
