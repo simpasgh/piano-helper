@@ -30,6 +30,32 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-30 - Video export SHIPPED (#15) via client-side MediaRecorder (route 1). Decisions + a verification caveat.**
+  An "Export video" button records the performance and downloads it; no service, no API, no OAuth (route 2,
+  the YouTube Data API, was rejected for its quota + OAuth + token-backend needs, which break the
+  free/uncapped/static-host posture). `src/recorder.ts` holds the pure, unit-tested helpers
+  (`chooseVideoFormat` over a preference list, `buildExportFilename` slug + timestamp); the browser
+  orchestration is `exportVideo()` in `main.ts`.
+  - **Decisions:** real-time capture (MediaRecorder is realtime-only; offline faster-than-realtime is not
+    possible with it). 30 fps. Container preference WebM `vp9,opus` -> `vp8,opus` -> `webm` -> `mp4`
+    fallback (royalty-free, YouTube-friendly). **Records the `#stage` canvas only** (falling notes +
+    keyboard); the sheet is a separate SVG and is NOT in the canvas, so the video is the Synthesia-style
+    performance area only. No intro/title card (kept simple).
+  - **Audio tee:** `Tone.getDestination().connect(streamDest)` where `streamDest =
+    rawContext.createMediaStreamDestination()`; combine its audio track with `canvas.captureStream(30)`
+    video tracks into one MediaStream for the recorder. `Tone.getContext().rawContext` is cast to
+    `AudioContext` (the Tone type is `BaseAudioContext`, which lacks `createMediaStreamDestination`).
+  - **Why it does not stop early:** `await Tone.start()` runs first (the Export button click is a real user
+    gesture, so the context resumes), then the transport starts and a 100 ms poll waits until the rAF loop's
+    end-of-score `rewind()` stops the transport. Recording then stops and the blob downloads.
+  - **VERIFICATION CAVEAT (important for future canvas-recording work):** the headless Chromium behind the
+    preview tool does NOT encode canvas frames for MediaRecorder, so a `captureStream` + `MediaRecorder`
+    recording yields only a ~110-byte header (1 chunk, 0 frames) there, even though the video track exists.
+    This is an environment limit, not a bug: format selection, track creation, the audio-tee `connect` (no
+    throw), recorder lifecycle, blob+download, and filename were all verified, and the 8 unit tests pass, but
+    the actual encoded video bytes can only be validated in a real (non-headless) browser. Do not trust an
+    empty-blob result from the preview as a regression.
+
 - **2026-05-30 - Audio-to-score SHIPPED (#19), falling-notes-only slice. Two gotchas worth remembering.**
   Implemented per the spike below. `src/transcribe.ts` owns the model glue: `transcribeAudioFile(file,
   onProgress)` decodes via `AudioContext.decodeAudioData`, resamples to mono 22050 Hz with an
