@@ -1,8 +1,31 @@
 :root {
+  /* brand anchors */
   --bg: #0a0712;
   --accent: #b14bff;
   --accent-glow: rgba(177, 75, 255, 0.6);
   --text: #e8e0f5;
+
+  /* brand ramp */
+  --accent-deep: #7a2fd6;
+  --accent-gradient: linear-gradient(135deg, var(--accent-deep), var(--accent));
+
+  /* toolbar surfaces */
+  --bar-surface: rgba(18, 11, 30, 0.88);
+  --bar-border: rgba(177, 75, 255, 0.22);
+
+  /* ghost / secondary controls */
+  --ghost-bg: rgba(255, 255, 255, 0.04);
+  --ghost-bg-hover: rgba(177, 75, 255, 0.14);
+  --ghost-bg-active: rgba(177, 75, 255, 0.22);
+  --ghost-border: rgba(232, 224, 245, 0.18);
+  --ghost-border-hover: rgba(177, 75, 255, 0.55);
+
+  /* text tiers */
+  --text-muted: rgba(232, 224, 245, 0.6);
+  --text-faint: rgba(232, 224, 245, 0.4);
+
+  /* focus ring (one ring for every control) */
+  --focus-ring: #d9a6ff;
 }
 
 * {
@@ -35,16 +58,21 @@ body {
   align-items: flex-start;
   gap: 1.5rem;
   padding: 0.75rem 1.25rem;
-  background: rgba(20, 12, 32, 0.85);
-  border-bottom: 1px solid rgba(177, 75, 255, 0.25);
+  background: var(--bar-surface);
+  border-bottom: 1px solid var(--bar-border);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.03) inset,
+    0 6px 18px rgba(0, 0, 0, 0.35);
   z-index: 2;
 }
 
 .topbar h1 {
   font-size: 1.1rem;
   font-weight: 600;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.04em;
   line-height: 2.1rem;
+  color: var(--accent);
+  text-shadow: 0 0 10px var(--accent-glow);
 }
 
 .topbar-rows {
@@ -58,8 +86,31 @@ body {
 .controls {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.6rem;
   flex-wrap: wrap;
+}
+
+/* Control clusters (issue #34): source / output / settings, split by thin dividers. */
+.group {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* Vertical hairline divider drawn as a flex child of the second group, so it wraps
+   with its group and never orphans at a line start. */
+.group + .group::before {
+  content: "";
+  align-self: center;
+  width: 1px;
+  height: 1.4rem;
+  margin: 0 0.25rem;
+  background: var(--bar-border);
+}
+
+/* Push the status text to the right so the groups stay left-packed. */
+#track-name {
+  margin-left: auto;
 }
 
 /* Transport row (issue #29): prev / play / next / seek bar / time readout. */
@@ -92,13 +143,13 @@ body {
 #seek-slider::-webkit-slider-runnable-track {
   height: 5px;
   border-radius: 3px;
-  background: linear-gradient(90deg, #7a2fd6, var(--accent));
+  background: linear-gradient(90deg, var(--accent-deep), var(--accent));
 }
 
 #seek-slider::-moz-range-track {
   height: 5px;
   border-radius: 3px;
-  background: linear-gradient(90deg, #7a2fd6, var(--accent));
+  background: linear-gradient(90deg, var(--accent-deep), var(--accent));
 }
 
 #seek-slider::-moz-range-progress {
@@ -158,43 +209,117 @@ body {
 }
 
 #seek-slider:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 3px;
 }
 
 .time-readout {
   font-size: 0.8rem;
   font-weight: 600;
-  opacity: 0.7;
+  color: var(--text-faint);
   font-variant-numeric: tabular-nums;
   min-width: 9ch;
   text-align: right;
   white-space: nowrap;
 }
 
-button,
-.file-btn {
-  background: linear-gradient(135deg, #7a2fd6, var(--accent));
-  color: white;
-  border: none;
+/* Tier 1, PRIMARY (issue #34): filled gradient. The score loaders and Play. */
+.file-btn,
+#play-btn {
+  background: var(--accent-gradient);
+  color: #ffffff;
+  border: 1px solid transparent;
   border-radius: 8px;
   padding: 0.5rem 1rem;
   font-size: 0.9rem;
   font-weight: 600;
   cursor: pointer;
-  transition: filter 0.15s ease, opacity 0.15s ease;
+  transition:
+    filter 0.15s ease,
+    box-shadow 0.15s ease,
+    transform 0.05s ease,
+    opacity 0.15s ease;
 }
 
-button:hover:not(:disabled),
-.file-btn:hover {
-  filter: brightness(1.15);
+.file-btn:hover,
+#play-btn:hover:not(:disabled) {
+  filter: brightness(1.12);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.08) inset,
+    0 2px 10px rgba(122, 47, 214, 0.45);
 }
 
-button:disabled {
+.file-btn:active,
+#play-btn:active:not(:disabled) {
+  filter: brightness(0.95);
+  transform: translateY(1px);
+  box-shadow: none;
+}
+
+#play-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
 
+/* Play is the hero of the transport: a touch larger with a resting glow. */
+#play-btn {
+  min-width: 5rem;
+  padding: 0.5rem 1.4rem;
+  box-shadow: 0 0 14px var(--accent-glow);
+}
+
+/* Tier 2, GHOST: transparent fill + subtle border. Export, Names, step buttons. */
+#export-btn,
+.toggle,
+.step-btn {
+  background: var(--ghost-bg);
+  color: var(--text);
+  border: 1px solid var(--ghost-border);
+  border-radius: 8px;
+  padding: 0.45rem 0.9rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease,
+    transform 0.05s ease,
+    opacity 0.15s ease;
+}
+
+#export-btn:hover:not(:disabled),
+.toggle:hover:not(:disabled),
+.step-btn:hover:not(:disabled) {
+  background: var(--ghost-bg-hover);
+  border-color: var(--ghost-border-hover);
+  color: #ffffff;
+}
+
+#export-btn:active:not(:disabled),
+.toggle:active:not(:disabled),
+.step-btn:active:not(:disabled) {
+  background: var(--ghost-bg-active);
+  transform: translateY(1px);
+}
+
+#export-btn:disabled,
+.toggle:disabled,
+.step-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* One consistent focus ring across every control. */
+button:focus-visible,
+.file-btn:focus-visible,
+.toggle:focus-visible,
+.step-btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Names toggle reads as a compact state pill, not a full action. */
 .toggle {
   padding: 0.4rem 0.75rem;
   font-size: 0.8rem;
@@ -208,7 +333,7 @@ button:disabled {
 
 .tempo-label {
   font-size: 0.8rem;
-  opacity: 0.55;
+  color: var(--text-muted);
 }
 
 #tempo-slider {
@@ -228,13 +353,13 @@ button:disabled {
 #tempo-slider::-webkit-slider-runnable-track {
   height: 4px;
   border-radius: 2px;
-  background: linear-gradient(90deg, #7a2fd6, var(--accent));
+  background: linear-gradient(90deg, var(--accent-deep), var(--accent));
 }
 
 #tempo-slider::-moz-range-track {
   height: 4px;
   border-radius: 2px;
-  background: linear-gradient(90deg, #7a2fd6, var(--accent));
+  background: linear-gradient(90deg, var(--accent-deep), var(--accent));
 }
 
 #tempo-slider::-webkit-slider-thumb {
@@ -261,7 +386,7 @@ button:disabled {
 }
 
 #tempo-slider:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 3px;
 }
 
@@ -286,7 +411,7 @@ button:disabled {
 }
 
 .tempo-readout:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 3px;
 }
 
@@ -430,12 +555,12 @@ button:disabled {
 
 .track-name {
   font-size: 0.85rem;
-  opacity: 0.65;
+  color: var(--text-muted);
 }
 
 .sound-status {
   font-size: 0.8rem;
-  opacity: 0.55;
+  color: var(--text-faint);
   font-style: italic;
 }
 
