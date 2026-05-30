@@ -222,6 +222,92 @@ relevant section, dated.
   function lives next to `midiToName` in `src/piano.ts` (add `midiToLabel(midi, mode)` so the
   visualizer asks piano.ts for the string and stays presentation-only).
 
+## Sheet note-name labels (issue #17)
+
+- **2026-05-30 — Spec for note names on the SHEET (OSMD/SVG) view.** Follow-up to #11
+  (names on falling bars + keys). Implemented as an absolutely-positioned HTML overlay on
+  top of the OSMD SVG inside `#sheet`. No new deps. Reuses `midiToLabel(midi, mode)` from
+  `src/piano.ts`. Behavior wiring (reading notehead geometry out of OSMD) is the Tech
+  Lead's; this is the visual + layout contract.
+
+  **1. Color: single flat color, not the #12 hue wheel.** Use **`#7a2fd6`** (the brand
+  violet, the darker stop of the button gradient) for all sheet labels. Reasoning: the
+  staff is a light `#f6f2fb` panel and the #12 wheel was tuned for L 50-62% fills on the
+  near-black stage. Several of those hues (amber `#f`, yellow-green, cyan) drop well under
+  4.5:1 on `#f6f2fb` and would be illegible as 11px text. A consistent dark violet (a)
+  passes AA on the light panel (contrast ~5.6:1 on `#f6f2fb`), (b) stays on-brand, (c) does
+  not compete with the black notation the way red did, and (d) reads as "annotation layer,
+  not part of the score." The falling bars already carry the per-pitch color, so
+  cross-surface color identity is preserved where it has room; on the cramped staff,
+  legibility wins. Do NOT use red (the #17 reference): red on a light staff fights
+  accidentals and looks like an error mark.
+  - **Halo for legibility over ledger lines / stems / the green cursor.** Each label gets a
+    1px crisp text outline in the panel color so it never smears into a staff line:
+    `text-shadow: 0 0 2px #f6f2fb, 0 0 2px #f6f2fb, 0 0 3px #f6f2fb;` (triple-stack the same
+    light shadow to fake a halo, cheap, no canvas). This punches a light gap around each
+    glyph so the violet stays readable even where it overlaps OSMD's green highlight box.
+    Do not add an opaque rounded background chip; it would hide the noteheads behind it on
+    dense staves.
+
+  **2. Font.** `system-ui, -apple-system, sans-serif`, **`9px`, weight `600`**.
+  Deliberately smaller and lighter than the falling-bar labels (`700 12px`) because staff
+  vertical space is tight and there can be one label per chord note. `letter-spacing:
+  0.01em`, `line-height: 1`, `white-space: nowrap`. `text-align: center`, each label
+  positioned by its own center-x. Never scale below 9px; if a label cannot fit, skip it for
+  that render rather than shrinking (legibility floor, same rule as #11).
+
+  **3. Vertical placement.** Anchor each label's baseline **6px above the top notehead of
+  its stack** (the highest-pitched notehead at that x). Reference the notehead's SVG bbox
+  top, not the staff top, so labels track ledger-line notes up and down.
+  - **Collision avoidance with the staff above (multi-line / two-hand grand staff).** If the
+    6px offset would place a label within 4px of the bounding box of any glyph on the system
+    above, clamp the label down to sit just below that system's baseline gap instead, never
+    overlapping a higher staff's notes. Simplest rule the Tech Lead can implement: cap the
+    label's top at `staffSystemTop + 2px` for the system it belongs to.
+  - **Accidentals / measure + tempo numbers.** Labels sit above noteheads, accidentals sit
+    left of noteheads, so they rarely collide; the halo handles the rare brush. OSMD's
+    measure numbers and tempo text render above the top staff line on the left margin; since
+    labels are centered on noteheads (which are right of the clef/margin) they do not reach
+    that zone. No special-casing needed beyond the halo.
+
+  **4. Chord stacking: one label per notehead, stacked vertically.** When a chord has
+  multiple noteheads at one x, render one label per pitch, stacked **top note highest**
+  (matching the chord's pitch order, so the visual order of labels mirrors the visual order
+  of noteheads). All labels in a chord share the same center-x (the chord's notehead x).
+  - **Vertical gap between stacked labels: 11px** (1px more than the 9px glyph cap height so
+    they never touch). The lowest label in the stack sits 6px above the top notehead; each
+    additional label stacks upward by 11px.
+  - **Density rule (when noteheads are too close).** This stacked-above approach decouples
+    label spacing from notehead spacing, so close-together chord tones never crowd their
+    labels. But if two adjacent chords (different x) are horizontally closer than the wider
+    of their two labels (i.e. labels would overlap left-right), **drop the lower-voice label
+    of the denser pair** and keep the top-note label of each chord. Priority for keeping
+    labels when space is scarce: (1) the note under the active OSMD cursor, (2) top note of
+    each chord, (3) remaining chord tones top-down. This keeps the melody line always
+    labeled.
+
+  **5. Octave: omit on the sheet.** No octave numbers anywhere in the sheet labels, both
+  solfege and letter modes. Justification: the staff position already encodes octave
+  unambiguously (that is what a staff is for), so a number is pure clutter here, and chord
+  stacks would balloon in width. This differs from the falling-bar rule (#11) where letter
+  mode appends octave, because the bar view has no staff to show register. Sheet = syllable
+  or bare letter only (`Do`, `Re#`, `C`, `F#`). Always-sharp spelling, ASCII `#`, same as
+  #11.
+
+  **6. Behavior / layering the design depends on.**
+  - **Overlay element:** a single `<div>` (e.g. `#sheet-labels`) positioned `absolute`
+    inside `#sheet` (which must be `position: relative`), sized to match the OSMD SVG,
+    `pointer-events: none` so it never blocks scroll or clicks, `z-index: 1` so it sits
+    **above** the OSMD SVG and above the green cursor box (the halo keeps both readable).
+  - **Re-layout triggers:** rebuild label positions on score load, on the Names toggle
+    (Solfege/Letters/Off), and on resize. Because `#sheet` is `overflow-y: auto` and scrolls
+    independently, the overlay must scroll WITH the SVG. Put the overlay in the same
+    scrolling content box as the SVG (a child of the scrolled container that grows with the
+    SVG height), so scroll needs no JS, the layer translates natively. Only resize and
+    re-render (which changes notehead x/y) require recomputing positions.
+  - **Off mode:** set the overlay `display: none` (or skip building it). No labels anywhere
+    on the sheet; OSMD renders exactly as today.
+
 ## Tempo slider (issue #14)
 
 - **2026-05-30 — Spec for the playback-speed slider.** Ready to implement, no new deps. A
