@@ -4,6 +4,8 @@ import {
   midiToLabel,
   midiToBarLabel,
   noteColor,
+  FIRST_MIDI,
+  LAST_MIDI,
   type KeyGeometry,
   type LabelMode,
 } from "./piano";
@@ -14,12 +16,21 @@ export interface VisNote {
   duration: number; // seconds
 }
 
-const KEYBOARD_HEIGHT = 140;
+const MAX_KEYBOARD_HEIGHT = 140;
+const MIN_KEYBOARD_HEIGHT = 96;
 const LOOK_AHEAD = 4; // seconds of notes visible above the keyboard
+
+// Below this keyboard height the per-key face labels crowd, so they are suppressed
+// (the falling-bar names still show). Matches the issue #11 legibility-floor rule.
+const KEY_LABEL_MIN_HEIGHT = 110;
 
 export class Visualizer {
   private ctx: CanvasRenderingContext2D;
   private keys: KeyGeometry[] = [];
+  private keyByMidi = new Map<number, KeyGeometry>();
+  private firstVisibleMidi = FIRST_MIDI;
+  private lastVisibleMidi = LAST_MIDI;
+  private keyboardHeight = MAX_KEYBOARD_HEIGHT;
   private notes: VisNote[] = [];
   private width = 0;
   private height = 0;
@@ -51,7 +62,25 @@ export class Visualizer {
     this.canvas.width = this.width * this.dpr;
     this.canvas.height = this.height * this.dpr;
     this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    this.keys = buildKeyLayout(this.width);
+
+    // Responsive keyboard (issue #33): shrink the keybed on narrow screens and show a
+    // smaller, centered key window so individual keys stay legible on a phone. Ranges
+    // start and end on C; off-window notes clamp to the nearest edge in drawFallingNotes.
+    this.keyboardHeight = Math.round(
+      Math.min(MAX_KEYBOARD_HEIGHT, Math.max(MIN_KEYBOARD_HEIGHT, this.width * 0.18)),
+    );
+    if (this.width >= 760) {
+      this.firstVisibleMidi = FIRST_MIDI; // full 88 keys (A0..C8)
+      this.lastVisibleMidi = LAST_MIDI;
+    } else if (this.width >= 480) {
+      this.firstVisibleMidi = 36; // C2..C7
+      this.lastVisibleMidi = 96;
+    } else {
+      this.firstVisibleMidi = 36; // C2..C6
+      this.lastVisibleMidi = 84;
+    }
+    this.keys = buildKeyLayout(this.width, this.firstVisibleMidi, this.lastVisibleMidi);
+    this.keyByMidi = new Map(this.keys.map((k) => [k.midi, k]));
 
     // Background gradient depends only on height; cache it so the rAF loop never
     // calls createLinearGradient. Replaces the clearRect-to-transparent fill.
@@ -62,7 +91,7 @@ export class Visualizer {
   }
 
   private keyboardTop(): number {
-    return this.height - KEYBOARD_HEIGHT;
+    return this.height - this.keyboardHeight;
   }
 
   private activeMidis(currentTime: number): Set<number> {
@@ -83,7 +112,7 @@ export class Visualizer {
     ctx.fillRect(0, 0, width, height);
 
     const keyboardTop = this.keyboardTop();
-    const pps = (height - KEYBOARD_HEIGHT) / LOOK_AHEAD; // pixels per second
+    const pps = (height - this.keyboardHeight) / LOOK_AHEAD; // pixels per second
     const active = this.activeMidis(currentTime);
 
     this.drawFallingNotes(currentTime, keyboardTop, pps, active);
@@ -105,7 +134,17 @@ export class Visualizer {
       const delta = note.time - currentTime;
       if (delta > LOOK_AHEAD || delta + note.duration < 0) continue; // off-screen
 
-      const key = this.keys[note.midi - 21];
+      // On narrow screens the visible keyboard is a sub-window of the 88 keys (issue #33).
+      // Notes outside the window clamp to the nearest edge column and draw dimmed so the
+      // player still sees them coming without them vanishing.
+      const offRange =
+        note.midi < this.firstVisibleMidi || note.midi > this.lastVisibleMidi;
+      const lookupMidi = offRange
+        ? note.midi < this.firstVisibleMidi
+          ? this.firstVisibleMidi
+          : this.lastVisibleMidi
+        : note.midi;
+      const key = this.keyByMidi.get(lookupMidi);
       if (!key) continue;
 
       const barHeight = Math.max(6, note.duration * pps);
@@ -120,6 +159,7 @@ export class Visualizer {
       // building). Active bars get a brighter fill and a wider glow.
       const colors = noteColor(note.midi);
       const isActive = active.has(note.midi);
+      if (offRange) ctx.globalAlpha = 0.35;
       ctx.fillStyle = isActive
         ? colors.activeFill
         : black
@@ -129,6 +169,13 @@ export class Visualizer {
       ctx.shadowBlur = isActive ? 20 : 18;
       this.roundRect(x, top, w, barHeight, 4);
       ctx.fill();
+
+      // Clamped off-window bars get neither the contact glow nor a label: they are a
+      // dimmed "a note is happening off-screen" hint, not a precise target.
+      if (offRange) {
+        ctx.globalAlpha = 1;
+        continue;
+      }
 
       // Contact glow (issue #27): the instant a sounding bar's leading edge reaches the
       // keybed, stroke a soft border in the note's own hue so it visibly "lights up" on
@@ -192,8 +239,9 @@ export class Visualizer {
     // just above the keyboard where bars land. At most "notes sounding" draws.
     this.drawLandingBloom(top, active);
 
+    const kbH = this.keyboardHeight;
     ctx.fillStyle = "#15101f";
-    ctx.fillRect(0, top, width, KEYBOARD_HEIGHT);
+    ctx.fillRect(0, top, width, kbH);
 
     // white keys first, then black keys on top
     for (const key of this.keys) {
@@ -203,15 +251,15 @@ export class Visualizer {
         : "#f2ecf8";
       ctx.strokeStyle = "#2a2238";
       ctx.lineWidth = 1;
-      ctx.fillRect(key.x, top, key.width, KEYBOARD_HEIGHT);
-      ctx.strokeRect(key.x, top, key.width, KEYBOARD_HEIGHT);
+      ctx.fillRect(key.x, top, key.width, kbH);
+      ctx.strokeRect(key.x, top, key.width, kbH);
     }
     for (const key of this.keys) {
       if (!key.black) continue;
       ctx.fillStyle = active.has(key.midi)
         ? noteColor(key.midi).activeBlackKey
         : "#100b1a";
-      ctx.fillRect(key.x, top, key.width, KEYBOARD_HEIGHT * 0.62);
+      ctx.fillRect(key.x, top, key.width, kbH * 0.62);
     }
 
     this.drawKeyLabels(top, active);
@@ -226,7 +274,7 @@ export class Visualizer {
     const BLOOM_HEIGHT = 16;
     ctx.globalAlpha = 0.4;
     for (const midi of active) {
-      const key = this.keys[midi - 21];
+      const key = this.keyByMidi.get(midi);
       if (!key) continue;
       const colors = noteColor(midi);
       ctx.fillStyle = colors.glow;
@@ -244,6 +292,9 @@ export class Visualizer {
   // won't fit a white key, draw no key-face labels this pass (uniform > ragged).
   private drawKeyLabels(top: number, active: Set<number>): void {
     if (this.labelMode === "off") return;
+    // Below the legibility floor the keybed is too short to seat readable glyphs, so
+    // skip key-face labels entirely on small screens (the falling-bar names remain).
+    if (this.keyboardHeight < KEY_LABEL_MIN_HEIGHT) return;
     const { ctx } = this;
     const whiteWidth = this.keys.find((k) => !k.black)?.width ?? 0;
     if (whiteWidth <= 0) return;
@@ -261,7 +312,7 @@ export class Visualizer {
     }
     if (widest + GUTTER > whiteWidth) return; // too narrow at 11px, skip the whole row
 
-    const baseline = top + KEYBOARD_HEIGHT - 10;
+    const baseline = top + this.keyboardHeight - 10;
     for (const key of this.keys) {
       if (key.black) continue;
       ctx.fillStyle = active.has(key.midi) ? "#1a0f2b" : "#5b4a72";

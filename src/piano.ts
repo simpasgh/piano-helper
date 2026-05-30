@@ -15,11 +15,17 @@ export interface KeyGeometry {
   black: boolean;
 }
 
-// Builds left-edge x positions and widths for every key, scaled to `totalWidth`.
-// White keys tile evenly; black keys are narrower and straddle the gap between whites.
-export function buildKeyLayout(totalWidth: number): KeyGeometry[] {
+// Builds left-edge x positions and widths for the keys in `[firstMidi, lastMidi]`,
+// scaled to `totalWidth`. White keys tile evenly; black keys are narrower and straddle
+// the gap between whites. The range defaults to the full 88-key piano; narrow screens
+// pass a smaller window (issue #33) so keys stay legible.
+export function buildKeyLayout(
+  totalWidth: number,
+  firstMidi: number = FIRST_MIDI,
+  lastMidi: number = LAST_MIDI,
+): KeyGeometry[] {
   let whiteCount = 0;
-  for (let m = FIRST_MIDI; m <= LAST_MIDI; m++) {
+  for (let m = firstMidi; m <= lastMidi; m++) {
     if (!isBlackKey(m)) whiteCount++;
   }
   const whiteWidth = totalWidth / whiteCount;
@@ -27,7 +33,7 @@ export function buildKeyLayout(totalWidth: number): KeyGeometry[] {
 
   const keys: KeyGeometry[] = [];
   let whiteIndex = 0;
-  for (let m = FIRST_MIDI; m <= LAST_MIDI; m++) {
+  for (let m = firstMidi; m <= lastMidi; m++) {
     if (isBlackKey(m)) {
       // Black key sits centered on the boundary between the previous and next white key.
       const x = whiteIndex * whiteWidth - blackWidth / 2;

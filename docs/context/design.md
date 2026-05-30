@@ -458,6 +458,157 @@ relevant section, dated.
   `#time-readout` first under 720px, then shrink step-button `min-width` to `2.1rem`; the seek
   bar's `flex: 1` + `min-width: 120px` keeps it usable.
 
+## Responsive / mobile (issue #33)
+
+- **2026-05-30 - Spec to make the whole site usable down to a 320px phone.** No new deps,
+  CSS plus a small amount of TS in `visualizer.ts` and `piano.ts`. The app shell is a flex
+  column: `.topbar` (auto height), `#sheet` (42% height), `#stage` (flex: 1). The keyboard
+  is a fixed `KEYBOARD_HEIGHT = 140` strip at the bottom of the canvas; `buildKeyLayout` lays
+  all 88 keys (52 white) across the full canvas width. At 320px that is ~6px white keys and
+  ~3.8px black keys, unreadable. This is the core problem; the topbar and sheet are secondary.
+
+  **1. Breakpoints + minimum width.** Support down to **320px** (smallest common phone, iPhone
+  SE). Use **two** breakpoints on top of the existing one, all `max-width` (the codebase is
+  desktop-first), so the cascade reads desktop -> tablet -> phone:
+  - **`@media (max-width: 900px)`** = tablet / small laptop. Reflow the topbar (loosen the
+    single-row assumption), nothing else changes.
+  - **`@media (max-width: 720px)`** = phone (this block already exists; extend it). Keyboard
+    shrinks, controls collapse, sheet drops in height.
+  - Keep one extra hook **`@media (max-width: 380px)`** ONLY for the few things that still
+    overflow at true 320-380px (hide more labels). Do not add more than these three.
+  No `min-width` / mobile-first rewrite: the existing CSS is desktop-first and the ticket is a
+  focused pass, not a refactor.
+
+  **2. Topbar reflow.** Today `.topbar` is `h1` + `.topbar-rows` (a flex column holding
+  `.controls` and `.transport`). `.controls` already `flex-wrap: wrap`; `.transport` does not.
+  - **REQUIRED. At <=720px, drop the `<h1>` title** (`display: none`). It costs a full line and
+    "Piano Helper" is not needed once you are in the app. Reclaims the most space cheaply.
+  - **REQUIRED. Make `.transport` wrap too:** add `flex-wrap: wrap`. The seek slider keeps
+    `flex: 1; min-width: 120px`, so prev/play/next stay on the first line and the slider takes
+    the rest, wrapping the readout below only if forced.
+  - **REQUIRED. Reduce topbar padding** at <=720px: `padding: 0.5rem 0.75rem` and
+    `.topbar-rows { gap: 0.45rem }`, `.controls { gap: 0.5rem }` so wrapped rows pack tighter.
+  - **REQUIRED. Hide the lowest-value text at <=720px** (extend the existing block):
+    `#track-name` and `.sound-status` -> `display: none`. They are status text, not controls,
+    and the file-button labels already tell the user what loaded. `.time-readout` is already
+    hidden here; keep it. The seek slider's `aria-valuetext` still carries position for AT.
+  - **REQUIRED. At <=380px, hide the file-button text and show a glyph instead** is NICE-TO-HAVE
+    (see below). For the REQUIRED pass, just let `.controls` wrap the three loaders onto two
+    lines; they fit two-per-row at 320px with the smaller padding below. The Names toggle and
+    tempo group stay visible.
+  - **REQUIRED. Touch targets.** Apple HIG is 44px; we currently undershoot. Bump at <=720px:
+    - Buttons / `.file-btn`: `min-height: 44px` and `padding: 0.6rem 0.9rem` (keep font 0.9rem).
+    - `.toggle`: `min-height: 44px` (it is `0.4rem` vertical today, too short for thumb).
+    - `.step-btn`: set `min-width: 44px; min-height: 44px` (today it shrinks to 2.1rem ~ 34px
+      at this breakpoint; reverse that for touch). Glyphs stay centered.
+    - **Slider thumbs to 24px at <=720px** (`#seek-slider` and `#tempo-slider` thumbs are 18px
+      / 16px). A 24px thumb plus the existing vertical input padding clears a comfortable touch
+      target while staying inside the 44px row. Recompute `margin-top` on the webkit thumb so it
+      stays centered on the track (seek track 5px -> `margin-top: -9.5px`; tempo track 4px ->
+      `margin-top: -10px`). Bump the input vertical `padding` to `10px 0` so the tappable band
+      around the thin track is finger-sized.
+  - **NICE-TO-HAVE. File buttons collapse to icon + accessible label at <=380px** (e.g. a
+    file/scan/wave glyph with the text in `aria-label` / `title`). Cleaner at 320px but needs
+    glyph choices and an `aria-label` per button; skip for the first pass.
+
+  **3. Canvas + keyboard sizing (the core change).** Two required moves, both small:
+  - **REQUIRED. Make `KEYBOARD_HEIGHT` responsive by width, not a constant.** Replace the fixed
+    `140` with a function of canvas width so a phone keyboard is not absurdly tall relative to
+    its hair-thin keys. Rule: `keyboardHeight = clamp(96, width * 0.18, 140)`. At >=778px wide
+    this is the current 140; at 390px it is ~96 (the floor); the floor keeps the key faces tall
+    enough to read the note-name labels (issue #11 baseline is 10px from the bottom). Compute it
+    in `resize()` from `this.width`, store as `this.keyboardHeight`, and use that field
+    everywhere `KEYBOARD_HEIGHT` is read today (`keyboardTop()`, the `height - KEYBOARD_HEIGHT`
+    pixels-per-second math, the `fillRect`/`strokeRect` key draws, `KEYBOARD_HEIGHT * 0.62`
+    black-key height, and the `top + KEYBOARD_HEIGHT - 10` label baseline). The `* 0.62` and
+    `- 10` ratios stay; only the base value goes responsive.
+  - **REQUIRED. Show fewer keys on narrow widths so each key is finger- and eye-legible.** All
+    88 keys at 320px is unusable. `buildKeyLayout(totalWidth)` currently always spans
+    `FIRST_MIDI..LAST_MIDI`. Give it an explicit range: `buildKeyLayout(totalWidth, firstMidi,
+    lastMidi)` defaulting to `FIRST_MIDI`/`LAST_MIDI` so desktop is unchanged. In `resize()`
+    pick the range from width:
+    - `width >= 760`: full 88 keys, `21..108` (unchanged).
+    - `480 <= width < 760`: **61 keys, `36..96`** (C2..C7), the common controller range.
+    - `width < 480`: **49 keys, `36..84`** (C2..C6), 29 white keys -> ~13px white keys at 380px,
+      ~11px at 320px, legible and tappable enough to watch.
+    All ranges **start and end on C** so the keyboard begins on a white key (no half-cut black
+    key at the left edge) and `buildKeyLayout`'s "black key centered on the previous white
+    boundary" math stays clean. Center is automatic: `buildKeyLayout` already spreads the chosen
+    white-key count across the full `totalWidth`, so a narrower range simply means wider keys
+    filling the same canvas, no extra centering code.
+    - **Off-range notes.** A note whose MIDI falls outside the visible range still plays (audio
+      is unaffected) but has no key column. For the falling bar, **clamp its x to the nearest
+      edge key and dim it**: draw at the first/last key's x-range at `globalAlpha 0.35` so the
+      player sees "there is a note off the left/right edge" without a crash or an off-canvas
+      bar. This is the simplest correct behavior; a scrolling/auto-ranging keyboard is out of
+      scope. Most beginner repertoire (the target content) sits inside C2..C6.
+  - **NICE-TO-HAVE.** Auto-fit the visible range to the loaded score's actual min/max MIDI
+    (so a piece living in C3..C5 fills the phone with big keys). Better UX but needs the score
+    range plumbed into `resize()`; defer.
+
+  **4. Sheet view (`#sheet`).** OSMD renders an SVG at a layout width it picks; on a phone the
+  default can overflow or render microscopic.
+  - **REQUIRED. Reduce `#sheet` height at <=720px to `34%`** and at <=380px to `30%`, giving the
+    keyboard + falling-notes area (the thing you actually play from) more of the short phone
+    viewport. Keep `overflow-y: auto`.
+  - **REQUIRED. Horizontal scroll, do NOT zoom-to-fit.** Set `#sheet { overflow-x: auto }` at
+    <=720px and let OSMD lay the system out at a readable size; the user swipes horizontally to
+    read across a wide system. Zoom-to-fit would shrink noteheads (and the #17 note-name
+    overlay) below legibility on a narrow screen. The #17 overlay is already a child of the
+    scrolled box so it scrolls with the SVG in both axes, no extra work.
+  - **NICE-TO-HAVE.** Call OSMD's `zoom` to a width-aware factor (e.g. 0.7 on phones) so a system
+    fits with fewer measures per line and less horizontal swiping. This is a behavior change in
+    the render path; coordinate with Tech Lead and defer.
+
+  **5. Touch + orientation.**
+  - **REQUIRED. Confirm seek/tempo drag works by touch.** Native `<input type=range>` is
+    touch-draggable by default; nothing in the current CSS adds hover-only behavior that blocks
+    it (the `:hover` rules only grow the glow, they do not gate interaction). The one thing to
+    add: `#seek-slider, #tempo-slider { touch-action: none }` so a horizontal drag on the thumb
+    scrubs instead of scrolling the page. Body is `overflow: hidden` so there is no page scroll
+    to fight, but `touch-action: none` makes the intent explicit and avoids gesture ambiguity on
+    the wrapped topbar.
+  - **REQUIRED (lightweight). Rotate-to-landscape hint on narrow portrait.** The keyboard is far
+    more usable in landscape (more width = wider keys = more octaves). Show a **non-blocking,
+    auto-hiding** hint, not a modal:
+    - **When:** `@media (max-width: 540px) and (orientation: portrait)`.
+    - **What:** a single pill anchored bottom-center, `position: fixed; bottom: 12px; left: 50%;
+      transform: translateX(-50%)`, text **"Rotate for a wider keyboard"**, reusing the violet
+      button gradient, `border-radius: 999px; padding: 0.5rem 0.9rem; font-size: 0.8rem;
+      box-shadow: 0 0 12px var(--accent-glow); z-index: 5; pointer-events: none`. A small
+      rotate glyph (`&#x21BB;`) prefix is fine.
+    - **Behavior:** purely CSS, no JS. It is shown only by the media query, so rotating to
+      landscape removes the portrait condition and the hint disappears automatically (the
+      "auto-hide on rotate" requirement is satisfied for free). `pointer-events: none` makes it
+      non-blocking. Add a CSS `animation` that fades it to `opacity: 0` after ~4s
+      (`@keyframes` with `animation-fill-mode: forwards`) so it also auto-hides if the user
+      stays in portrait. No dismiss button needed (keeps it dependency-free and uncluttered).
+    - Markup: one `<div id="rotate-hint" aria-hidden="true">` at the end of `#app`. `aria-hidden`
+      because it is advisory and the app is fully operable in portrait.
+  - **NICE-TO-HAVE.** Persist a "dismissed" flag so the hint never reappears after first rotate;
+    skip for v1 (the 4s fade plus rotate-removal already keeps it from nagging).
+
+  **REQUIRED checklist (ship this, in this order):**
+  1. Add breakpoints `@media (max-width: 900px)` and `@media (max-width: 380px)`; extend the
+     existing `@media (max-width: 720px)`.
+  2. At <=720px: hide `<h1>`, `#track-name`, `.sound-status`; `.transport { flex-wrap: wrap }`;
+     tighten topbar padding/gaps as specified.
+  3. At <=720px: buttons/`.file-btn`/`.toggle`/`.step-btn` get `min-height: 44px`
+     (`.step-btn` also `min-width: 44px`); slider thumbs grow to 24px with corrected
+     `margin-top` and `10px 0` input padding.
+  4. Make `KEYBOARD_HEIGHT` a width-derived field `clamp(96, width*0.18, 140)` computed in
+     `resize()`; replace every `KEYBOARD_HEIGHT` read with the field.
+  5. Add a range to `buildKeyLayout(width, firstMidi, lastMidi)`; in `resize()` pick
+     `21..108` / `36..96` / `36..84` by width thresholds 760 / 480; clamp+dim off-range
+     falling bars at `globalAlpha 0.35`.
+  6. At <=720px: `#sheet { height: 34%; overflow-x: auto }`; at <=380px `height: 30%`.
+  7. `#seek-slider, #tempo-slider { touch-action: none }`.
+  8. Add `#rotate-hint` pill, shown only at `max-width: 540px and (orientation: portrait)`,
+     `pointer-events: none`, 4s fade-out, removed automatically on rotate.
+
+  Everything under NICE-TO-HAVE (icon-only file buttons, score-aware auto key range, OSMD zoom,
+  persisted hint dismissal) is explicitly deferred so the first pass stays simple.
+
 ## Open UX questions
 
 - Hand/voice coloring (left vs right hand) like Synthesia.
