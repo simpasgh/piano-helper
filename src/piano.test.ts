@@ -8,6 +8,7 @@ import {
   midiToLabel,
   midiToBarLabel,
   handFromStaffIndex,
+  isHandMuted,
   noteBarWidth,
   fitBarLabel,
   MIN_LABEL_PX,
@@ -103,6 +104,27 @@ describe("handFromStaffIndex", () => {
     // A 3-staff organ part still maps index 0 to right and everything below to left.
     expect(handFromStaffIndex(0, 3)).toBe("right");
     expect(handFromStaffIndex(2, 3)).toBe("left");
+  });
+});
+
+describe("isHandMuted (issue #54: ghost a muted hand's notes)", () => {
+  it("is false when neither hand is muted", () => {
+    const m = { left: false, right: false };
+    expect(isHandMuted("left", m)).toBe(false);
+    expect(isHandMuted("right", m)).toBe(false);
+  });
+
+  it("mutes only the matching hand", () => {
+    expect(isHandMuted("right", { left: false, right: true })).toBe(true);
+    expect(isHandMuted("left", { left: false, right: true })).toBe(false);
+    expect(isHandMuted("left", { left: true, right: false })).toBe(true);
+    expect(isHandMuted("right", { left: true, right: false })).toBe(false);
+  });
+
+  it("never mutes unknown or absent hands, even when both hands are muted", () => {
+    const both = { left: true, right: true };
+    expect(isHandMuted("unknown", both)).toBe(false);
+    expect(isHandMuted(undefined, both)).toBe(false);
   });
 });
 
