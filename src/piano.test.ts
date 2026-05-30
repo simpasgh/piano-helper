@@ -9,6 +9,8 @@ import {
   midiToBarLabel,
   handFromStaffIndex,
   handFromClef,
+  handFromPitch,
+  HAND_SPLIT_MIDI,
   isHandMuted,
   noteBarWidth,
   fitBarLabel,
@@ -130,6 +132,27 @@ describe("handFromClef (clef is the primary hand signal, robust to staff order)"
 
   it("returns null for clefs with no hand convention so the caller can fall back", () => {
     expect(handFromClef("other")).toBeNull();
+  });
+});
+
+describe("handFromPitch (issue #70: split audio-derived scores by pitch)", () => {
+  it("splits at middle C: the boundary and above are the right hand", () => {
+    expect(HAND_SPLIT_MIDI).toBe(60);
+    expect(handFromPitch(60)).toBe("right"); // middle C is the boundary
+    expect(handFromPitch(72)).toBe("right");
+    expect(handFromPitch(LAST_MIDI)).toBe("right");
+  });
+
+  it("maps everything below middle C to the left hand", () => {
+    expect(handFromPitch(59)).toBe("left");
+    expect(handFromPitch(48)).toBe("left");
+    expect(handFromPitch(FIRST_MIDI)).toBe("left");
+  });
+
+  it("never returns 'unknown' so the per-hand controls become reachable", () => {
+    for (let m = FIRST_MIDI; m <= LAST_MIDI; m++) {
+      expect(handFromPitch(m)).not.toBe("unknown");
+    }
   });
 });
 
