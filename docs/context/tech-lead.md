@@ -617,6 +617,41 @@ construction; tempo only changes playback speed, not sync.
     `vite dev` does not run Pages Functions, so the live POST path needs `wrangler pages dev` to exercise;
     the contract is covered by unit tests + the functions typecheck.
 
+- **2026-05-30 - OMR compute moved off GitHub Actions to an always-on R2-polling worker (issue #5).**
+  This SUPERSEDES the earlier GitHub-Actions OMR runner (`.github/workflows/omr.yml`, now deleted) and
+  the `repository_dispatch` trigger. Using GitHub Actions as the app's runtime compute backend violates
+  GitHub's Actions usage policy (it is for CI/CD on the repo, not as a free job server) and risks account
+  suspension, regardless of the public-repo "unlimited minutes" fact the earlier spike leaned on. New
+  backend: a self-contained always-on Python worker (`omr-worker/worker.py`, boto3) that polls Cloudflare
+  R2 for new uploads. It is host-agnostic (an Oracle Always Free ARM VM was the plan; it currently runs on
+  the owner's Mac via launchd, see infrastructure.md); a systemd unit (`omr-worker/omr-worker.service`,
+  `Restart=always`) is shipped for the Linux path. The R2 transport contract is UNCHANGED: input
+  `uploads/<jobId>`, output `results/<jobId>.musicxml`, with a failure-sentinel MusicXML
+  (`<miscellaneous-field name="omr-status">failed</miscellaneous-field>`) the client detects via
+  `isFailureSentinel` / `FAILURE_SENTINEL_RE` in `src/omr.ts` (kept byte-compatible with the worker).
+  The browser contract is also unchanged (POST returns 202 `{jobId}`, then poll `/api/omr/result`).
+  **Trigger change:** there is no longer any push notification. The Pages Function `POST /api/omr`
+  (`functions/api/omr.ts`) now ONLY validates + writes the upload to R2 and returns 202; all
+  `repository_dispatch` / GitHub-PAT code was removed and the 503 gate is now `!env.OMR_BUCKET` only.
+  `GET /api/omr/result` (`functions/api/omr/result.ts`) only reads `results/<jobId>.musicxml` (200) or
+  reports pending (404); the old `.error`/422 path is gone because failure is carried in-XML by the
+  sentinel. The worker discovers jobs by listing R2 `uploads/*` (env `OMR_POLL_SECONDS`), so no PAT, no
+  webhook, no inbound port. Worker loop per job: validate jobId is a UUID (path-safety, before any S3
+  key/filesystem use); skip if `results/<jobId>.musicxml` already exists (idempotent); download;
+  rasterize PDFs first page with poppler `pdftoppm -r 300`; run oemer, fall back to homr; on both
+  failing, write the sentinel; upload the result, THEN delete `uploads/<jobId>` (delete-after-write so a
+  crash mid-job just retries). Per-job and per-cycle exceptions are caught so one bad upload never kills
+  the loop. **Code organization (kept from main's structure):** the pure server helpers live in
+  `src/omr-server.ts` (so the root `tsc` typechecks them and Vitest runs `src/omr-server.test.ts`); the
+  Function code is typechecked in CI by `functions/tsconfig.json` (`npx tsc -p functions/tsconfig.json`),
+  and the `OMR_BUCKET` R2 binding is declared in-code via `wrangler.jsonc` (`pages_build_output_dir:
+  "dist"`), so no manual dashboard binding step is needed. `omr-worker/` is outside the JS test/build
+  entirely (Python; verify with `python3 -m py_compile`). The `GITHUB_DISPATCH_TOKEN` Pages secret and
+  `GITHUB_REPOSITORY` var are now unused and should be removed from the Pages project; the four R2 S3
+  creds moved from Actions secrets to worker-host env vars. See `omr-worker/README.md` for the runbook.
+  The earlier "OMR runs in GitHub Actions" and "OMR trigger via repository_dispatch" entries below are
+  SUPERSEDED by this one.
+
 - **2026-05-30 - Note-name labels (issue #11): piano.ts produces strings, visualizer is presentation-only.**
   Two helpers sit next to `midiToName` in `src/piano.ts`: `midiToLabel(midi, mode)` returns the
   pitch-class token only (no octave) for both key faces and solfege, and `midiToBarLabel(midi, mode)`
