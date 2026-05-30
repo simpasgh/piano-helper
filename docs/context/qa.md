@@ -4,6 +4,57 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-05-30: PR #80 (Bug 3 / issue #70 follow-up: audio-derived scores now tag each note by
+  pitch (MIDI >= 60 = right, below = left) instead of "unknown", so `hasBothHands` can be true
+  and the per-hand mute toggles + Balance slider become reachable for two-handed audio clips)
+  -> **PASS** on `main` (merge commit 52a0c93, deployed to https://piano-helper.pages.dev,
+  smoke green). Local 5173 preview was DOWN (no bundle served), so drove LIVE against PROD in
+  real Chromium via Playwright. Confirmed served bundle = `index-6RayvARc.js` (the target).
+  Synthesized piano-ish mono 16-bit PCM WAVs in-page (fundamental + 2nd/3rd harmonics, exp
+  decay), wrapped in a `File`, injected via `DataTransfer` into `#audio-input` + a `change`
+  event. Basic Pitch ran end to end (TF.js fell back from WebGL to CPU/WASM headlessly) and
+  transcribed in ~3-4s.
+  - BEFORE any import: `#hand-mutes` hidden (attr=true, computed `display:none`, rect 0x0),
+    `#play-btn` disabled. This is the boot baseline.
+  - Case 1+2 (two-register clip: C3 ~130.81Hz x3 + C5 ~523.25Hz x3): transcribed to "6 notes",
+    and `#hand-mutes` flipped VISIBLE: `hidden` attr=false, computed `display:flex`, rect
+    458x30 on screen. `#mute-right-btn` ("Right hand") + `#mute-left-btn` ("Left hand") +
+    `#balance-slider` + `#balance-readout` ("L100 R100") all present. Screenshot shows a low
+    "Do" (C3, left of center) and a high "Do" (C5) falling, i.e. the clip genuinely split into
+    both hands. THIS IS THE CORE ACCEPTANCE: controls reachable for a two-handed audio clip,
+    where pre-fix they stayed hidden (all notes were "unknown").
+  - Case 3 (exercise a control): clicking `#mute-right-btn` flipped its `aria-pressed`
+    false->true (left stayed false). With right muted, the high "Do" (right hand) renders
+    DIM/ghosted while the low "Do" (left) stays bright purple (#54 ghosting). Dragging
+    `#balance-slider` to +60 updated `#balance-readout` "L100 R100" -> "L40 R100". During live
+    playback (prod autoplay ran: time 0:00->0:01, transport advanced) the muted right "Do"
+    stayed ghosted while the active left "Do" hit the keybed with the bright #27 contact glow,
+    so mute layers correctly on top of a non-center balance during a live transport.
+  - Case 4 (negative/correctness: single-register clip C5/E5/G5, all >= middle C): transcribed
+    to "8 notes" (Do/Mi/Sol/Re, all upper register) and `#hand-mutes` correctly stayed HIDDEN
+    (attr=true, computed `display:none`, rect 0x0). Single-register clips read as one hand, so
+    the controls are absent. Confirms the split is pitch-driven, not unconditional.
+  - Case 5 (console): ZERO real errors and ZERO pageerrors across import + toggle + slider +
+    play, for BOTH clips. The only console noise is benign TF.js backend fallback
+    ("Initialization of backend webgl failed" / "WebGL is not supported on this device") from
+    headless Chromium having no GPU; this is a warning, transcription still succeeds on CPU.
+  - GOTCHA (cost me two failed runs): `page.evaluate(stringBody, arg)` in Playwright does NOT
+    pass `arg` when the first param is a STRING (it just evals the string and drops args). The
+    in-page synth+inject returned `undefined` / the change handler never fired ("No file
+    loaded" stuck) until I passed a REAL JS function reference (`page.evaluate(fn, payload)`).
+    A `snap("label")`-style helper that RETURNS a string with the label already baked in is
+    fine to pass as a no-arg string. The audio `change` handler itself works exactly like the
+    file path: it reads `audioInput.files?.[0]`, so `input.files = dt.files` + dispatch
+    `change` drives it. (Also `input.files.length` reads 0 right after assignment in headless
+    even though transcription proceeds, so do not gate on filesLen; gate on the status
+    transitioning to "Transcribing..." then play-btn enabling + the note count un-hiding.)
+  - Regression checklist clean: solfege labels render on the falling notes (Do/Mi/Sol/Re),
+    key-face approach labels show, falling bars meet the keyboard, #27 contact glow + per-hand
+    color still render, and the single-staff/audio HIDE rule (#76/#77) holds (computed
+    `display:none`, verified by `getBoundingClientRect`, not just the attr).
+  - Driver + screenshots (transient): qa-pr80-v2.mjs + qa-pr80-probe.mjs in the worktree root
+    (where node resolves the local `playwright`); screenshots at /tmp/qa-pr80/*.png.
+
 - 2026-05-30: PR #79 (Bug 2 / issue #44 follow-up: sheet rename now also updates the title
   drawn on the OSMD-rendered score, not just the toolbar label + tab title) -> **PASS** on
   `main` (merge commit 73c4284, deployed to https://piano-helper.pages.dev, smoke green).
