@@ -2,6 +2,7 @@ import {
   buildKeyLayout,
   fitBarLabel,
   isBlackKey,
+  isHandMuted,
   midiToLabel,
   midiToBarLabel,
   noteBarWidth,
@@ -36,6 +37,7 @@ export class Visualizer {
   private lastVisibleMidi = LAST_MIDI;
   private keyboardHeight = MAX_KEYBOARD_HEIGHT;
   private notes: VisNote[] = [];
+  private mutedHands = { left: false, right: false };
   private width = 0;
   private height = 0;
   private dpr = 1;
@@ -53,6 +55,12 @@ export class Visualizer {
 
   setNotes(notes: VisNote[]): void {
     this.notes = notes;
+  }
+
+  // Which hands are muted (issue #54). A muted hand's falling notes are ghosted so the
+  // mute reads on screen, not just in the audio. "unknown"-hand notes are never affected.
+  setMutedHands(muted: { left: boolean; right: boolean }): void {
+    this.mutedHands = muted;
   }
 
   setLabelMode(mode: LabelMode): void {
@@ -134,7 +142,13 @@ export class Visualizer {
     // after, so the bar glow (shadowBlur 18) never bleeds into the glyphs. Each label
     // carries its own fitted font size so short/narrow bars get a smaller name that
     // stays within the bar's bounds (issue #39).
-    const labels: { x: number; y: number; text: string; fontSize: number }[] = [];
+    const labels: {
+      x: number;
+      y: number;
+      text: string;
+      fontSize: number;
+      alpha: number;
+    }[] = [];
 
     for (const note of this.notes) {
       const delta = note.time - currentTime;
@@ -165,7 +179,13 @@ export class Visualizer {
       // building). Active bars get a brighter fill and a wider glow.
       const colors = noteColor(note.midi);
       const isActive = active.has(note.midi);
-      if (offRange) ctx.globalAlpha = 0.35;
+      // Ghost a bar whose hand is currently muted (issue #54) so the mute is visible on
+      // screen, not audio-only. Composes with the off-window dim; "unknown" never mutes.
+      const muted = isHandMuted(note.hand, this.mutedHands);
+      let alpha = 1;
+      if (offRange) alpha = 0.35;
+      if (muted) alpha = Math.min(alpha, 0.3);
+      ctx.globalAlpha = alpha;
       ctx.fillStyle = isActive
         ? colors.activeFill
         : black
@@ -205,7 +225,7 @@ export class Visualizer {
       // keybed, stroke a soft border in the note's own hue so it visibly "lights up" on
       // the hit, distinct from the steady active fill. Fires only for the small set of
       // bars that are both sounding and touching, so the common falling bar pays nothing.
-      const inContact = isActive && bottom >= keyboardTop - 10;
+      const inContact = isActive && !muted && bottom >= keyboardTop - 10;
       if (inContact) {
         ctx.lineWidth = 2;
         ctx.strokeStyle = colors.glow;
@@ -232,9 +252,13 @@ export class Visualizer {
             y: top + barHeight / 2,
             text,
             fontSize: fit.fontSize,
+            alpha,
           });
         }
       }
+
+      // Reset alpha so a muted bar's dim does not leak into the next bar or the labels.
+      ctx.globalAlpha = 1;
     }
 
     // Reset glow before text, draw text, then reset again so nothing else inherits it.
@@ -248,9 +272,11 @@ export class Visualizer {
       ctx.shadowColor = "rgba(0,0,0,0.45)";
       ctx.shadowBlur = 2;
       for (const l of labels) {
+        ctx.globalAlpha = l.alpha;
         ctx.font = `600 ${l.fontSize}px system-ui`;
         ctx.fillText(l.text, l.x, l.y);
       }
+      ctx.globalAlpha = 1;
       ctx.shadowBlur = 0;
     }
   }

@@ -30,6 +30,18 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-30 - Muting a hand now ghosts its falling notes (#54), not audio-only.** #37 shipped a
+  mute that only skipped a hand's Tone.Part triggers, so muting had zero on-screen effect; with sound
+  off it read as a dead button. Fix: the visualizer learns the mute state via `setMutedHands({left,
+  right})` (a field, read each frame, pushed from main.ts on every toggle and reset on load). In
+  `drawFallingNotes`, a muted bar draws at `globalAlpha 0.3` (composed with the off-window 0.35 via
+  `Math.min`), its contact glow is suppressed (`inContact = isActive && !muted && ...`), and its label
+  carries the same dimmed alpha. The mute predicate is a pure `isHandMuted(hand, mutedHands)` in
+  `piano.ts` (unit-tested: matching hand only, `unknown`/`undefined` never mute) so the alpha and the
+  contact gate share one source of truth. Reset `globalAlpha = 1` at the end of each bar iteration and
+  after the label pass so a muted bar's dim never leaks. Verified live (post-merge QA gate): muting the
+  right hand visibly ghosts the treble bars while bass bars stay full; console clean.
+
 - **2026-05-30 - Falling-note name now ALWAYS fits the bar (#39): pure `fitBarLabel` helper + center-anchor.**
   Fixed the note name overflowing/detaching on short or narrow falling bars. Root cause was the #27
   label rule: a fixed `600 11px` glyph at a fixed `y = top + 14` with a coarse `w >= 16 && barHeight

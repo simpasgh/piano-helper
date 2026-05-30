@@ -77,6 +77,17 @@ export function handFromStaffIndex(index: number, staffCount: number): Hand {
   return index === 0 ? "right" : "left";
 }
 
+// Whether a note belongs to a hand the player has muted (issue #54). "unknown"-hand notes
+// (single-staff or audio-derived scores) are never muted, so those scores are unaffected.
+export function isHandMuted(
+  hand: Hand | undefined,
+  mutedHands: { left: boolean; right: boolean },
+): boolean {
+  return (
+    (hand === "left" && mutedHands.left) || (hand === "right" && mutedHands.right)
+  );
+}
+
 // Always-sharp spellings; "Si" (not "Ti") for the 7th degree per the solfege spec.
 const LETTER_CLASSES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const SOLFEGE_CLASSES = [

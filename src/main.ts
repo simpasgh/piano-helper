@@ -180,6 +180,7 @@ function loadNotes(data: ScoreData, name: string, sheet: boolean): void {
   handMuted.right = false;
   muteRightBtn.setAttribute("aria-pressed", "false");
   muteLeftBtn.setAttribute("aria-pressed", "false");
+  visualizer.setMutedHands(handMuted);
   handMutes.hidden = !hasBothHands(score.notes);
 
   stepIndex = 0;
@@ -618,10 +619,12 @@ startSamplerLoad();
 muteRightBtn.addEventListener("click", () => {
   handMuted.right = !handMuted.right;
   muteRightBtn.setAttribute("aria-pressed", String(handMuted.right));
+  visualizer.setMutedHands(handMuted);
 });
 muteLeftBtn.addEventListener("click", () => {
   handMuted.left = !handMuted.left;
   muteLeftBtn.setAttribute("aria-pressed", String(handMuted.left));
+  visualizer.setMutedHands(handMuted);
 });
 
 namesBtn.addEventListener("click", () => {
