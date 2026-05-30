@@ -30,6 +30,57 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-30 - Toolbar redesign v2 SHIPPED (#46): three-tier palette + SVG step icons.**
+  Follow-up to #34, which fixed grouping/ghost-vs-filled but left the palette monochrome (all
+  three loaders AND Play were the same filled violet gradient) and shipped broken step glyphs
+  (`◄|` / `|►`, an arrow jammed against a pipe). Research-led per the Designer spec in design.md.
+  Markup/CSS only plus one new dep-free guard test; no JS/behavior change, so the #29 step logic
+  and the sync invariant are untouched. Pieces:
+  - **Three button tiers (`src/style.css`).** PRIMARY (sole filled-violet hero) = `#play-btn`
+    only, applying "one accent per viewport". SECONDARY (new) = the three `.file-btn` loaders,
+    demoted from filled violet to a raised NEUTRAL surface (`--secondary-*` tokens) that only
+    tints violet on hover. GHOST = `#export-btn`, `.toggle`, `.step-btn` (unchanged in spirit).
+    This is the whole fix: exactly one violet button on the bar now, so it stops reading as
+    "purple everywhere" and gains a real primary/secondary/ghost hierarchy.
+  - **New tokens (`:root`).** Calmer near-neutral `--bar-surface rgba(16,14,22,0.92)` and neutral
+    `--bar-border` / `--group-divider` (was violet-tinted), plus the `--secondary-*` raised tier.
+    The brand anchors (`--accent`, `--accent-gradient`, glow) and the slider violet are unchanged,
+    so the visualizer + sliders + violet wordmark keep the brand identity. Button labels use
+    `#f7f2ff` (near-white), not `#ffffff`, on hover/fill.
+  - **Step buttons -> inline SVG skip-previous / skip-next (`index.html`).** Replaced the text
+    glyphs with two inline `<svg class="step-icon" fill="currentColor">` icons: prev = vertical
+    bar on the LEFT + left-pointing triangle (`|◄`), next = right-pointing triangle + bar on the
+    RIGHT (`►|`), the universally-read "step one back/forward" shape. `currentColor` means they
+    inherit the ghost label color and the hover brighten for free, and they are crisp + identical
+    cross-platform (no emoji-variation risk that `⏮`/`⏭` carry). Kept every `id=`, `aria-label`,
+    and `title`, so the change is purely visual and main.ts's `prevNoteBtn`/`nextNoteBtn` hooks
+    and screen-reader labels are unaffected. Verified the rendered glyphs via qlmanage PNG: they
+    read as the standard skip-track controls.
+  - **Tight transport cluster (`index.html` + CSS).** Wrapped prev/Play/next in a new
+    `.transport-cluster` (gap 0.4rem) so the two step satellites flank the Play hero, then a wider
+    `.transport` gap before the seek scrub + time readout. Only new DOM is that one wrapper div;
+    no id moved.
+  - **Tests (`src/toolbar.test.ts`, NEW, 22 tests).** No jsdom in the project (kept dep-free), so
+    the guard reads `index.html` + `src/style.css` as text and asserts: all 14 `id=` hooks main.ts
+    queries still exist, the prev/next `aria-label`s + shortcut titles survive, the broken text
+    glyphs are gone and exactly two `step-icon` SVGs exist, the `.file-btn` loaders use
+    `--secondary-bg` (NOT the accent gradient) while `#play-btn` keeps the gradient, the divider
+    uses `--group-divider`, and the #33 mobile contract (`@media (max-width:720px)` + `min-height:
+    44px` + `.step-btn { min-width: 44px }`) is intact. This locks the redesign's invariants
+    against future markup regressions without adding a browser dep. Full suite 136 green.
+  - **Coordinates with #44/#33.** Left `#track-name { margin-left: auto }` as the right-trailing
+    flexible slot so the future editable sheet name (#44) can slot in; did NOT build #44. The tier
+    change is color-only on the loaders (still `button`/`.file-btn`), so all #33 responsive rules
+    still match unchanged.
+  - **Verification caveat (same preview-binding limit as #36/#37):** the `preview_start` tool is
+    bound to a DIFFERENT worktree (gifted-fermi on port 5173) and reuses it instead of attaching
+    to this agent worktree, so the live MCP preview did not reflect these changes. Verified
+    instead by: `npm run build` green + confirming the built `dist` carries the SVG icons + tier
+    CSS; a real WebKit render via `qlmanage` of the built CSS + header (full desktop toolbar
+    screenshot showed the single violet Play hero, neutral loaders, ghost utilities, and correct
+    skip glyphs); and the 22-test markup/CSS guard. The phone breakpoint was checked via the unit
+    test rather than a live 375px viewport (qlmanage does not honor the media query reliably).
+
 - **2026-05-30 - Per-hand mute SHIPPED (#37): skip the trigger, never rebuild the Part.**
   Two per-hand audio mute toggles (Right/Left), built on the #36 `VisNote.hand` tag. Pieces:
   - **Pure helper `hasBothHands(notes: VisNote[]): boolean`** in `src/playback.ts` (true only

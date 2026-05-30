@@ -83,25 +83,49 @@
             <span id="sound-status" class="sound-status"></span>
           </div>
           <div class="transport">
-            <button
-              id="prev-note-btn"
-              class="step-btn"
-              title="Previous note (Left arrow)"
-              aria-label="Previous note"
-              disabled
-            >
-              <span aria-hidden="true">&#9664;&#124;</span>
-            </button>
-            <button id="play-btn" title="Play / pause (Space)" disabled>Play</button>
-            <button
-              id="next-note-btn"
-              class="step-btn"
-              title="Next note (Right arrow)"
-              aria-label="Next note"
-              disabled
-            >
-              <span aria-hidden="true">&#124;&#9654;</span>
-            </button>
+            <div class="transport-cluster">
+              <button
+                id="prev-note-btn"
+                class="step-btn"
+                title="Previous note (Left arrow)"
+                aria-label="Previous note"
+                disabled
+              >
+                <svg
+                  class="step-icon"
+                  viewBox="0 0 24 24"
+                  width="20"
+                  height="20"
+                  fill="currentColor"
+                  aria-hidden="true"
+                  focusable="false"
+                >
+                  <rect x="5" y="5" width="2.4" height="14" rx="1" />
+                  <path d="M19 5.5v13a.8.8 0 0 1-1.23.67l-9.5-6.5a.8.8 0 0 1 0-1.34l9.5-6.5A.8.8 0 0 1 19 5.5z" />
+                </svg>
+              </button>
+              <button id="play-btn" title="Play / pause (Space)" disabled>Play</button>
+              <button
+                id="next-note-btn"
+                class="step-btn"
+                title="Next note (Right arrow)"
+                aria-label="Next note"
+                disabled
+              >
+                <svg
+                  class="step-icon"
+                  viewBox="0 0 24 24"
+                  width="20"
+                  height="20"
+                  fill="currentColor"
+                  aria-hidden="true"
+                  focusable="false"
+                >
+                  <path d="M5 5.5v13a.8.8 0 0 0 1.23.67l9.5-6.5a.8.8 0 0 0 0-1.34l-9.5-6.5A.8.8 0 0 0 5 5.5z" />
+                  <rect x="16.6" y="5" width="2.4" height="14" rx="1" />
+                </svg>
+              </button>
+            </div>
             <input
               id="seek-slider"
               type="range"
