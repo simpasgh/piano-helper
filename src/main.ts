@@ -379,6 +379,25 @@ function commitNameEdit(): void {
   const next = resolveEditedSheetName(sheetNameInput.value, sheetName);
   closeNameEdit();
   setSheetName(next);
+  updateSheetTitle(next);
+}
+
+// Reflect a rename in the OSMD-rendered score title so the sheet header matches the toolbar
+// name (issue #44 follow-up: the inline rename used to update only the toolbar label and the
+// document title, leaving the original work title drawn atop the score). We write the new name
+// into the OSMD model via `TitleString` (which rebuilds the title Label), so the change also
+// survives autoResize re-renders, then re-render and restore the cursor to its current spot.
+// No-op for audio-derived scores (no rendered sheet) and when the title is already correct
+// (e.g. the load-time default that matches the work title), avoiding a needless re-render.
+function updateSheetTitle(name: string): void {
+  if (!hasSheet) return;
+  const sheet = osmd.Sheet as { TitleString?: string } | undefined;
+  if (!sheet || sheet.TitleString === name) return;
+  const scoreTime = score ? Tone.getTransport().seconds * tempoRate : 0;
+  sheet.TitleString = name;
+  osmd.render();
+  resyncCursor(scoreTime); // re-render resets the cursor; put it back where the playhead is
+  renderSheetLabels(osmd, sheetContainer, labelMode); // re-render clears the overlay too
 }
 
 // Discard an in-progress edit without changing the name.
