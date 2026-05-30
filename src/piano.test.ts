@@ -8,6 +8,7 @@ import {
   midiToLabel,
   midiToBarLabel,
   handFromStaffIndex,
+  handFromClef,
   isHandMuted,
   noteBarWidth,
   fitBarLabel,
@@ -118,6 +119,17 @@ describe("handFromStaffIndex", () => {
     // A 3-staff organ part still maps index 0 to right and everything below to left.
     expect(handFromStaffIndex(0, 3)).toBe("right");
     expect(handFromStaffIndex(2, 3)).toBe("left");
+  });
+});
+
+describe("handFromClef (clef is the primary hand signal, robust to staff order)", () => {
+  it("maps treble clef to the right hand and bass clef to the left hand", () => {
+    expect(handFromClef("treble")).toBe("right");
+    expect(handFromClef("bass")).toBe("left");
+  });
+
+  it("returns null for clefs with no hand convention so the caller can fall back", () => {
+    expect(handFromClef("other")).toBeNull();
   });
 });
 

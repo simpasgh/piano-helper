@@ -30,6 +30,27 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-30 - Hand tagging now keys off the CLEF, not the staff array index (fixes "muting right hand still plays it").**
+  Root cause: `extractScore` tagged hands with `handFromStaffIndex(staves.indexOf(staff), len)`,
+  assuming staff index 0 = treble = right. But a MusicXML file can declare its staves bass-first
+  (bass on staff 1 / index 0, treble on staff 2 / index 1) - some music21 exports do this. That
+  inverted the hands: the bass got "right", the treble melody got "left". Muting "right" then
+  silenced the bass while the melody kept sounding, which is exactly what the user heard. The audio
+  mute logic itself (Part callback `note.hand === "right" && handMuted.right` -> skip trigger) was
+  always correct; the data feeding it was wrong. Verified end-to-end: Tone.Part DOES pass the value
+  object (with `hand`) to the callback, and the skip works - the bug was purely the hand label.
+  - **Fix:** new pure helper `handFromClef("treble"|"bass"|"other")` in `piano.ts` (treble->right,
+    bass->left, other->null). `score.ts` `readStaffClefs(osmd)` reads each staff's opening clef from
+    `osmd.Sheet.SourceMeasures[].FirstInstructionsStaffEntries[staffIndex].Instructions` (find the
+    `ClefInstruction`, map `ClefType` via `ClefEnum.G`/`ClefEnum.F`), keyed by `staff.idInMusicSheet`.
+    Per note: only split when the instrument has >=2 staves (else "unknown", unchanged), prefer the
+    clef, fall back to `handFromStaffIndex` for C/percussion clefs. `ClefInstruction`/`ClefEnum` are
+    re-exported from the `opensheetmusicdisplay` package root.
+  - **OSMD gotchas learned while chasing this:** two separate `<part>` elements (even same name, even
+    in a `<part-group>` brace) become two single-staff instruments -> all notes "unknown" -> mute
+    buttons hidden. Hands split into right/left ONLY for a single instrument with `<staves>2</staves>`.
+    Notes that separate hands by `<voice>` without explicit `<staff>` all collapse onto staff 1.
+
 - **2026-05-30 - Code review of #67 (falling-note label legibility, PR #69): APPROVE.** Two-pole
   contrast-aware glyph ink + width-only overflow for narrow desktop bars. Verified independently:
   - **Luminance table is correct and octave-invariant.** `PITCH_CLASS_GLYPH_DARK` in `piano.ts`

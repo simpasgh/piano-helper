@@ -69,12 +69,25 @@ export type LabelMode = "solfege" | "letters" | "off";
 // "unknown" = single-staff or audio-derived scores with no hand information.
 export type Hand = "left" | "right" | "unknown";
 
-// Maps a note's staff index within its instrument to a hand. Grand-staff piano music
-// has two staves: index 0 (treble) is the right hand, index 1 (bass) is the left hand.
-// A single-staff part cannot be split into hands, so it degrades to "unknown".
+// Maps a note's staff index within its instrument to a hand. Used only as a fallback when
+// the staff's clef is missing/ambiguous: it assumes the conventional grand-staff order
+// (index 0 = treble = right, index 1 = bass = left). A single-staff part cannot be split
+// into hands, so it degrades to "unknown".
 export function handFromStaffIndex(index: number, staffCount: number): Hand {
   if (staffCount < 2 || index < 0) return "unknown";
   return index === 0 ? "right" : "left";
+}
+
+// Maps a staff's clef to a hand: treble clef = right hand, bass clef = left hand. This is
+// the primary hand signal because it reflects the music itself, not the staff's position in
+// the file. A MusicXML file may declare its staves bass-first (treble on the second staff);
+// keying off position then inverted the hands, so muting "right" silenced the bass while the
+// melody kept sounding. Clefs with no hand convention (C, percussion) return null so the
+// caller can fall back to position.
+export function handFromClef(clef: "treble" | "bass" | "other"): Hand | null {
+  if (clef === "treble") return "right";
+  if (clef === "bass") return "left";
+  return null;
 }
 
 // Whether a note belongs to a hand the player has muted (issue #54). "unknown"-hand notes
