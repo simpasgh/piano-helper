@@ -4,6 +4,7 @@ import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { Visualizer } from "./visualizer";
 import { extractScore, type ScoreData } from "./score";
 import { submitOmr, pollOmrResult } from "./omr";
+import { chooseVideoFormat, buildExportFilename } from "./recorder";
 import { buildSalamanderSampleMap, SALAMANDER_BASE_URL } from "./sampler";
 import { renderSheetLabels } from "./sheet-overlay";
 import {
@@ -19,6 +20,7 @@ const fileInput = document.getElementById("file-input") as HTMLInputElement;
 const scanInput = document.getElementById("scan-input") as HTMLInputElement;
 const audioInput = document.getElementById("audio-input") as HTMLInputElement;
 const playBtn = document.getElementById("play-btn") as HTMLButtonElement;
+const exportBtn = document.getElementById("export-btn") as HTMLButtonElement;
 const namesBtn = document.getElementById("names-btn") as HTMLButtonElement;
 const tempoSlider = document.getElementById("tempo-slider") as HTMLInputElement;
 const tempoReadout = document.getElementById("tempo-readout") as HTMLButtonElement;
@@ -141,6 +143,7 @@ function loadNotes(data: ScoreData, name: string, sheet: boolean): void {
   stepIndex = 0;
   trackName.textContent = `${name} (${score.notes.length} notes)`;
   playBtn.disabled = false;
+  exportBtn.disabled = false;
   setPlaying(false);
 }
 
@@ -238,7 +241,10 @@ function setBusyUI(active: boolean): void {
   fileInput.disabled = active;
   scanInput.disabled = active;
   audioInput.disabled = active;
-  if (active) playBtn.disabled = true;
+  if (active) {
+    playBtn.disabled = true;
+    exportBtn.disabled = true;
+  }
 }
 
 async function scanSheet(file: File): Promise<void> {
@@ -290,6 +296,110 @@ audioInput.addEventListener("change", () => {
 });
 
 playBtn.addEventListener("click", () => togglePlay());
+
+// Trigger a browser download of a recorded blob.
+function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // Revoke after a tick so the download has started.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// Export the performance (issue #15): play it once from the top while recording the
+// falling-notes canvas plus the live audio into a single WebM/MP4 file the user can
+// download and upload to YouTube. Fully client-side via captureStream + MediaRecorder;
+// no service, no API. The sheet view is a separate SVG and is not part of the recording,
+// so the video shows the Synthesia-style performance area only.
+async function exportVideo(): Promise<void> {
+  if (!score || busy) return;
+
+  const format = chooseVideoFormat((t) => MediaRecorder.isTypeSupported(t));
+  if (!format) {
+    alert("Video recording is not supported in this browser.");
+    return;
+  }
+
+  const labelBeforeExport = trackName.textContent ?? "performance";
+  setBusyUI(true);
+
+  let streamDest: MediaStreamAudioDestinationNode | null = null;
+  let canvasStream: MediaStream | null = null;
+  try {
+    // Awaiting Tone.start() (driven by this button's user gesture) resumes the audio
+    // context, so the transport actually advances once we start it below.
+    await Tone.start();
+
+    // Tee the master output into a MediaStream so the recording captures exactly what
+    // is played (synth or sampler, at the current tempo).
+    const rawContext = Tone.getContext().rawContext as unknown as AudioContext;
+    streamDest = rawContext.createMediaStreamDestination();
+    Tone.getDestination().connect(streamDest);
+
+    canvasStream = canvas.captureStream(30);
+    const mixed = new MediaStream([
+      ...canvasStream.getVideoTracks(),
+      ...streamDest.stream.getAudioTracks(),
+    ]);
+
+    const recorder = new MediaRecorder(mixed, { mimeType: format.mimeType });
+    const chunks: BlobPart[] = [];
+    recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) chunks.push(e.data);
+    };
+    const recorderStopped = new Promise<void>((resolve) => {
+      recorder.onstop = () => resolve();
+    });
+
+    // Start the performance from the top and record it in real time. The timeslice flushes
+    // a chunk each second so a long performance does not buffer entirely in memory.
+    rewind();
+    recorder.start(1000);
+    const transport = Tone.getTransport();
+    transport.start();
+    setPlaying(true);
+    trackName.textContent = "Recording video...";
+
+    // Wait until playback reaches the end. The rAF loop calls rewind() at the end of the
+    // score, which stops the transport; we detect that here and finalize the recording.
+    await new Promise<void>((resolve) => {
+      const id = setInterval(() => {
+        const scoreTime = transport.seconds * tempoRate;
+        const reachedEnd = score !== null && scoreTime >= score.duration;
+        if (!playing || transport.state !== "started" || reachedEnd) {
+          clearInterval(id);
+          resolve();
+        }
+      }, 100);
+    });
+
+    transport.stop();
+    setPlaying(false);
+    recorder.stop();
+    await recorderStopped;
+
+    const blob = new Blob(chunks, { type: format.mimeType });
+    downloadBlob(blob, buildExportFilename(labelBeforeExport, format.extension));
+  } catch (err) {
+    console.error("Video export failed:", err);
+    alert(`Video export failed: ${(err as Error).message}`);
+  } finally {
+    if (streamDest) Tone.getDestination().disconnect(streamDest);
+    canvasStream?.getTracks().forEach((t) => t.stop());
+    trackName.textContent = labelBeforeExport;
+    setBusyUI(false);
+    playBtn.disabled = !score;
+    exportBtn.disabled = !score;
+  }
+}
+
+exportBtn.addEventListener("click", () => {
+  exportVideo();
+});
 
 // Apply a tempo percent: clamp it, update the rate, the live transport bpm, the slider,
 // and the readout. Works before playback (bpm is set for the next start) and live during
