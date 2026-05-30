@@ -158,6 +158,19 @@
                   </span>
                   <span class="hand-toggle-label">Left hand</span>
                 </button>
+                <div class="hand-balance">
+                  <span class="hand-balance-label">Balance</span>
+                  <input
+                    id="balance-slider"
+                    type="range"
+                    min="-100"
+                    max="100"
+                    value="0"
+                    step="5"
+                    aria-label="Hand volume balance: negative favors left hand, positive favors right hand"
+                  />
+                  <button id="balance-readout" class="balance-readout" type="button" title="Reset to even">L100 R100</button>
+                </div>
               </div>
               <div class="tempo">
                 <span class="tempo-label">Tempo</span>
