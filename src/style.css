@@ -118,9 +118,14 @@ body {
   background: var(--group-divider);
 }
 
-/* Push the status text to the right so the groups stay left-packed. */
+/* Push the sheet-name slot to the right so the groups stay left-packed. It holds the
+   editable name (issue #44), the note count, and a transient status message. */
 #track-name {
   margin-left: auto;
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  min-width: 0;
 }
 
 /* Transport row (issue #29): prev / play / next / seek bar / time readout.
@@ -712,6 +717,77 @@ button:focus-visible,
 .track-name {
   font-size: 0.85rem;
   color: var(--text-muted);
+}
+
+/* Editable sheet name (issue #44). A click-to-edit affordance styled as quiet text, not a
+   loud button: it lives in the muted status slot and should read as the piece's title with a
+   subtle hint that it is editable (dotted underline + pencil on hover). */
+.sheet-name {
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: transparent;
+  border: none;
+  padding: 0.1rem 0.25rem;
+  margin: 0;
+  font: inherit;
+  font-weight: 600;
+  color: var(--text);
+  cursor: text;
+  border-radius: 6px;
+  border-bottom: 1px dashed transparent;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.sheet-name::after {
+  content: " \270E"; /* pencil, hints the name is editable */
+  color: var(--text-faint);
+  font-weight: 400;
+}
+
+.sheet-name:hover {
+  background: var(--ghost-bg-hover);
+  border-bottom-color: var(--ghost-border-hover);
+}
+
+.sheet-name:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* The inline edit field that replaces the name button while renaming. */
+.sheet-name-input {
+  max-width: 22ch;
+  background: var(--secondary-bg);
+  border: 1px solid var(--secondary-border);
+  border-radius: 6px;
+  padding: 0.1rem 0.35rem;
+  font: inherit;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.sheet-name-input:focus {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+  border-color: var(--secondary-border-hover);
+}
+
+.sheet-note-count {
+  font-size: 0.78rem;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.track-status {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .sound-status {

@@ -30,6 +30,36 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-30 - Editable sheet name SHIPPED (#44): pure naming logic + inline toolbar edit.**
+  The user can rename the loaded piece inline in the right-trailing `#track-name` toolbar slot.
+  - **Pure module `src/sheet-name.ts` (16 unit tests):** `deriveDefaultSheetName(fileName,
+    musicXmlTitle)` (title wins, else file name with extension stripped, else "Untitled sheet"),
+    `normalizeSheetName` (collapse whitespace, cap at `MAX_SHEET_NAME_LENGTH` 80, re-trim), and
+    `resolveEditedSheetName(edited, current)` (empty edit reverts to current, never blanks). All
+    DOM-free so they test without OSMD/jsdom, same pattern as recorder.ts/playback.ts. Gotcha:
+    the extension-strip regex is `\.[A-Za-z0-9]{1,8}$` (8 not 5, so ".musicxml" strips) and only
+    a final dot+alnum, so a name like "J.S. Bach" (tail "Bach" has no preceding dot) is left alone.
+  - **DOM wiring in `src/main.ts`:** the old single `#track-name` span (which packed "name (N
+    notes)") was split into `#sheet-name` (a `<button>`, click-to-edit), a hidden `#sheet-name-input`,
+    a `#sheet-note-count` span, and a `#track-status` span for transient messages, all inside a
+    `#track-name` flex `<div>` that KEEPS `margin-left:auto` so #46's slot reservation and #33's
+    `.track-name { display:none }` mobile hide still apply unchanged. Module state `sheetName` /
+    `noteCount` / `nameEditing`; `setSheetName` also sets `document.title` and the export filename
+    now uses `sheetName` (reusing the title for #15 export per the issue). `showStatus` /
+    `restoreSheetName` swap the slot between the editable name and a status message; all the old
+    `trackName.textContent = "..."` status writes (scan/transcribe/record/error) route through them.
+  - **Edit lifecycle gotcha:** Enter and blur both commit, Escape cancels; the input's `blur`
+    handler calls `commitNameEdit` which is a guarded no-op once `nameEditing` is false, so the
+    Enter-then-blur and Escape-then-blur double-fires are safe. `loadNotes` calls `cancelNameEdit()`
+    first so a rename in progress on an old score is dropped when a new one loads. The global
+    keydown shortcut handler already bails on focused INPUT, so typing Space/arrows in the name
+    field works natively.
+  - **Verification:** 17 new tests (16 sheet-name + 1 toolbar markup guard added to
+    `toolbar.test.ts` locking the four new ids + aria-label + maxlength), full suite 165 green,
+    `npm run build` green. Code review (high effort, self-run): no findings. Could NOT verify the
+    UI live (the preview server is bound to a different worktree, the standing limitation in qa.md);
+    open as a live-QA item.
+
 - **2026-05-30 - Heroicons adopted via INLINE SVG, not the npm package (#48).** Toolbar/transport
   icons now use Heroicons (MIT), delivered as inline `<svg>` with paths copied from the official
   set (`tailwindlabs/heroicons` `src/24/{outline,solid}`), NOT the `heroicons` npm package nor any

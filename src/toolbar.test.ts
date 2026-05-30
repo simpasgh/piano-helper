@@ -61,6 +61,17 @@ describe("toolbar markup invariants (issue #46)", () => {
     // margin-left: auto on #track-name leaves a place for the future editable name field.
     expect(css).toMatch(/#track-name\s*\{[^}]*margin-left:\s*auto/);
   });
+
+  it("provides the editable sheet-name hooks main.ts queries (issue #44)", () => {
+    // The inline rename feature wires these by id; dropping any breaks the rename.
+    for (const id of ["sheet-name", "sheet-name-input", "sheet-note-count", "track-status"]) {
+      expect(html).toContain(`id="${id}"`);
+    }
+    // The name is a click-to-edit button (keyboard/AT operable), labelled for assistive tech.
+    expect(html).toMatch(/id="sheet-name"[\s\S]*?aria-label="Sheet name, click to rename"/);
+    // The edit field caps length so a pasted blob cannot blow out the toolbar.
+    expect(html).toMatch(/id="sheet-name-input"[\s\S]*?maxlength="80"/);
+  });
 });
 
 describe("toolbar palette tiers (issue #46)", () => {

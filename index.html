@@ -163,7 +163,26 @@
                 <button id="tempo-readout" class="tempo-readout" title="Reset to 100%">100%</button>
               </div>
             </div>
-            <span id="track-name" class="track-name">No file loaded</span>
+            <div id="track-name" class="track-name">
+              <button
+                id="sheet-name"
+                class="sheet-name"
+                type="button"
+                title="Click to rename the sheet"
+                aria-label="Sheet name, click to rename"
+                hidden
+              ></button>
+              <input
+                id="sheet-name-input"
+                class="sheet-name-input"
+                type="text"
+                maxlength="80"
+                aria-label="Edit sheet name"
+                hidden
+              />
+              <span id="sheet-note-count" class="sheet-note-count"></span>
+              <span id="track-status" class="track-status">No file loaded</span>
+            </div>
             <span id="sound-status" class="sound-status"></span>
           </div>
           <div class="transport">
