@@ -113,6 +113,14 @@ describe("toolbar palette tiers (issue #46)", () => {
     expect(css).toContain("min-height: 44px");
     expect(css).toMatch(/\.step-btn\s*\{\s*min-width:\s*44px/);
   });
+
+  it("lets control groups wrap their buttons on phones so the toolbar never overflows (issue #84)", () => {
+    // The source-loader cluster holds three labelled buttons; without intra-group wrapping it
+    // forms a single row wider than a phone viewport and scrolls the page horizontally. The
+    // phone breakpoint must let .group (and .controls) wrap so buttons stack instead.
+    const phone = css.slice(css.indexOf("@media (max-width: 720px)"));
+    expect(phone).toMatch(/\.controls,\s*\.group\s*\{\s*flex-wrap:\s*wrap/);
+  });
 });
 
 describe("Heroicons toolbar/transport icons (issue #48)", () => {

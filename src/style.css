@@ -689,6 +689,13 @@ button:focus-visible,
     display: none;
   }
 
+  /* Let each cluster wrap its own buttons so a wide group (e.g. the three source
+     loaders) stacks onto multiple rows instead of overflowing the viewport (issue #84). */
+  .controls,
+  .group {
+    flex-wrap: wrap;
+  }
+
   .transport {
     flex-wrap: wrap;
   }
