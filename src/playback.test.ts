@@ -1,0 +1,101 @@
+import { describe, it, expect } from "vitest";
+import {
+  uniqueOnsets,
+  nextOnset,
+  prevOnset,
+  scoreTimeToSeek,
+  seekToScoreTime,
+  formatClock,
+  SEEK_RANGE,
+} from "./playback";
+import type { VisNote } from "./visualizer";
+
+const note = (time: number, midi = 60): VisNote => ({ midi, time, duration: 0.5 });
+
+describe("uniqueOnsets", () => {
+  it("returns sorted, de-duplicated onset times", () => {
+    const notes = [note(2, 64), note(0, 60), note(2, 67), note(1, 62), note(0, 48)];
+    expect(uniqueOnsets(notes)).toEqual([0, 1, 2]);
+  });
+
+  it("returns an empty array for no notes", () => {
+    expect(uniqueOnsets([])).toEqual([]);
+  });
+});
+
+describe("nextOnset", () => {
+  const onsets = [0, 1, 2, 3];
+
+  it("returns the first onset strictly after the current time", () => {
+    expect(nextOnset(onsets, 1)).toBe(2);
+  });
+
+  it("skips the current onset when sitting exactly on it", () => {
+    expect(nextOnset(onsets, 2)).toBe(3);
+  });
+
+  it("returns null at or after the last onset", () => {
+    expect(nextOnset(onsets, 3)).toBeNull();
+    expect(nextOnset(onsets, 5)).toBeNull();
+  });
+
+  it("returns the first onset from before the start", () => {
+    expect(nextOnset(onsets, -1)).toBe(0);
+  });
+});
+
+describe("prevOnset", () => {
+  const onsets = [0, 1, 2, 3];
+
+  it("returns the last onset strictly before the current time", () => {
+    expect(prevOnset(onsets, 2.5)).toBe(2);
+  });
+
+  it("steps back past the current onset when sitting exactly on it", () => {
+    expect(prevOnset(onsets, 2)).toBe(1);
+  });
+
+  it("returns null at or before the first onset", () => {
+    expect(prevOnset(onsets, 0)).toBeNull();
+    expect(prevOnset(onsets, -1)).toBeNull();
+  });
+});
+
+describe("scoreTimeToSeek / seekToScoreTime", () => {
+  it("maps the midpoint to half the range", () => {
+    expect(scoreTimeToSeek(5, 10)).toBe(SEEK_RANGE / 2);
+  });
+
+  it("clamps out-of-range times", () => {
+    expect(scoreTimeToSeek(-1, 10)).toBe(0);
+    expect(scoreTimeToSeek(20, 10)).toBe(SEEK_RANGE);
+  });
+
+  it("returns 0 for a zero-duration score", () => {
+    expect(scoreTimeToSeek(5, 0)).toBe(0);
+  });
+
+  it("round-trips a slider value back to seconds", () => {
+    expect(seekToScoreTime(SEEK_RANGE / 2, 10)).toBeCloseTo(5);
+    expect(seekToScoreTime(SEEK_RANGE, 10)).toBeCloseTo(10);
+    expect(seekToScoreTime(0, 10)).toBe(0);
+  });
+});
+
+describe("formatClock", () => {
+  it("formats seconds as m:ss with zero-padding", () => {
+    expect(formatClock(0)).toBe("0:00");
+    expect(formatClock(5)).toBe("0:05");
+    expect(formatClock(84)).toBe("1:24");
+    expect(formatClock(605)).toBe("10:05");
+  });
+
+  it("floors fractional seconds", () => {
+    expect(formatClock(59.9)).toBe("0:59");
+  });
+
+  it("clamps negative and non-finite values to 0:00", () => {
+    expect(formatClock(-3)).toBe("0:00");
+    expect(formatClock(NaN)).toBe("0:00");
+  });
+});

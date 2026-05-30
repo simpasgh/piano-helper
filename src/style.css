@@ -32,7 +32,7 @@ body {
 
 .topbar {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 1.5rem;
   padding: 0.75rem 1.25rem;
   background: rgba(20, 12, 32, 0.85);
@@ -44,12 +44,130 @@ body {
   font-size: 1.1rem;
   font-weight: 600;
   letter-spacing: 0.02em;
+  line-height: 2.1rem;
+}
+
+.topbar-rows {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.6rem;
 }
 
 .controls {
   display: flex;
   align-items: center;
   gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+/* Transport row (issue #29): prev / play / next / seek bar / time readout. */
+.transport {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.step-btn {
+  min-width: 2.4rem;
+  padding: 0.5rem 0.6rem;
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+#seek-slider {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 1;
+  min-width: 120px;
+  height: 5px;
+  padding: 8px 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+#seek-slider::-webkit-slider-runnable-track {
+  height: 5px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #7a2fd6, var(--accent));
+}
+
+#seek-slider::-moz-range-track {
+  height: 5px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #7a2fd6, var(--accent));
+}
+
+#seek-slider::-moz-range-progress {
+  height: 5px;
+  border-radius: 3px;
+  background: var(--accent);
+}
+
+#seek-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  margin-top: -6.5px;
+  border-radius: 50%;
+  background: #f2ecf8;
+  border: 2px solid var(--accent);
+  box-shadow: 0 0 8px var(--accent-glow);
+  cursor: pointer;
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+#seek-slider::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #f2ecf8;
+  border: 2px solid var(--accent);
+  box-shadow: 0 0 8px var(--accent-glow);
+  cursor: pointer;
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+#seek-slider:hover:not(:disabled)::-webkit-slider-thumb,
+#seek-slider:active:not(:disabled)::-webkit-slider-thumb {
+  box-shadow: 0 0 12px var(--accent-glow);
+  transform: scale(1.08);
+}
+
+#seek-slider:hover:not(:disabled)::-moz-range-thumb,
+#seek-slider:active:not(:disabled)::-moz-range-thumb {
+  box-shadow: 0 0 12px var(--accent-glow);
+  transform: scale(1.08);
+}
+
+#seek-slider:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+#seek-slider:disabled::-webkit-slider-thumb {
+  box-shadow: none;
+}
+
+#seek-slider:disabled::-moz-range-thumb {
+  box-shadow: none;
+}
+
+#seek-slider:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.time-readout {
+  font-size: 0.8rem;
+  font-weight: 600;
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+  min-width: 9ch;
+  text-align: right;
+  white-space: nowrap;
 }
 
 button,
@@ -178,6 +296,14 @@ button:disabled {
     width: 88px;
     max-width: 88px;
     min-width: 72px;
+  }
+
+  .time-readout {
+    display: none;
+  }
+
+  .step-btn {
+    min-width: 2.1rem;
   }
 }
 

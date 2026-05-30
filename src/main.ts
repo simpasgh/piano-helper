@@ -5,6 +5,14 @@ import { Visualizer } from "./visualizer";
 import { extractScore, type ScoreData } from "./score";
 import { submitOmr, pollOmrResult } from "./omr";
 import { chooseVideoFormat, buildExportFilename } from "./recorder";
+import {
+  uniqueOnsets,
+  nextOnset,
+  prevOnset,
+  scoreTimeToSeek,
+  seekToScoreTime,
+  formatClock,
+} from "./playback";
 import { buildSalamanderSampleMap, SALAMANDER_BASE_URL } from "./sampler";
 import { renderSheetLabels } from "./sheet-overlay";
 import {
@@ -20,6 +28,10 @@ const fileInput = document.getElementById("file-input") as HTMLInputElement;
 const scanInput = document.getElementById("scan-input") as HTMLInputElement;
 const audioInput = document.getElementById("audio-input") as HTMLInputElement;
 const playBtn = document.getElementById("play-btn") as HTMLButtonElement;
+const prevNoteBtn = document.getElementById("prev-note-btn") as HTMLButtonElement;
+const nextNoteBtn = document.getElementById("next-note-btn") as HTMLButtonElement;
+const seekSlider = document.getElementById("seek-slider") as HTMLInputElement;
+const timeReadout = document.getElementById("time-readout") as HTMLSpanElement;
 const exportBtn = document.getElementById("export-btn") as HTMLButtonElement;
 const namesBtn = document.getElementById("names-btn") as HTMLButtonElement;
 const tempoSlider = document.getElementById("tempo-slider") as HTMLInputElement;
@@ -41,6 +53,12 @@ let part: Tone.Part | null = null;
 let score: ScoreData | null = null;
 let stepIndex = 0;
 let playing = false;
+// Sorted, unique note onset times for the prev/next-note step controls (issue #29). Rebuilt
+// per score; works for both sheet and audio scores.
+let onsets: number[] = [];
+// True while the user is dragging the seek slider, so the rAF loop does not fight the drag
+// by writing the slider value back from the (also-changing) transport position.
+let userSeeking = false;
 // Whether the current score has a rendered sheet + cursor. MusicXML/OMR scores do;
 // audio-transcribed scores (issue #19) are falling-notes only, so the cursor stays hidden.
 let hasSheet = false;
@@ -141,9 +159,12 @@ function loadNotes(data: ScoreData, name: string, sheet: boolean): void {
   transport.bpm.value = rateToBpm(tempoRate, BASE_BPM);
 
   stepIndex = 0;
+  onsets = uniqueOnsets(score.notes);
   trackName.textContent = `${name} (${score.notes.length} notes)`;
   playBtn.disabled = false;
   exportBtn.disabled = false;
+  setTransportControlsEnabled(true);
+  updateSeekUI(0);
   setPlaying(false);
 }
 
@@ -209,7 +230,74 @@ function rewind(): void {
     osmd.cursor.reset();
     osmd.cursor.show();
   }
+  updateSeekUI(0);
   setPlaying(false);
+}
+
+// Enable/disable the transport row controls (prev, next, seek) as a group, matching the
+// Play button's lifecycle. They are only usable once a score is loaded.
+function setTransportControlsEnabled(enabled: boolean): void {
+  prevNoteBtn.disabled = !enabled;
+  nextNoteBtn.disabled = !enabled;
+  seekSlider.disabled = !enabled;
+}
+
+// Reflect a score time on the seek slider, the time readout, and the slider's accessible
+// value text. Skips the slider write while the user is dragging it (avoids fighting the drag).
+function updateSeekUI(scoreTime: number): void {
+  if (!score) return;
+  const clock = `${formatClock(scoreTime)} / ${formatClock(score.duration)}`;
+  timeReadout.textContent = clock;
+  seekSlider.setAttribute("aria-valuetext", clock);
+  if (!userSeeking) {
+    seekSlider.value = String(scoreTimeToSeek(scoreTime, score.duration));
+  }
+}
+
+// Reposition the sheet cursor to the step at or before `scoreTime`. Rebuilds from the start
+// each call so it handles backward jumps (the cursor only moves forward natively).
+function resyncCursor(scoreTime: number): void {
+  if (!hasSheet || !score) return;
+  osmd.cursor.reset();
+  stepIndex = 0;
+  const { stepTimes } = score;
+  while (stepIndex < stepTimes.length - 1 && scoreTime >= stepTimes[stepIndex + 1]) {
+    osmd.cursor.next();
+    stepIndex++;
+  }
+  osmd.cursor.show();
+}
+
+// Move the playhead to an absolute score time (seconds), keeping the transport, the sheet
+// cursor, the falling notes, and the seek UI in sync. Works while paused or playing; the
+// rAF loop renders the new position next frame, and we render once here so a paused seek
+// updates immediately.
+function seekScoreTime(scoreTime: number): void {
+  if (!score) return;
+  const clamped = Math.max(0, Math.min(scoreTime, score.duration));
+  // scoreTime = transport.seconds * tempoRate, so invert to set the transport clock.
+  Tone.getTransport().seconds = tempoRate > 0 ? clamped / tempoRate : 0;
+  resyncCursor(clamped);
+  updateSeekUI(clamped);
+  visualizer.render(clamped);
+}
+
+// Step the playhead one note onset forward or backward (issue #29). Pauses first so the
+// player can walk through the piece note by note. Backward at the start snaps to 0.
+function stepNote(direction: 1 | -1): void {
+  if (!score || busy) return;
+  if (playing) {
+    Tone.getTransport().pause();
+    setPlaying(false);
+  }
+  const current = Tone.getTransport().seconds * tempoRate;
+  const target =
+    direction > 0 ? nextOnset(onsets, current) : prevOnset(onsets, current);
+  if (target === null) {
+    if (direction < 0) seekScoreTime(0);
+    return;
+  }
+  seekScoreTime(target);
 }
 
 // Advance the sheet cursor so the highlighted note matches the playback time.
@@ -244,6 +332,7 @@ function setBusyUI(active: boolean): void {
   if (active) {
     playBtn.disabled = true;
     exportBtn.disabled = true;
+    setTransportControlsEnabled(false);
   }
 }
 
@@ -296,6 +385,47 @@ audioInput.addEventListener("change", () => {
 });
 
 playBtn.addEventListener("click", () => togglePlay());
+
+prevNoteBtn.addEventListener("click", () => stepNote(-1));
+nextNoteBtn.addEventListener("click", () => stepNote(1));
+
+// Dragging the seek slider scrubs the playhead live. `input` fires continuously during the
+// drag (mouse or keyboard); `change` marks the end so the rAF loop can resume driving the
+// slider from the transport position.
+seekSlider.addEventListener("input", () => {
+  if (!score) return;
+  userSeeking = true;
+  seekScoreTime(seekToScoreTime(Number(seekSlider.value), score.duration));
+});
+seekSlider.addEventListener("change", () => {
+  userSeeking = false;
+});
+
+// Global keyboard shortcuts: Space toggles play/pause, Left/Right step by note. Arrow keys
+// are ignored when a form control (the seek or tempo slider) is focused so they keep their
+// native behavior; Space is handled globally (prevented so a focused button is not also
+// clicked).
+window.addEventListener("keydown", (e) => {
+  if (!score || busy) return;
+  const target = e.target as HTMLElement | null;
+  const tag = target?.tagName;
+  const isFormField =
+    tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || !!target?.isContentEditable;
+
+  if (e.code === "Space") {
+    if (isFormField) return;
+    e.preventDefault();
+    togglePlay();
+  } else if (e.code === "ArrowRight") {
+    if (isFormField) return;
+    e.preventDefault();
+    stepNote(1);
+  } else if (e.code === "ArrowLeft") {
+    if (isFormField) return;
+    e.preventDefault();
+    stepNote(-1);
+  }
+});
 
 // Trigger a browser download of a recorded blob.
 function downloadBlob(blob: Blob, filename: string): void {
@@ -394,6 +524,7 @@ async function exportVideo(): Promise<void> {
     setBusyUI(false);
     playBtn.disabled = !score;
     exportBtn.disabled = !score;
+    setTransportControlsEnabled(!!score);
   }
 }
 
@@ -477,6 +608,7 @@ function frame(): void {
     rewind();
   } else if (playing) {
     syncCursor(scoreTime);
+    updateSeekUI(scoreTime);
   }
   visualizer.render(scoreTime);
   requestAnimationFrame(frame);
