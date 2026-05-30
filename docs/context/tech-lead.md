@@ -30,6 +30,31 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-30 - Code review of #67 (falling-note label legibility, PR #69): APPROVE.** Two-pole
+  contrast-aware glyph ink + width-only overflow for narrow desktop bars. Verified independently:
+  - **Luminance table is correct and octave-invariant.** `PITCH_CLASS_GLYPH_DARK` in `piano.ts`
+    mirrors `buildNoteColors` exactly (whiteFill 85/62, blackFill 70/50, activeFill 95/72). Recomputed
+    by hand: white-fill luminance >= 0.6 for Mi(64)/Fa(65)/Fa#(66)/Sol(67)/Sol#(68)/La(69) -> dark ink;
+    Do(60)=0.487 and Si(71)=0.390 -> light ink. Matches the reported washed-out hues. `activeL > whiteL`
+    for every pc, so the "active never makes a bar less likely to take dark ink" monotonicity test holds
+    (Do flips to dark only when active at L 0.610, harmless). Hue is pitch-class-only, so octave-invariant.
+  - **Overflow math is bounded.** Brute-forced w 4..80, h 2..100, chars 1..4: zero width-budget
+    violations (rendered name always <= `barWidth*(1+2*0.9)`), font never exceeds `floor(barHeight*0.55)`
+    (no vertical overflow, no detached pill, #39 intent preserved), shown font always >= MIN_OVERFLOW_PX 7.
+    A 10px/60h/2char bar shows "Do" at full 12px spilling ~4px/side; a 10px/12h bar still omits (height
+    floor binds). Existing in-bounds callers default `allowOverflow=false` and are unchanged.
+  - **No hot-loop cost.** `barGlyphIsDark` reads the precomputed boolean table; `hslToRgb`/`rgbLuminance`/
+    `fillIsLight` run once at module load. The only `measureText` in the file is the pre-existing #33
+    keyboard-face label path (line 391), unrelated to falling notes. Paint loop adds one `strokeText` per
+    already-fitted label.
+  - **No neighbor regressions.** #36 cap, #27 contact glow (`isActive && !muted && bottom>=...`), #54
+    ghosting (alpha threaded into the label record + globalAlpha reset discipline), #42/#43 gate
+    (`labelMode!=="off" && labelableNote[i]!==false`) all intact. Minor non-blocking note: a MUTED active
+    bar draws body with `activeFill` but computes glyph ink with `active:false` (resting). Cosmetic only;
+    the bar is at alpha 0.3 and `activeL>whiteL` means polarity never flips the wrong way on a faded
+    element. Build green, 199 tests pass, diff em/en-dash clean. Live in-browser pass deferred to the
+    post-merge QA gate (preview server still bound to a different worktree).
+
 - **2026-05-30 - Unified note-name labeling SHIPPED (#42 + #43): two pure helpers in `piano.ts`,
   one shared look-ahead, both label systems derive from one model.** One branch
   (`fix/note-name-labeling`), one PR, because the falling-bar names and the keyboard-key names are

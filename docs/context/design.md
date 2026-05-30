@@ -3,6 +3,115 @@
 UX, visual design, interaction decisions. Append durable learnings at the top of the
 relevant section, dated.
 
+## Falling-note name legibility: contrast-aware glyph + narrow-bar overflow (issue #67)
+
+- **2026-05-30 - Build-ready spec for two reported legibility defects on falling-note names:
+  (1) white text washes out on the bright yellow/green/cyan hues (Mi/Fa/Sol/La), (2) names
+  vanish on narrow bars (a ~10px white key on the 88-key desktop view drops 2-char names via
+  the #39 width rule). Both fixes are in `src/visualizer.ts` (the label-collect loop ~243-261
+  and the single label-paint pass ~270-284) plus new exports in `src/piano.ts`. No new deps,
+  no per-bar `measureText`. Keep the #39 "no detached oversized pill" intent intact.**
+
+  ### Decision 1 - contrast-aware glyph color (replaces the fixed white)
+
+  **Switch from the fixed `rgba(255,255,255,0.82)` glyph to a per-bar two-pole glyph: a DARK
+  glyph on light-luminance bodies, a LIGHT glyph on dark-luminance bodies, chosen from the
+  bar's OWN fill luminance.** White-on-everything fails because body luminance swings hard
+  across the hue wheel: violet/blue bodies (Do 276, Si 246) are dark enough for white text,
+  but the yellow-green/cyan bodies (Fa 66, Sol 126, La 186) at L 62-72% are far too light, so
+  white text drops to ~1.4-2.0:1. A luminance-picked glyph keeps the name above ~4.5:1 on
+  every hue. This is the same dual-luminance robustness move already adopted for the #36 hand
+  cap; apply it to the glyph.
+
+  - **Light glyph (on dark bodies):** `rgba(255, 255, 255, 0.95)` (near-opaque; the body it
+    sits on is dark so it can be brighter than the old 0.82 without halation).
+  - **Dark glyph (on light bodies):** `rgba(10, 7, 18, 0.92)` (the `--bg`-family near-black,
+    matching the #36 dark cap, so the palette stays one ink).
+  - **Picker (cheap, branch-only, no canvas read):** decide from the body fill's perceived
+    luminance. The body fill is an HSL string per pitch class, so precompute its luminance
+    ONCE per {pitch-class, state} in `piano.ts` and store an `isLight` boolean; the hot loop
+    reads only that boolean. Threshold: glyph is DARK when `bodyLuminance >= 0.6` on a 0..1
+    scale. At 0.6 the crossover lands cleanly: Mi/Fa/Sol/La/cyan get the dark glyph,
+    Do/Re/Si/violet/blue keep the light glyph. Pick the luminance of the fill ACTUALLY drawn:
+    `activeFill` for sounding bars, else `whiteFill` for white-key bars, else `blackFill` for
+    black-key bars (black fills are dark, so they keep the light glyph). New `piano.ts` exports:
+    - `GLYPH_LIGHT = "rgba(255,255,255,0.95)"`, `GLYPH_DARK = "rgba(10,7,18,0.92)"`.
+    - `barGlyphIsDark(midi, { active, black }): boolean` returning the precomputed flag.
+      Compute luminance with `lum = 0.299*r + 0.587*g + 0.114*b` on each fill's RGB (convert
+      the hsl strings to RGB once at module load, alongside `PITCH_CLASS_COLORS`); store
+      `isLight` per {pc, state}. The rAF loop pays nothing.
+  - **Drop the soft dark drop-shadow; swap to a thin opposite-luminance HALO (outline).** The
+    current `shadowColor rgba(0,0,0,0.45) blur 2` only helps the light glyph and muddies the
+    dark glyph. Replace it with a 1-pole stroke in the OPPOSITE ink, drawn under the fill: per
+    label `ctx.lineWidth = 2; ctx.lineJoin = "round";
+    ctx.strokeStyle = (glyphDark ? GLYPH_LIGHT : GLYPH_DARK); ctx.strokeText(...)` then
+    `ctx.fillStyle = (glyphDark ? GLYPH_DARK : GLYPH_LIGHT); ctx.fillText(...)`. The glyph
+    carries BOTH poles, so it survives a hue boundary or a half-lit active bar. Keep
+    `shadowBlur = 0` (no blur). The glyph already passes contrast on its body, so the halo is a
+    thin insurance line; 2px (~1px per side) is enough and cheap (one strokeText + fillText per
+    label, only for labels that already passed the fit test).
+  - **Why not keep white + a heavier shadow:** a heavier shadow on a light body just smears
+    grey, it cannot manufacture contrast against yellow-green. Body luminance is the problem, so
+    the glyph ink has to respond to it. Picked-glyph + thin opposite halo is the minimal honest
+    fix and reuses the established two-pole pattern.
+
+  ### Decision 2 - narrow-bar policy: allow centered overflow down to a real floor (option a)
+
+  **Chosen: (a) let a too-narrow bar's name OVERFLOW its width, centered, down to a font floor,
+  rather than omit it. The name stays centered on the bar's x, so it bleeds symmetrically into
+  the (usually empty) neighbor columns; it does NOT grow a pill or detach.** Rationale: on the
+  88-key desktop view a white-key bar is ~10px but its lane neighbors are usually silent, so a
+  centered 2-char name spilling a few px past the bar is readable and unambiguous (still
+  centered on its own falling bar, directly above its key). Omitting (option c) leaves the wall
+  of nameless chips the report describes. Lowering MIN_LABEL_PX globally (option b) would also
+  shrink legitimately-fitting labels into mush and weaken the #39 floor everywhere; rejected.
+
+  - **Keep #39's intent precisely:** #39 banned a name BIGGER than its bar in BOTH axes (the
+    detached oversized pill). Overflow here is WIDTH-ONLY and the font is still bounded by the
+    bar HEIGHT, so the name never grows taller than the bar and never becomes a pill. The height
+    cap is the anti-pill guarantee that stays.
+  - **Exact numbers (new overflow-aware fit; add a sibling fn or a flag so existing #39 callers
+    are untouched):**
+    - Height still binds the font: `size = min(MAX_LABEL_PX 12, floor(barHeight * 0.55))`,
+      unchanged. The font NEVER exceeds the height-derived size, so no vertical overflow.
+    - **New floor:** `MIN_OVERFLOW_PX = 7`. If the height-derived size is `>= 7`, SHOW the label
+      even when it is wider than the bar, capping how far it may overflow so it cannot run wild:
+      `MAX_OVERFLOW_PER_SIDE = barWidth * 0.9` (the name may render up to ~1.9x the bar width,
+      centered). If the name at the height-size still exceeds
+      `barWidth + 2 * MAX_OVERFLOW_PER_SIDE`, shrink the font to fit that width (same
+      `charCount * size * 0.62 + 2*gutter` solve), and OMIT only if that shrink drops below
+      `MIN_OVERFLOW_PX = 7`.
+    - **Net:** legible names appear down to a 7px glyph with up to ~0.9x-per-side centered
+      overflow. A ~10px white-key bar now shows "Do" at ~8-9px spilling a couple px each side
+      instead of nothing. Bars genuinely too short (height-size < 7px, i.e. barHeight < ~13px)
+      still omit, so a flurry of 4px slivers does not smear into overlapping text.
+    - **MIN_LABEL_PX stays 8 for the non-overflow path** (the #39 in-bounds rule is unchanged);
+      `MIN_OVERFLOW_PX = 7` is the slightly lower floor that applies ONLY when width overflow is
+      permitted. Keep `MAX_LABEL_PX = 12`, `LABEL_HEIGHT_RATIO = 0.55`,
+      `LABEL_CHAR_WIDTH_RATIO = 0.62`, `LABEL_GUTTER = 2` as-is.
+  - **Collision note (acceptable for v1):** two adjacent narrow bars sounding at the same instant
+    could have overlapping overflowed names. This is rare (adjacent semitones rarely both fall at
+    the same instant in the same lane band) and the contrast halo keeps each readable on its own
+    body. Do NOT add per-frame collision resolution now; revisit only if playtests show muddle.
+  - **Octave digit on letters mode:** letter names are 2-3 chars ("C#4"), so they overflow sooner
+    than solfege; the 0.9x-per-side cap is sized to still seat a 3-char name on a ~10px bar at
+    ~7px. If 3-char letter names still read tight on the narrowest bars, the follow-up is to drop
+    the octave digit on sub-12px bars (letters become pitch-class only when tiny), but do NOT do
+    that in #67; ship the overflow first and measure.
+
+  ### Build order
+
+  1. `piano.ts`: add `GLYPH_LIGHT`, `GLYPH_DARK`, `MIN_OVERFLOW_PX = 7`, the
+     `MAX_OVERFLOW_PER_SIDE` logic; precompute per-{pc,state} `isLight`; add
+     `barGlyphIsDark(midi, {active, black})`; add the overflow-aware fit (new fn or a flag on
+     `fitBarLabel` so existing #39 callers are untouched). Unit-test the luminance threshold
+     (Fa/Sol/La/cyan -> dark glyph; Do/Si -> light glyph) and the 7px overflow floor.
+  2. `visualizer.ts`: in the collect loop pass `{active: isActive && !muted, black}` so each
+     label record carries `glyphDark`; in the paint pass, per label set stroke (opposite ink,
+     lineWidth 2, lineJoin round) then fill (glyph ink), and drop the old
+     `shadowColor`/`shadowBlur` drop-shadow. Keep `textAlign center` / `textBaseline middle` and
+     the per-label `alpha`.
+
 ## Editable sheet name (issue #44)
 
 - **2026-05-30 - SHIPPED: inline click-to-edit sheet title in the right-trailing toolbar slot.**
