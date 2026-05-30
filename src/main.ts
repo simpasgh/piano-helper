@@ -4,6 +4,7 @@ import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { Visualizer } from "./visualizer";
 import { extractScore, type ScoreData } from "./score";
 import { submitOmr, pollOmrResult } from "./omr";
+import { buildSalamanderSampleMap, SALAMANDER_BASE_URL } from "./sampler";
 import type { LabelMode } from "./piano";
 
 const canvas = document.getElementById("stage") as HTMLCanvasElement;
@@ -12,6 +13,7 @@ const scanInput = document.getElementById("scan-input") as HTMLInputElement;
 const playBtn = document.getElementById("play-btn") as HTMLButtonElement;
 const namesBtn = document.getElementById("names-btn") as HTMLButtonElement;
 const trackName = document.getElementById("track-name") as HTMLSpanElement;
+const soundStatus = document.getElementById("sound-status") as HTMLSpanElement;
 
 const visualizer = new Visualizer(canvas);
 const osmd = new OpenSheetMusicDisplay("sheet", {
@@ -21,6 +23,7 @@ const osmd = new OpenSheetMusicDisplay("sheet", {
 });
 
 let synth: Tone.PolySynth | null = null;
+let sampler: Tone.Sampler | null = null;
 let part: Tone.Part | null = null;
 let score: ScoreData | null = null;
 let stepIndex = 0;
@@ -35,6 +38,40 @@ function ensureSynth(): Tone.PolySynth {
     synth.volume.value = -8;
   }
   return synth;
+}
+
+// The instrument used at trigger time. Returns the sampled piano once its buffers have
+// loaded, otherwise the synth. Resolved per-note (not captured at Part-build time) so
+// playback upgrades to the sampler the moment loading finishes, even mid-session.
+function getInstrument(): Tone.PolySynth | Tone.Sampler {
+  if (sampler && sampler.loaded) return sampler;
+  return ensureSynth();
+}
+
+// Start fetching the Salamander samples in the background at startup. This only downloads
+// buffers; it does not need a running AudioContext and must not block initial render. The
+// synth covers playback until (and if) the sampler finishes loading. On failure we keep
+// the synth permanently and surface a brief, non-fatal note.
+function startSamplerLoad(): void {
+  soundStatus.textContent = "Loading piano sound...";
+  try {
+    sampler = new Tone.Sampler({
+      urls: buildSalamanderSampleMap(),
+      baseUrl: SALAMANDER_BASE_URL,
+      release: 1,
+      onload: () => {
+        soundStatus.textContent = "";
+      },
+      onerror: () => {
+        sampler = null;
+        soundStatus.textContent = "Using basic sound (piano samples unavailable).";
+      },
+    }).toDestination();
+    sampler.volume.value = -6;
+  } catch {
+    sampler = null;
+    soundStatus.textContent = "Using basic sound (piano samples unavailable).";
+  }
 }
 
 async function loadScoreFile(file: File): Promise<void> {
@@ -59,9 +96,10 @@ async function loadScoreXml(xml: string, name: string): Promise<void> {
 
   visualizer.setNotes(score.notes);
 
-  const instrument = ensureSynth();
   part = new Tone.Part((time, note) => {
-    instrument.triggerAttackRelease(
+    // Resolve the instrument per note so playback upgrades to the sampler as soon as it
+    // loads. Timing/scheduling is unchanged: only the sound source differs.
+    getInstrument().triggerAttackRelease(
       Tone.Frequency(note.midi, "midi").toFrequency(),
       note.duration,
       time,
@@ -189,6 +227,9 @@ function initLabelMode(): LabelMode {
 
 let labelMode = initLabelMode();
 applyLabelMode(labelMode);
+
+// Begin loading the sampled piano in the background. Does not block render or play.
+startSamplerLoad();
 
 namesBtn.addEventListener("click", () => {
   labelMode = NAME_CYCLE[labelMode];

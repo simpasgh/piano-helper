@@ -20,6 +20,14 @@ Accounts available:
   `todeo.app` subdomain can be added later.
 - Build command `npm run build`, output dir `dist/`.
 
+## Assets
+
+- **2026-05-30 - Piano audio (issue #13) streams from the Tone.js sample CDN, not our infra.** The
+  sampled piano (Salamander Grand, CC-BY 3.0) loads mp3 buffers at runtime from
+  `https://tonejs.github.io/audio/salamander/` (official, uncapped, free). No mp3s in the repo, no R2
+  bucket, no bandwidth on our Pages project for audio. ~30 small mp3 files, fetched lazily in the
+  background; if the CDN is unreachable the app falls back to the synth.
+
 ## CI/CD
 
 - **2026-05-30 - OMR runner workflow (issue #5) shipped: `.github/workflows/omr.yml`.** Trigger: `repository_dispatch` event_type `omr-job`, fired by the `/api/omr` Pages Function with `client_payload { jobId, ext }`. Steps: validate jobId against a strict UUID regex and ext against an allowlist (png/jpg/jpeg/pdf) BEFORE using either in an S3 key or filename (guards key/path injection from the untrusted payload, which arrives via `env:` vars and is referenced as `"$VAR"`, never interpolated into a script body); install `libgl1`+`libglib2.0-0` (opencv for oemer) and `poppler-utils` (pdftoppm for PDF page 1 -> PNG); `pip install oemer`; pull `uploads/<jobId>` from R2; run `oemer <img> -o out` (model weights download on first run, 25-min step timeout); push `results/<jobId>.musicxml` back. An `if: failure()` step writes `results/<jobId>.error` so the frontend can surface a 422. R2 access uses the aws CLI with `--endpoint-url $R2_S3_ENDPOINT` and the `R2_*` Actions secrets. **R2 + aws CLI v2 checksum gotcha:** recent aws CLI v2 adds request/response integrity checksums R2 rejects, so the job sets `AWS_REQUEST_CHECKSUM_CALCULATION=when_required` and `AWS_RESPONSE_CHECKSUM_VALIDATION=when_required` and passes `--checksum-algorithm CRC32` on each `cp`. Public-repo Actions minutes are unlimited, so heavy ML OMR runs here, not in the Function.
