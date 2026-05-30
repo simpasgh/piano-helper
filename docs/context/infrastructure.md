@@ -22,6 +22,13 @@ Accounts available:
 
 ## CI/CD
 
+- **2026-05-30:** Bumped all JS actions to their Node 24-native majors ahead of GitHub's
+  2026-06-16 force-switch of runner actions from Node 20 to Node 24 (full removal
+  2026-09-16): `actions/checkout` v4 -> v5, `actions/setup-node` v4 -> v5,
+  `cloudflare/wrangler-action` v3 -> v4 (deploy only). Also moved the build's own
+  `node-version` from 20 to 22 since Node 20 hit EOL in April 2026. Note: `wrangler-action`
+  v4 now installs Wrangler CLI v4 by default (our `pages deploy dist` usage is compatible).
+
 - **CI (`.github/workflows/ci.yml`)** runs on every PR/push: typecheck + build + unit tests.
   This is the required status check that gates merges.
 - **Deploy (`.github/workflows/deploy.yml`)** runs on push to `main`: build -> deploy to
