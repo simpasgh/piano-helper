@@ -4,6 +4,44 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-05-30: PR #79 (Bug 2 / issue #44 follow-up: sheet rename now also updates the title
+  drawn on the OSMD-rendered score, not just the toolbar label + tab title) -> **PASS** on
+  `main` (merge commit 73c4284, deployed to https://piano-helper.pages.dev, smoke green).
+  Local 5173 preview was stale (main worktree pinned at 453e37d, pre-#79), so drove LIVE
+  against PROD in real Chromium via Playwright. Injected a 2-staff grand-staff MusicXML with
+  `<work-title>Original Work Title</work-title>` (treble C5-G5 RH / bass C3-G3 LH).
+  - Case 1 (original title): rendered SVG `<text>` reads "Original Work Title" (x=482,
+    centered), toolbar = "Original Work Title", `document.title` = "Original Work Title -
+    Piano Helper". The Piano part-name `<text>` (x=50) is separate and untouched.
+  - Case 2 (rename via `#sheet-name` -> `#sheet-name-input` -> Enter to "Renamed By QA"):
+    ALL THREE update. SVG title `<text>` -> "Renamed By QA" and RECENTERS (x 482 -> 502, no
+    "Original Work Title" remnant anywhere on the sheet); toolbar -> "Renamed By QA"; tab
+    title -> "Renamed By QA - Piano Helper". This is the exact Bug 2 fix.
+  - Case 3 (cursor survives re-render): the green cursor stayed visible after the rename's
+    `osmd.render()` and tracked on seek. Cursor `img.style.left` @0.0/@0.5/@0.9 after rename
+    = 178.044/362.111/468.286px (monotonic), and @0.5 matched the pre-rename 362.111px exactly,
+    so `resyncCursor(scoreTime)` restored the playhead to the right step.
+  - Case 4 (rename WHILE playing): prod's audio clock DID run (time-readout 0:00 -> 0:01
+    across the rename; cursor 220.311px -> 262.578px), unlike the known headless-suspended
+    local env. Renamed mid-play to "Renamed While Playing": SVG title updated, playback kept
+    advancing, cursor kept tracking, no stall. So the re-render + resync survives a live
+    transport.
+  - Case 5 (rename to the SAME text): no-op, no flicker, SVG `<text>` identical before/after
+    (x=444 both), ZERO new console errors. Matches `updateSheetTitle`'s
+    `sheet.TitleString === name` early return (main.ts:392-401).
+  - Console: 0 errors, 0 pageerrors across load + rename + play + seek + no-op.
+  - Mechanism (main.ts:392-401 `updateSheetTitle`): writes `osmd.Sheet.TitleString = name`,
+    `osmd.render()`, then `resyncCursor(scoreTime)` + `renderSheetLabels(...)` since the
+    re-render resets both the cursor and the label overlay. No-op for audio scores (`!hasSheet`)
+    and when title already matches. Regression checklist clean: hand mutes + Balance present,
+    solfege labels render, falling notes meet the keyboard, contact glow + hand caps render.
+  - Driver + fixture (transient): qa-pr79-drive.mjs in worktree root (where node resolves the
+    local `playwright`, freshly `npm i -D`'d here); grand.musicxml + screenshots at /tmp/qa-pr79/.
+  - GOTCHA confirmed: the local dev preview (port 5173) is owned by the main checkout worktree
+    and can lag merged `main` by several commits. Before trusting a local-preview QA run, check
+    its served commit; when stale, drive PROD (whose bundle you can grep for the fix, e.g.
+    `TitleString` appeared 7x in /assets/index-*.js here) instead.
+
 - 2026-05-30: PR #78 (Bug 1: in-flight falling notes glow halo removed; only the keybed
   contact note glows) -> **PASS** on `main` (merge commit 2533c9c, deployed to
   https://piano-helper.pages.dev, smoke green). Drove live against the merged code (grand-staff
