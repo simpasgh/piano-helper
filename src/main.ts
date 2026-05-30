@@ -3,10 +3,12 @@ import * as Tone from "tone";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { Visualizer } from "./visualizer";
 import { extractScore, type ScoreData } from "./score";
+import type { LabelMode } from "./piano";
 
 const canvas = document.getElementById("stage") as HTMLCanvasElement;
 const fileInput = document.getElementById("file-input") as HTMLInputElement;
 const playBtn = document.getElementById("play-btn") as HTMLButtonElement;
+const namesBtn = document.getElementById("names-btn") as HTMLButtonElement;
 const trackName = document.getElementById("track-name") as HTMLSpanElement;
 
 const visualizer = new Visualizer(canvas);
@@ -113,6 +115,46 @@ fileInput.addEventListener("change", () => {
 });
 
 playBtn.addEventListener("click", () => togglePlay());
+
+const NAME_LABELS: Record<LabelMode, string> = {
+  solfege: "Names: Solfege",
+  letters: "Names: Letters",
+  off: "Names: Off",
+};
+const NAME_CYCLE: Record<LabelMode, LabelMode> = {
+  solfege: "letters",
+  letters: "off",
+  off: "solfege",
+};
+
+function applyLabelMode(mode: LabelMode): void {
+  visualizer.setLabelMode(mode);
+  namesBtn.textContent = NAME_LABELS[mode];
+}
+
+// localStorage can throw (Safari Private Browsing, sandboxed iframes, blocked
+// site data); never let a persistence failure abort app startup.
+function initLabelMode(): LabelMode {
+  try {
+    const stored = localStorage.getItem("pianoHelper.noteNames");
+    return stored === "letters" || stored === "off" ? stored : "solfege";
+  } catch {
+    return "solfege";
+  }
+}
+
+let labelMode = initLabelMode();
+applyLabelMode(labelMode);
+
+namesBtn.addEventListener("click", () => {
+  labelMode = NAME_CYCLE[labelMode];
+  try {
+    localStorage.setItem("pianoHelper.noteNames", labelMode);
+  } catch {
+    // Persistence is best-effort; the toggle still works for this session.
+  }
+  applyLabelMode(labelMode);
+});
 
 function frame(): void {
   const currentTime = Tone.getTransport().seconds;

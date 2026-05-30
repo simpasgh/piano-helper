@@ -1,4 +1,11 @@
-import { buildKeyLayout, isBlackKey, type KeyGeometry } from "./piano";
+import {
+  buildKeyLayout,
+  isBlackKey,
+  midiToLabel,
+  midiToBarLabel,
+  type KeyGeometry,
+  type LabelMode,
+} from "./piano";
 
 export interface VisNote {
   midi: number;
@@ -17,6 +24,7 @@ export class Visualizer {
   private width = 0;
   private height = 0;
   private dpr = 1;
+  private labelMode: LabelMode = "solfege";
 
   constructor(private canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext("2d");
@@ -28,6 +36,10 @@ export class Visualizer {
 
   setNotes(notes: VisNote[]): void {
     this.notes = notes;
+  }
+
+  setLabelMode(mode: LabelMode): void {
+    this.labelMode = mode;
   }
 
   resize(): void {
@@ -62,12 +74,21 @@ export class Visualizer {
     const pps = (height - KEYBOARD_HEIGHT) / LOOK_AHEAD; // pixels per second
     const active = this.activeMidis(currentTime);
 
-    this.drawFallingNotes(currentTime, keyboardTop, pps);
+    this.drawFallingNotes(currentTime, keyboardTop, pps, active);
     this.drawKeyboard(keyboardTop, active);
   }
 
-  private drawFallingNotes(currentTime: number, keyboardTop: number, pps: number): void {
+  private drawFallingNotes(
+    currentTime: number,
+    keyboardTop: number,
+    pps: number,
+    active: Set<number>,
+  ): void {
     const { ctx } = this;
+    // Geometry of bars worth labeling, collected during the fill pass and drawn
+    // after, so the bar glow (shadowBlur 18) never bleeds into the glyphs.
+    const labels: { x: number; bottom: number; text: string }[] = [];
+
     for (const note of this.notes) {
       const delta = note.time - currentTime;
       if (delta > LOOK_AHEAD || delta + note.duration < 0) continue; // off-screen
@@ -88,8 +109,34 @@ export class Visualizer {
       ctx.shadowBlur = 18;
       this.roundRect(x, top, w, barHeight, 4);
       ctx.fill();
+
+      if (this.labelMode !== "off") {
+        // Active key's bar is always labeled even if narrow; the player needs it now.
+        const fits = w >= 16 && barHeight >= 18;
+        if (fits || active.has(note.midi)) {
+          labels.push({
+            x: x + w / 2,
+            bottom: bottom - 6,
+            text: midiToBarLabel(note.midi, this.labelMode),
+          });
+        }
+      }
     }
+
+    // Reset glow before text, draw text, then reset again so nothing else inherits it.
     ctx.shadowBlur = 0;
+    if (labels.length > 0) {
+      ctx.font = "700 12px system-ui";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "alphabetic";
+      ctx.fillStyle = "#ffffff";
+      ctx.shadowColor = "rgba(0,0,0,0.45)";
+      ctx.shadowBlur = 2;
+      for (const l of labels) {
+        ctx.fillText(l.text, l.x, l.bottom);
+      }
+      ctx.shadowBlur = 0;
+    }
   }
 
   private drawKeyboard(top: number, active: Set<number>): void {
@@ -118,6 +165,38 @@ export class Visualizer {
       if (!key.black) continue;
       ctx.fillStyle = active.has(key.midi) ? "#d89bff" : "#100b1a";
       ctx.fillRect(key.x, top, key.width, KEYBOARD_HEIGHT * 0.62);
+    }
+
+    this.drawKeyLabels(top, active);
+  }
+
+  // White-key pitch-class labels (no octave). Never shrinks below 11px, and
+  // skips all-or-nothing: if the widest label for this mode plus a small gutter
+  // won't fit a white key, draw no key-face labels this pass (uniform > ragged).
+  private drawKeyLabels(top: number, active: Set<number>): void {
+    if (this.labelMode === "off") return;
+    const { ctx } = this;
+    const whiteWidth = this.keys.find((k) => !k.black)?.width ?? 0;
+    if (whiteWidth <= 0) return;
+
+    ctx.font = "600 11px system-ui";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    ctx.shadowBlur = 0;
+
+    const GUTTER = 4; // px of breathing room each side so glyphs do not touch key edges
+    let widest = 0;
+    for (const key of this.keys) {
+      if (key.black) continue;
+      widest = Math.max(widest, ctx.measureText(midiToLabel(key.midi, this.labelMode)).width);
+    }
+    if (widest + GUTTER > whiteWidth) return; // too narrow at 11px, skip the whole row
+
+    const baseline = top + KEYBOARD_HEIGHT - 10;
+    for (const key of this.keys) {
+      if (key.black) continue;
+      ctx.fillStyle = active.has(key.midi) ? "#1a0f2b" : "#5b4a72";
+      ctx.fillText(midiToLabel(key.midi, this.labelMode), key.x + key.width / 2, baseline);
     }
   }
 
