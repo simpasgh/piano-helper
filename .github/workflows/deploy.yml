@@ -1,0 +1,52 @@
+name: Deploy
+
+# Builds main and deploys to Cloudflare Pages, then smoke-tests the live site.
+# Gated on the DEPLOY_ENABLED repo variable so main stays green BEFORE the
+# Cloudflare project + secrets exist. Set it to "true" once setup is done
+# (see docs/context/infrastructure.md).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  deployments: write
+
+jobs:
+  deploy:
+    name: Build, deploy, smoke-test
+    if: vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Deploy to Cloudflare Pages
+        id: deploy
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dist --project-name=${{ vars.CF_PAGES_PROJECT || 'piano-helper' }} --branch=main
+
+      - name: Smoke-test production
+        env:
+          # Prefer the stable prod URL if configured; fall back to the
+          # per-deploy URL Cloudflare returns.
+          PROD_URL: ${{ vars.PROD_URL || steps.deploy.outputs.deployment-url }}
+        run: bash .claude/hooks/smoke-test.sh
