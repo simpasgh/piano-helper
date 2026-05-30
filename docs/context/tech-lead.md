@@ -30,6 +30,42 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-30 - Audio-derived scores now split into hands by PITCH so the per-hand controls are reachable (#70 follow-up, PR #80).**
+  Symptom: the per-hand mute toggles and the Balance slider never appeared for audio imports. Root
+  cause: `transcribeAudioFile` -> `noteEventsToVisNotes` left every note `hand="unknown"`, so
+  `hasBothHands(notes)` was always false and `main.ts` kept `#hand-mutes` hidden. Fix: `handFromPitch(midi)`
+  in `piano.ts` (`HAND_SPLIT_MIDI = 60`; >= middle C = right, below = left) applied in the pure
+  `noteEventsToVisNotes` converter, so it is unit-tested and the Web Audio glue stays untouched. It is a
+  heuristic, not ground truth (a left hand can climb above middle C), but it exposes the controls for the
+  common melody-over-bass clip; a single-register clip lands on one hand so `hasBothHands` stays false and
+  the controls correctly stay hidden. Side effect (intended): the #36 hand-color caps and #54 mute-ghosting
+  now also activate for audio scores, keeping the controls and their on-screen feedback coherent. MusicXML
+  clef-based tagging in `score.ts` is unchanged. Follow-up idea if hand accuracy ever matters: a per-onset
+  split (gap in a chord's pitch spread, or hysteresis around 60) instead of a fixed boundary.
+
+- **2026-05-30 - Sheet rename now updates the OSMD-rendered title, not just the toolbar/tab (#44 follow-up, PR #79).**
+  `commitNameEdit` calls `updateSheetTitle(name)`: writes `osmd.Sheet.TitleString = name` (OSMD's setter
+  rebuilds the title Label), then `osmd.render()`, then restores the cursor to the current playhead via the
+  existing `resyncCursor(scoreTime)` and redraws the note-name overlay (`renderSheetLabels`) the re-render
+  clears. No-op when `!hasSheet` (audio scores) or when the title already matches (avoids a needless
+  re-render). The sync invariant holds: `scoreTime = transport.seconds * tempoRate` is captured before the
+  render and fed back through the same helper `seekScoreTime` uses, so the cursor and falling notes still
+  read one clock.
+
+- **2026-05-30 - Falling-bar glow is now ONLY the keybed-contact note, not every in-flight bar (#27/#38, PR #78).**
+  Set the body fill's `shadowBlur` to 0 so a falling bar is a clean colored bar; the sole remaining glow is
+  the #27 contact stroke that fires only for the bar touching the keyboard (`isActive && !muted &&
+  bottom >= keyboardTop - 10`, shadowBlur 22). In-flight notes stay calm and the highlight reads as the
+  single contact moment.
+
+- **2026-05-30 - Feature-loss audit after the #76-#80 merge churn: NO regressions.** Cross-checked all
+  closed feature issues (#14 tempo, #36/#47 hand color, #37/#49/#54/#60/#65 mutes, #42/#43 labeling,
+  #44 rename, #70 balance, #76 visibility) against `origin/main` code AND the deployed bundle
+  (https://piano-helper.pages.dev): every feature's code is present, wired, and shipped in the JS. The
+  deployed `index.html` id-set is identical to `origin/main`. Static button/aria text lives in `index.html`
+  (markup, a Vite vanilla app), so those strings count 0 in the JS bundle but appear in the served HTML;
+  that is expected, not a regression.
+
 - **2026-05-30 - Hand tagging now keys off the CLEF, not the staff array index (fixes "muting right hand still plays it").**
   Root cause: `extractScore` tagged hands with `handFromStaffIndex(staves.indexOf(staff), len)`,
   assuming staff index 0 = treble = right. But a MusicXML file can declare its staves bass-first
