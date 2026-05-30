@@ -80,6 +80,107 @@ button:disabled {
   font-size: 0.8rem;
 }
 
+.tempo {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.tempo-label {
+  font-size: 0.8rem;
+  opacity: 0.55;
+}
+
+#tempo-slider {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 120px;
+  max-width: 120px;
+  height: 4px;
+  padding: 6px 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+/* The track is painted via the runnable-track pseudo-elements so the 4px line sits
+   centered inside the larger (>=24px) hit target created by the vertical padding. */
+#tempo-slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #7a2fd6, var(--accent));
+}
+
+#tempo-slider::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #7a2fd6, var(--accent));
+}
+
+#tempo-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -6px;
+  border-radius: 50%;
+  background: #f2ecf8;
+  border: 2px solid var(--accent);
+  box-shadow: 0 0 6px var(--accent-glow);
+  cursor: pointer;
+}
+
+#tempo-slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #f2ecf8;
+  border: 2px solid var(--accent);
+  box-shadow: 0 0 6px var(--accent-glow);
+  cursor: pointer;
+}
+
+#tempo-slider:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.tempo-readout {
+  background: none;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text);
+  opacity: 0.85;
+  min-width: 3.2ch;
+  text-align: right;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.tempo-readout:hover:not(:disabled) {
+  filter: none;
+  opacity: 1;
+}
+
+.tempo-readout:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+@media (max-width: 720px) {
+  .tempo > .tempo-label {
+    display: none;
+  }
+
+  #tempo-slider {
+    width: 88px;
+    max-width: 88px;
+    min-width: 72px;
+  }
+}
+
 .track-name {
   font-size: 0.85rem;
   opacity: 0.65;

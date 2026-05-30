@@ -5,6 +5,12 @@ import { Visualizer } from "./visualizer";
 import { extractScore, type ScoreData } from "./score";
 import { submitOmr, pollOmrResult } from "./omr";
 import { buildSalamanderSampleMap, SALAMANDER_BASE_URL } from "./sampler";
+import {
+  tempoPercentToRate,
+  rateToBpm,
+  clampTempoPercent,
+  TEMPO_DEFAULT_PERCENT,
+} from "./tempo";
 import type { LabelMode } from "./piano";
 
 const canvas = document.getElementById("stage") as HTMLCanvasElement;
@@ -12,6 +18,8 @@ const fileInput = document.getElementById("file-input") as HTMLInputElement;
 const scanInput = document.getElementById("scan-input") as HTMLInputElement;
 const playBtn = document.getElementById("play-btn") as HTMLButtonElement;
 const namesBtn = document.getElementById("names-btn") as HTMLButtonElement;
+const tempoSlider = document.getElementById("tempo-slider") as HTMLInputElement;
+const tempoReadout = document.getElementById("tempo-readout") as HTMLButtonElement;
 const trackName = document.getElementById("track-name") as HTMLSpanElement;
 const soundStatus = document.getElementById("sound-status") as HTMLSpanElement;
 
@@ -28,6 +36,18 @@ let part: Tone.Part | null = null;
 let score: ScoreData | null = null;
 let stepIndex = 0;
 let playing = false;
+
+// Tempo (issue #14). The Part schedules notes at score seconds, which Tone converts to
+// transport ticks using the bpm at build time. We capture the default bpm once as the
+// score-speed baseline and never let it change while a Part is built, so note tick
+// positions are always rate-independent. Audio speed is driven by setting the live
+// transport bpm to BASE_BPM * tempoRate; the visual consumers (falling notes + cursor)
+// read a derived "score time" = transport.seconds * tempoRate, which equals
+// ticks * 60 / (PPQ * BASE_BPM) regardless of the current bpm. So audio, falling notes,
+// and the cursor all scale in lockstep and a live tempo change never makes score time
+// jump (transport.seconds is continuous; multiplying by the new rate is continuous too).
+const BASE_BPM = Tone.getTransport().bpm.value;
+let tempoRate = 1.0;
 
 function ensureSynth(): Tone.PolySynth {
   if (!synth) {
@@ -94,6 +114,11 @@ async function loadScoreXml(xml: string, name: string): Promise<void> {
   transport.position = 0;
   part?.dispose();
 
+  // Build the Part at the baseline bpm so its notes' score seconds map to
+  // rate-independent ticks; reapply the current tempo rate immediately after. This keeps
+  // sync correct even when the tempo was changed before a score was loaded.
+  transport.bpm.value = BASE_BPM;
+
   visualizer.setNotes(score.notes);
 
   part = new Tone.Part((time, note) => {
@@ -106,6 +131,9 @@ async function loadScoreXml(xml: string, name: string): Promise<void> {
     );
   }, score.notes.map((n) => ({ time: n.time, midi: n.midi, duration: n.duration })));
   part.start(0);
+
+  // Apply the current tempo now that the Part is built at BASE_BPM.
+  transport.bpm.value = rateToBpm(tempoRate, BASE_BPM);
 
   stepIndex = 0;
   trackName.textContent = `${name} (${score.notes.length} notes)`;
@@ -198,6 +226,28 @@ scanInput.addEventListener("change", () => {
 
 playBtn.addEventListener("click", () => togglePlay());
 
+// Apply a tempo percent: clamp it, update the rate, the live transport bpm, the slider,
+// and the readout. Works before playback (bpm is set for the next start) and live during
+// playback (Tone scales the already-scheduled seconds-based events with no Part rebuild).
+function applyTempo(percent: number): void {
+  const clamped = clampTempoPercent(percent);
+  tempoRate = tempoPercentToRate(clamped);
+  Tone.getTransport().bpm.value = rateToBpm(tempoRate, BASE_BPM);
+  tempoSlider.value = String(clamped);
+  tempoReadout.textContent = `${clamped}%`;
+}
+
+tempoSlider.addEventListener("input", () => {
+  applyTempo(Number(tempoSlider.value));
+});
+
+// Click (or keyboard-activate) the readout to snap back to score speed.
+tempoReadout.addEventListener("click", () => {
+  applyTempo(TEMPO_DEFAULT_PERCENT);
+});
+
+applyTempo(Number(tempoSlider.value));
+
 const NAME_LABELS: Record<LabelMode, string> = {
   solfege: "Names: Solfege",
   letters: "Names: Letters",
@@ -242,13 +292,16 @@ namesBtn.addEventListener("click", () => {
 });
 
 function frame(): void {
-  const currentTime = Tone.getTransport().seconds;
-  if (playing && score && currentTime >= score.duration) {
+  // Derive a bpm-independent score time from the transport so the falling notes and the
+  // cursor stay in sync with the audio at any tempo (see tempo notes above). The audio
+  // itself is sped up via the transport bpm, not this value.
+  const scoreTime = Tone.getTransport().seconds * tempoRate;
+  if (playing && score && scoreTime >= score.duration) {
     rewind();
   } else if (playing) {
-    syncCursor(currentTime);
+    syncCursor(scoreTime);
   }
-  visualizer.render(Tone.getTransport().seconds);
+  visualizer.render(scoreTime);
   requestAnimationFrame(frame);
 }
 
