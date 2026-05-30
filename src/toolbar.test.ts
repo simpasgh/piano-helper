@@ -38,6 +38,17 @@ describe("toolbar markup invariants (issue #46)", () => {
     expect(html).toContain(`id="${id}"`);
   });
 
+  it("hides the hand-controls group via [hidden] instead of an unconditional display (issue #76)", () => {
+    // main.ts toggles #hand-mutes (the mute toggles + the #70 balance slider) with the
+    // `hidden` attribute when a score has no left/right split. A bare `.hand-mutes { display:
+    // flex }` overrides the native `[hidden]` -> `display: none`, leaving the whole group on
+    // screen for single-staff/audio scores. The `:not([hidden])` guard is what makes hiding
+    // actually work; this asserts it stays.
+    expect(css).toContain(".hand-mutes:not([hidden])");
+    // And no bare `.hand-mutes {` rule (with a space) reintroduces the unconditional display.
+    expect(css).not.toMatch(/\.hand-mutes\s*\{/);
+  });
+
   it("keeps the prev/next step buttons labelled for assistive tech", () => {
     expect(html).toContain('aria-label="Previous note"');
     expect(html).toContain('aria-label="Next note"');

@@ -4,6 +4,30 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-05-30: PR #75 (#70 per-hand volume Balance slider) -> **FAIL** on `main`
+  (commit 95bfcb5), bug filed as #76. Drove it live in real Chromium via Playwright against
+  the local preview synced to merged `main`. Injected a 2-staff grand MusicXML (treble C6-G6
+  RH / bass C2-G2 LH) and a single-staff treble-only MusicXML.
+  - PASS: control appears for the two-hands score, readout starts "L100 R100"; slider tracks
+    +60 -> "L40 R100" and -60 -> "L100 R40"; clicking the readout resets to even.
+  - PASS (audible proof): captured the actual WebAudio gain per note (hooked
+    `AudioBufferSourceNode.start` + the connected `GainNode` gain target, since the bundled
+    Tone is a separate module instance and prototype-patching `triggerAttackRelease` via a
+    second `import` catches nothing). At +60 the per-note gains are exactly {0.40, 1.00}; at
+    -60 the mirror. Mute isolation proved the mapping: with +60, muting RIGHT leaves only
+    left-hand notes at gain 0.40, muting LEFT leaves only right-hand notes at 1.00. So mute
+    layers correctly on top of a non-center balance, and the favored hand stays at full while
+    the other is attenuated. Reload resets balance to even and clears mutes. Console clean.
+  - FAIL (requirement: control hidden for single-staff/audio scores): the whole `#hand-mutes`
+    group (both mute toggles AND the new Balance control) stays VISIBLE on a single-staff
+    score. `handMutes.hidden = true` is set, but `.hand-mutes { display: flex }` in style.css
+    (since #49) overrides the native `[hidden]` -> `display:none`, so computed display stays
+    `flex` (rect 458x30, on screen). Pre-existing bug exposed again by #70. See #76 for fix
+    (`.hand-mutes:not([hidden])` guard) + a computed-`display` regression check.
+  - Driver + fixtures (transient): /tmp/qa-pr75/drive.mjs, qa-steps34-pr75.mjs,
+    qa-vis-pr75.mjs (in the worktree root, where node resolves the local `playwright`);
+    grand/single MusicXML at /tmp/qa-pr75/. Screenshots at /tmp/qa-pr75/*.png.
+
 - 2026-05-30: PR #73 (fix: tag hands by clef so muting the right hand works on bass-first
   scores) -> **PASS** on prod (https://piano-helper.pages.dev, main @ be2ccaf). Drove live in
   real Chromium (Playwright). Reproduced the reported bug class with a hand-built bass-first
@@ -28,7 +52,6 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
     Also the canvas id is `#stage` (not note-canvas). Pixel-sampling the minified canvas for cap
     luminance was unreliable (averaged into the bg gradient); the SCREENSHOT is the authoritative
     read for hand-cap color and ghosting. Driver + bass-first fixture: /tmp/qa-pr73/ (transient).
-
 
 - 2026-05-30: PR #62 (#42 falling-note dedup + #43 approaching-key labels) -> **PASS** on
   prod (https://piano-helper.pages.dev, commit 3b8c6a6). Drove it live in real Chromium via
@@ -70,8 +93,14 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Standing smoke checklist (run the relevant rows for each change)
 
-- Load a grand-staff score: the per-hand mute toggles (`#hand-mutes`) appear; a single-staff
-  or audio score keeps them hidden.
+- Load a grand-staff score: the per-hand mute toggles AND the Balance slider (both inside
+  `#hand-mutes`) appear; a single-staff or audio score keeps them hidden. VERIFY BY COMPUTED
+  DISPLAY, not just `el.hidden` (see gotcha below + #76): the `hidden` attr can be set while
+  CSS keeps `display:flex`, leaving the control on screen.
+- Per-hand Balance (#70): on a two-hands score the readout starts "L100 R100"; sliding to
+  +N reads "L(100-N) R100" and -N reads "L100 R(100-N)"; the favored hand plays full and the
+  other is attenuated to that percent; mute layers on top (a muted hand is silent regardless
+  of balance); clicking the readout and any reload reset to even.
 - Note names: scale to the bar and stay inside it; truly tiny bars omit the name rather than
   showing an oversized pill (#39).
 - Falling notes meet the keyboard with no element wider than the note at the entry (#38).
@@ -80,6 +109,25 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Known gotchas
 
+- 2026-05-30: An element with an explicit `display` in CSS (e.g. `.hand-mutes { display:flex }`)
+  is NOT hidden by setting `el.hidden = true`: the `[hidden]` UA rule (`display:none`) loses
+  to the more-specific class rule, so the element stays on screen even though `el.hidden`
+  reads `true`. Always confirm "hidden" by computed `display` / `getBoundingClientRect()`,
+  not the attribute. This masked #76 (Balance + mute controls visible on single-staff scores)
+  through several "the attr is set, looks fine" checks.
+- 2026-05-30: To verify the AUDIBLE effect of a velocity/balance change headlessly, do NOT
+  try to patch `Tone.<Synth>.prototype.triggerAttackRelease` via a second `import("tone")`:
+  the app's bundled Tone is a different module instance, so the patch catches zero calls (and
+  Tone prints its banner twice, a tell). Instead hook the single page-level WebAudio graph:
+  wrap `AudioBufferSourceNode.prototype.start` and read the gain target on the `GainNode` it
+  connected through (capture `connect` to map source->gain, and wrap `AudioParam`
+  set/ramp methods to stamp the last gain). The sampler maps per-note velocity to that gain.
+  Launch Chromium with `--autoplay-policy=no-user-gesture-required` and start playback with a
+  real `.click("#play-btn")` so the transport actually advances (time-readout/seek move).
+- 2026-05-30: The bundled /demo and small hand-rolled fixtures are SHORT (a 2-measure score is
+  ~4s at 120bpm). A live-playback assertion that runs several seconds after pressing Play can
+  capture zero notes because the score already ended/rewound. Seek the `#seek-slider` back to
+  0 (input+change) right before each timed capture, or use a longer fixture.
 - 2026-05-30: A toggle's `aria-pressed` style can read as unchanged if you sample
   `getComputedStyle` in the same tick as the click (mid CSS transition). Set the attribute
   and re-read, or wait a frame, before concluding the pressed state does not apply.

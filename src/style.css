@@ -419,9 +419,13 @@ button:focus-visible,
   font-size: 0.8rem;
 }
 
-/* Per-hand mute toggles (issue #37). Shown only when the score has both hands; reuse the
-   ghost-pill `.toggle` base. Pressed (aria-pressed="true") = that hand's audio is muted. */
-.hand-mutes {
+/* Per-hand mute toggles (issue #37) + balance slider (issue #70). Shown only when the score
+   has both hands; reuse the ghost-pill `.toggle` base. Pressed (aria-pressed="true") = that
+   hand's audio is muted. The `:not([hidden])` guard is load-bearing: main.ts toggles the
+   group via the `hidden` attribute, and a bare `display: flex` would override the native
+   `[hidden]` -> `display: none`, leaving the whole group on screen for single-staff/audio
+   scores (issue #76). */
+.hand-mutes:not([hidden]) {
   display: flex;
   align-items: center;
   gap: 0.5rem;
