@@ -3,6 +3,114 @@
 UX, visual design, interaction decisions. Append durable learnings at the top of the
 relevant section, dated.
 
+## Sharp / flat (accidental) visualization review (issue #40)
+
+- **2026-05-30 - Review/spike: how accidentals are labeled and positioned today, plus a
+  Designer + PM assessment.** This is a documented assessment, not a code change. The UI was
+  NOT verifiable live from this agent worktree (single preview server is bound elsewhere, see
+  qa.md); findings come from reading the rendering/labeling code.
+
+  ### Current behavior (cited)
+
+  - **Everything reduces to a MIDI number very early, discarding notation spelling.**
+    `extractScore` in `src/score.ts:28` sets `midi = note.halfTone + 12`. OSMD's actual spelling
+    (the MusicXML `<step>` + `<alter>`, e.g. "Db" vs "C#") is thrown away at this line; only the
+    integer pitch survives into `VisNote`. Same collapse on the sheet overlay path:
+    `src/sheet-overlay.ts:53` pushes `midi: source.halfTone + 12`.
+  - **Labels are a fixed, ALWAYS-SHARP lookup by pitch class.** `src/piano.ts:92-95` defines
+    `LETTER_CLASSES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]` and
+    `SOLFEGE_CLASSES = ["Do","Do#","Re","Re#","Mi","Fa","Fa#","Sol","Sol#","La","La#","Si"]`.
+    `midiToLabel` / `midiToBarLabel` (`src/piano.ts:99-115`) index those by
+    `pc = ((midi % 12) + 12) % 12`. There is NO flat spelling anywhere in the codebase (a grep
+    for `flat`/`♭`/`.alter` finds none in `src/`). So a Db, Eb, Gb, Ab, Bb always render as
+    "C#"/"Do#", "D#"/"Re#", "F#"/"Fa#", "G#"/"Sol#", "A#"/"La#".
+  - **Falling-note bar label:** `src/visualizer.ts:247` calls `midiToBarLabel(note.midi, mode)`.
+    Letters mode appends the octave ("C#4"); solfege mode is octave-free ("Do#"). The name is
+    fitted to the bar by `fitBarLabel` (#39) and centered inside it. A "#" is one extra glyph, so
+    on narrow black-key bars the 2-3 char accidental name is more likely to shrink or be omitted
+    than a 1-char white-note name (#39 width cap), but it does fit or omit, never spill.
+  - **Black keys carry NO key-face label.** `drawKeyLabels` (`src/visualizer.ts:341,348`) does
+    `if (key.black) continue;` for the width measurement and the draw, so the 36 black keys (every
+    accidental) never get a name printed on the keybed. Only the 52 white keys are labeled on the
+    keyboard. (Black faces are too narrow for a legible glyph; this is the #11 decision.)
+  - **Position / lane reads correctly as "an accidental".** Black keys are laid out at
+    `buildKeyLayout` (`src/piano.ts:48-51`) straddling the gap between their neighboring white
+    keys, narrower (`blackWidth = whiteWidth * 0.62`). A falling accidental bar fills the full
+    black-key width (`noteBarWidth`, `black=true` -> ratio 1.0, `src/piano.ts:25-27`), so it lands
+    on the visibly-black, narrower, offset lane. Color also tracks pitch class (#12 hue wheel), so
+    C# (magenta 306deg) is visibly distinct from C (violet 276deg). So the POSITION + width + hue
+    all read "this is a black-key / accidental note" even with no flat option. That part is good.
+  - **Enharmonic handling: NONE.** Because spelling is dropped at the `halfTone -> midi` step, the
+    same pitch is ALWAYS shown as the sharp spelling regardless of key signature or musical
+    context. A piece in Db major (5 flats) whose score literally prints "Db", "Eb", "Gb", "Ab",
+    "Bb" will show "C#"/"D#"/"F#"/"G#"/"A#" on the falling bars AND on the sheet overlay, directly
+    contradicting the printed sheet sitting next to them. Consistent across both naming modes and
+    both views (falling + overlay), since all four read the same fixed array.
+  - **Consistency across modes / Names toggle: fully consistent (it is one code path).** Solfege,
+    letters, and off all flow through `midiToLabel`/`midiToBarLabel`; the falling bars, the sheet
+    overlay (`src/sheet-labels.ts:104,128`), and the key faces all read the same array. So there is
+    no inconsistency BETWEEN surfaces, but every surface is uniformly always-sharp.
+
+  ### Designer assessment
+
+  - **Verdict: the always-sharp labeling is a real learning-UX problem; the position/color cues
+    are good and should stay.** Two distinct issues, ranked:
+  - **(High) Spelling contradicts the sheet.** The headline product promise is "watch your sheet
+    music play" with the OSMD sheet synced to the falling notes. When the sheet prints "Bb" (its
+    `<alter>` is -1) but the falling bar and the overlay label both say "A#", the two synced views
+    disagree about the name of the same note. For a learner this is actively confusing: the whole
+    point of the synced view is that the falling note IS that sheet note. This is the single
+    highest-value fix and is fully determined by data we currently discard (OSMD already knows the
+    correct spelling). Fix = thread the spelling (step + alter, or OSMD's AccidentalEnum) from
+    `extractScore`/`sheet-overlay` into the label instead of recomputing from MIDI. This restores
+    flats for free for sheet-derived scores; audio-transcribed scores (no notation) legitimately
+    fall back to the current pitch-class default.
+  - **(Medium) No name on black keys at the keyboard.** A beginner who reads the falling "Do#" but
+    cannot find which black key it is gets no help from the keybed, which only labels whites. A
+    small accidental cue on the lit black key (the pressed-key state already hues it, #12) would
+    close the loop "the name fell, here is the physical key". This is more of an enhancement than a
+    bug; lower priority than the spelling contradiction.
+  - **(Low) Default-spelling choice when there is NO context (audio / single notes).** When we have
+    no key signature (audio-transcribed scores, or any note with no notation), some default is
+    unavoidable. Always-sharp is a defensible default (it matches piano fingering charts and the
+    existing solfege "always-sharp, Si not Ti" decision in #11), so keep always-sharp as the
+    FALLBACK, not the universal rule. Do NOT invent a fancier context-free enharmonic guesser; it
+    is not worth the complexity and would still be wrong half the time without a key signature.
+  - **Keep as-is:** the pitch-class hue (#12), the narrower offset black-key lane, the full-width
+    black bar, and the #39 fit/omit behavior. The accidental's POSITION and COLOR already read
+    correctly; only the printed NAME is wrong for flat-key contexts. Do not redesign the lane.
+
+  ### Product Manager assessment (enharmonic-for-learners)
+
+  - **For learners, the correct spelling is the one printed on THEIR sheet, full stop.** A learner
+    is matching the falling note to the staff in front of them. If their score says "Eb" and the app
+    says "D#", they second-guess themselves; the app is teaching a contradiction. So enharmonic
+    correctness is not academic pedantry here, it is core to the "follow your own sheet" value prop.
+  - **But scope it to what we already know.** We only have reliable spelling for SHEET-derived scores
+    (MusicXML carries `<alter>`/key signature; OSMD resolves it). Audio-transcribed scores (#19) have
+    no notation, so there is no "right" enharmonic answer; the always-sharp default is fine there and
+    we should NOT block the spelling fix on solving context-free enharmonics. Ship "respect the
+    sheet's spelling when we have a sheet; default always-sharp otherwise."
+  - **Priority: low-to-medium overall (matches the issue's `priority:low`), but the spelling fix is
+    the high-value slice within it** because it is cheap (data already exists) and removes an active
+    contradiction in the flagship synced view. The black-key-name enhancement is a genuine nice-to-have
+    that can wait.
+
+  ### Follow-up tickets filed (see PR body for numbers)
+
+  1. **Respect the sheet's accidental spelling (flats) instead of always-sharp.** Thread OSMD's note
+     spelling (step + alter / AccidentalEnum) through `extractScore` + the sheet overlay into the
+     label, so a Db-major piece shows "Db/Reb" not "C#/Do#" on both the falling bar and the overlay,
+     matching the synced sheet. Always-sharp stays as the fallback when there is no notation
+     (audio-transcribed scores). HIGH value within this issue. Ships with tests (pure label mapping).
+  2. **Show an accidental's name on the lit black key (keyboard).** Beginners cannot currently find
+     which physical black key a falling "Do#" maps to, because `drawKeyLabels` skips black keys. Add a
+     small cue (label on press, or a compact glyph) so the falling name connects to the physical key.
+     Enhancement, medium-low priority.
+  3. **(Optional) Add flat solfege spellings (e.g. "Reb", "Mib") to the label vocabulary.** Depends on
+     #1; once spelling is threaded through, solfege mode needs flat tokens, not just the current
+     always-sharp `SOLFEGE_CLASSES`. Captured so the solfege side of the flats work is not forgotten.
+
 ## Toolbar redesign v2 (issue #46)
 
 - **2026-05-30 - Research-led fix for the all-violet toolbar + broken step buttons.** The #34
