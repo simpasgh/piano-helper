@@ -20,6 +20,43 @@ const MODEL_URL =
 // Basic Pitch analyzes audio at 22050 Hz mono; we resample before inference.
 const TARGET_SAMPLE_RATE = 22050;
 
+// Input guards (issue #26). An arbitrarily large or long upload decodes into a Float32 mono
+// buffer and then runs TFJS inference, which can hang or OOM the tab. We reject oversized
+// files before decoding and over-long audio before inference, with a clear message. The
+// limits are demo-grade: ~30 MB covers a multi-minute MP3 or a short WAV, and 5 minutes is
+// well past the clean, mostly-monophonic excerpts this feature targets.
+export const MAX_AUDIO_BYTES = 30 * 1024 * 1024;
+export const MAX_AUDIO_SECONDS = 5 * 60;
+
+function megabytes(bytes: number): string {
+  return (bytes / (1024 * 1024)).toFixed(0);
+}
+
+// Returns a user-facing error message when the file is too large to process, else null.
+// Pure (size in, message out) so it is unit-testable without a File or an AudioContext.
+export function validateAudioFileSize(
+  sizeBytes: number,
+  maxBytes = MAX_AUDIO_BYTES,
+): string | null {
+  if (sizeBytes > maxBytes) {
+    return `Audio file is too large (${megabytes(sizeBytes)} MB). The limit is ${megabytes(
+      maxBytes,
+    )} MB. Try a shorter clip or a compressed MP3.`;
+  }
+  return null;
+}
+
+// Returns a user-facing error message when the decoded audio is too long, else null.
+export function validateAudioDuration(
+  durationSeconds: number,
+  maxSeconds = MAX_AUDIO_SECONDS,
+): string | null {
+  if (durationSeconds > maxSeconds) {
+    return `Audio is too long (${Math.round(durationSeconds)}s). The limit is ${maxSeconds}s. Try a shorter excerpt.`;
+  }
+  return null;
+}
+
 // Note-detection thresholds. Tuned conservatively for demo-grade clarity on clean,
 // mostly-monophonic piano: a higher onset threshold suppresses spurious notes, and a
 // minimum length trims sub-beat blips. (frames are ~11.6 ms; 11 frames is ~128 ms.)
@@ -59,6 +96,10 @@ async function decodeToMono22050(file: File): Promise<AudioBuffer> {
   const decodeCtx = new AudioCtx();
   try {
     const decoded = await decodeCtx.decodeAudioData(arrayBuffer);
+    // Reject over-long audio before allocating the (potentially huge) resampled buffer and
+    // running inference.
+    const durationError = validateAudioDuration(decoded.duration);
+    if (durationError) throw new Error(durationError);
     const frameCount = Math.max(1, Math.ceil(decoded.duration * TARGET_SAMPLE_RATE));
     const offline = new OfflineAudioContext(1, frameCount, TARGET_SAMPLE_RATE);
     const source = offline.createBufferSource();
@@ -80,6 +121,10 @@ export async function transcribeAudioFile(
   file: File,
   onProgress?: (fraction: number) => void,
 ): Promise<VisNote[]> {
+  // Reject oversized files before reading them into memory or decoding.
+  const sizeError = validateAudioFileSize(file.size);
+  if (sizeError) throw new Error(sizeError);
+
   const audioBuffer = await decodeToMono22050(file);
 
   if (!basicPitch) basicPitch = new BasicPitch(MODEL_URL);
