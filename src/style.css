@@ -433,57 +433,49 @@ button:focus-visible,
   gap: 0.4rem;
 }
 
-/* A small swatch matching the #36 falling-note rail colors: right = near-white,
-   left = near-dark. Border keeps the near-dark swatch visible on the dark bar. */
-.hand-swatch {
-  width: 11px;
-  height: 11px;
-  border-radius: 3px;
-  border: 1px solid var(--ghost-border);
-  flex: none;
+/* Speaker glyph that gains a slash when the hand is muted: the canonical, colorblind-safe
+   mute mark (a shape change, not a hue). Audible shows the sound waves; muted hides the
+   waves, shows the slash, and the whole pill turns to an engaged accent fill. This replaces
+   the old lit-pill metaphor where it was unclear whether "lit" meant on or muted. */
+.hand-spk {
+  display: inline-flex;
+  line-height: 0;
+  color: var(--text);
 }
 
-.hand-swatch-right {
-  background: rgba(255, 255, 255, 0.92);
+.hand-spk-svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
-.hand-swatch-left {
-  background: rgba(10, 7, 18, 0.85);
-  border-color: rgba(232, 224, 245, 0.4);
-}
-
-/* The visible "muted" word (set in JS). Hidden until the hand is muted, then shown as a
-   bold accent chip so the toggle reads as an engaged state, not a faded/disabled control. */
-.hand-toggle-state {
+.hand-toggle .spk-slash {
   display: none;
 }
 
-/* Muted state shown by MORE than color (colorblind-safe): an explicit "muted" word plus a
-   strikethrough name. Kept at full opacity with an accent fill so the active (muted) toggle
-   looks engaged rather than disabled (issue #37 follow-up: the old 0.55 dim read as a no-op). */
 .hand-toggle[aria-pressed="true"] {
-  opacity: 1;
   background: rgba(177, 75, 255, 0.28);
   border-color: var(--accent);
   color: var(--text);
 }
 
+.hand-toggle[aria-pressed="true"] .hand-spk {
+  color: var(--accent);
+}
+
+.hand-toggle[aria-pressed="true"] .spk-waves {
+  display: none;
+}
+
+.hand-toggle[aria-pressed="true"] .spk-slash {
+  display: inline;
+}
+
 .hand-toggle[aria-pressed="true"] .hand-toggle-label {
   text-decoration: line-through;
-  opacity: 0.7;
-}
-
-.hand-toggle[aria-pressed="true"] .hand-toggle-state {
-  display: inline;
-  font-weight: 600;
-  font-size: 0.85em;
-  color: var(--accent);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.hand-toggle[aria-pressed="true"] .hand-swatch {
-  opacity: 0.5;
+  opacity: 0.75;
 }
 
 .tempo {

@@ -32,6 +32,117 @@ relevant section, dated.
     have persistence"); there is no score-persistence layer yet, so the name lives for the
     session only. Wire it into that layer when it lands.
 
+## Hand mute = speaker toggle + falling-note top-cap (user feedback)
+
+- **2026-05-30 - Two build-ready fixes from real user feedback: (1) the per-hand mute pills
+  are unintuitive ("checkbox buttons really not intuitive", unclear if lit = on or muted);
+  (2) the falling-note hand stripe is invisible. Both specs are markup + CSS + one canvas
+  block; the main agent builds them. No new deps; inline SVG only.**
+
+  ### Problem 1 - make each hand control a speaker/mute switch, not an ambiguous pill
+
+  **Root cause:** an `aria-pressed` pill has no fixed mapping between "lit" and a real-world
+  meaning, so the user cannot know if lit = on or muted without trying. Fix: show the actual
+  audio state with a speaker glyph that visibly GAINS a slash when muted. Speaker /
+  speaker-with-slash is the most universally read mute metaphor and is colorblind-safe because
+  the slash is a shape change, not a hue.
+
+  **Keep:** `<button class="toggle hand-toggle" aria-pressed>`, the `#hand-mutes` container +
+  show-when-both-hands logic, keyboard accessibility, the 44px phone tap target. **Change:**
+  swap the dim/strikethrough-only treatment for a speaker icon that toggles glyph, and make
+  the tooltip state-explicit.
+
+  **New per-button markup (replace the `.hand-swatch` + `.hand-toggle-state` spans):**
+  ```html
+  <button id="mute-right-btn" class="toggle hand-toggle" type="button"
+          aria-pressed="false" title="Right hand: audible. Click to mute.">
+    <span class="hand-spk" aria-hidden="true">
+      <svg class="hand-spk-svg" viewBox="0 0 16 16" width="15" height="15">
+        <path d="M3 6 H5 L8.5 3 V13 L5 10 H3 Z"/>
+        <path class="spk-waves" d="M10.5 5.5 a3.2 3.2 0 0 1 0 5 M12 4 a5 5 0 0 1 0 8"/>
+        <path class="spk-slash" d="M10.5 5 L14 11"/>
+      </svg>
+    </span>
+    <span class="hand-toggle-label">Right hand</span>
+  </button>
+  ```
+  - SVG attrs: `fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round;
+    stroke-linejoin: round`. One icon, two toggled paths (waves vs slash), no JS glyph swap
+    beyond `aria-pressed`.
+  - **CSS (replace the whole `aria-pressed="true"` block, style.css ~418-450):**
+    ```css
+    .hand-toggle { display: inline-flex; align-items: center; gap: 0.4rem; }
+    .hand-spk { display: inline-flex; line-height: 0; color: var(--text); }
+    .hand-spk-svg { fill: none; stroke: currentColor; stroke-width: 1.6;
+      stroke-linecap: round; stroke-linejoin: round; }
+    .hand-toggle .spk-slash { display: none; }   /* audible: no slash, waves shown */
+    .hand-toggle[aria-pressed="true"] {
+      background: rgba(177, 75, 255, 0.28);
+      border-color: var(--accent); color: var(--text);
+    }
+    .hand-toggle[aria-pressed="true"] .hand-spk { color: var(--accent); }
+    .hand-toggle[aria-pressed="true"] .spk-waves { display: none; }   /* muted */
+    .hand-toggle[aria-pressed="true"] .spk-slash { display: inline; }
+    .hand-toggle[aria-pressed="true"] .hand-toggle-label {
+      text-decoration: line-through; opacity: 0.75;
+    }
+    ```
+  - **States, exhaustively:**
+    - **Audible (default, `aria-pressed="false"`):** ghost pill, `--text` speaker WITH waves,
+      no slash, no fill. Reads "sound is coming out".
+    - **Muted (`aria-pressed="true"`):** `--accent`-bordered violet-tinted fill (engaged, NOT
+      dimmed, per the #37 follow-up where 0.55-dim read as a no-op), speaker turns `--accent`
+      and shows the SLASH, label strikethrough. Three redundant cues: glyph slash (shape),
+      accent color, strikethrough text.
+    - **Hover:** ghost `:hover` (`--ghost-bg-hover`, `--ghost-border-hover`, label near-white);
+      a muted button keeps its violet fill and just lifts the border.
+    - **Focus-visible:** shared `--focus-ring` (#d9a6ff, 2px, offset 2px). Unchanged.
+  - **Tooltip + a11y wording carry the literal state** (the user's complaint is ambiguity, so
+    spell it out): audible `title="Right hand: audible. Click to mute."`; Tech Lead flips it to
+    `"Right hand: muted. Click to unmute."` alongside `aria-pressed`. Never just "pressed".
+  - **Why speaker-with-slash over an on/off switch:** "this controls AUDIO" reads faster from a
+    speaker than an abstract switch, and the slash is the canonical OS mute mark everyone knows.
+    It fits the existing pill footprint with zero layout change; a switch needs a new
+    track/thumb component and still would not say "audio".
+
+  ### Problem 2 - make the falling-note hand cue legible: a bold top cap
+
+  **Root cause:** a 3-6px inset side rail is too thin to see at speed, and one-luminance rails
+  fail against SOME hues (near-dark left rail vanishes on deep violet; near-white right rail
+  blends into bright hues). **Fix: replace the thin two-sided rail with a single bold TOP CAP
+  on every hand-bearing bar, full width, dual-luminance outlined so it survives any hue.** The
+  top is the leading edge the eye already tracks, so the cue is read earliest, and full-width
+  cannot be clipped at a lane edge. Hue still owns the body; the cap owns hand.
+
+  - **Geometry (replace the #36 edge-stripe block, visualizer.ts ~205-215):** after the body
+    `fill()`, with `ctx.shadowBlur = 0`:
+    - `CAP_H = Math.max(5, Math.min(8, barHeight * 0.18))` (clamped 5-8px).
+    - `ctx.fillStyle = capFill; ctx.fillRect(x + 1, top + 1, w - 2, CAP_H);`
+    - `ctx.fillStyle = dividerColor; ctx.fillRect(x + 1, top + 1 + CAP_H, w - 2, 1);`
+    - **Right hand:** capFill `rgba(255,255,255,0.95)`, divider `rgba(10,7,18,0.9)` (light cap).
+    - **Left hand:** capFill `rgba(10,7,18,0.92)`, divider `rgba(255,255,255,0.9)` (dark cap).
+    - Square cap corners are masked by sitting 1px inside the r=4 rounded body. Two flat fills
+      per bar, glow off, no gradient/measureText: within the per-bar budget.
+  - **The 1px opposite-luminance divider is the robustness trick:** each cap carries BOTH
+    luminance poles, so a white cap still reads on pale-yellow (dark underline) and a dark cap
+    still reads on deep violet (light underline). That kills the "inconsistent against
+    different hues" complaint directly.
+  - **Layering:** body fill -> top cap + divider (glow off) -> contact stroke (#27, re-walks
+    the path, frames the cap) -> centered name label. Cap is at top, label near mid-bar, so no
+    collision and no label reposition (supersedes the #36 edge-stripe label nudge note).
+  - **Unknown fallback unchanged:** keep the
+    `if (note.hand === "left" || note.hand === "right")` guard. Single-staff / audio / OMR
+    (hand "unknown") draw NO cap, pixel-for-pixel as today.
+  - **Off-range bars (#33):** keep the cap on them; it inherits the 0.35 alpha and stays
+    readable as a dimmed band. No special-casing.
+  - **Tradeoff chosen + why:** the cap "caps" a few pixels of the colored body, but legibility
+    wins for a learning aid: it is ~6x the pixels of a 3px rail, sits where the eye tracks,
+    cannot be clipped, and the dual-luminance outline makes it hue-proof. Rejected: a wider
+    SIDE rail (still clippable, still one-luminance-fails-on-some-hue), a hand GLYPH per bar
+    (illegible at speed / on narrow black-key bars), a body OUTLINE (collides with the #27
+    contact stroke and #33 off-range dimming). Defer a legend; the dark/light cap is learnable
+    in one or two notes.
+
 ## Sharp / flat (accidental) visualization review (issue #40)
 
 - **2026-05-30 - Review/spike: how accidentals are labeled and positioned today, plus a
