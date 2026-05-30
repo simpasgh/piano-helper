@@ -99,7 +99,7 @@ export class Visualizer {
     const { ctx } = this;
     // Geometry of bars worth labeling, collected during the fill pass and drawn
     // after, so the bar glow (shadowBlur 18) never bleeds into the glyphs.
-    const labels: { x: number; bottom: number; text: string }[] = [];
+    const labels: { x: number; y: number; text: string }[] = [];
 
     for (const note of this.notes) {
       const delta = note.time - currentTime;
@@ -126,17 +126,35 @@ export class Visualizer {
           ? colors.blackFill
           : colors.whiteFill;
       ctx.shadowColor = colors.glow;
-      ctx.shadowBlur = isActive ? 26 : 18;
+      ctx.shadowBlur = isActive ? 20 : 18;
       this.roundRect(x, top, w, barHeight, 4);
       ctx.fill();
 
+      // Contact glow (issue #27): the instant a sounding bar's leading edge reaches the
+      // keybed, stroke a soft border in the note's own hue so it visibly "lights up" on
+      // the hit, distinct from the steady active fill. Fires only for the small set of
+      // bars that are both sounding and touching, so the common falling bar pays nothing.
+      const inContact = isActive && bottom >= keyboardTop - 10;
+      if (inContact) {
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = colors.glow;
+        ctx.shadowColor = colors.glow;
+        ctx.shadowBlur = 22;
+        ctx.globalAlpha = 0.9;
+        this.roundRect(x, top, w, barHeight, 4);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+
       if (this.labelMode !== "off") {
-        // Active key's bar is always labeled even if narrow; the player needs it now.
-        const fits = w >= 16 && barHeight >= 18;
+        // Name rides near the TOP of the bar so it never covers the contact point at the
+        // bottom of the lane. Active key's bar is always labeled even if narrow; the
+        // player needs it now.
+        const fits = w >= 16 && barHeight >= 22;
         if (fits || active.has(note.midi)) {
           labels.push({
             x: x + w / 2,
-            bottom: bottom - 6,
+            y: top + 14,
             text: midiToBarLabel(note.midi, this.labelMode),
           });
         }
@@ -146,14 +164,14 @@ export class Visualizer {
     // Reset glow before text, draw text, then reset again so nothing else inherits it.
     ctx.shadowBlur = 0;
     if (labels.length > 0) {
-      ctx.font = "700 12px system-ui";
+      ctx.font = "600 11px system-ui";
       ctx.textAlign = "center";
       ctx.textBaseline = "alphabetic";
-      ctx.fillStyle = "#ffffff";
+      ctx.fillStyle = "rgba(255,255,255,0.82)";
       ctx.shadowColor = "rgba(0,0,0,0.45)";
       ctx.shadowBlur = 2;
       for (const l of labels) {
-        ctx.fillText(l.text, l.x, l.bottom);
+        ctx.fillText(l.text, l.x, l.y);
       }
       ctx.shadowBlur = 0;
     }
@@ -205,8 +223,8 @@ export class Visualizer {
   private drawLandingBloom(top: number, active: Set<number>): void {
     if (active.size === 0) return;
     const { ctx } = this;
-    const BLOOM_HEIGHT = 22;
-    ctx.globalAlpha = 0.55;
+    const BLOOM_HEIGHT = 16;
+    ctx.globalAlpha = 0.4;
     for (const midi of active) {
       const key = this.keys[midi - 21];
       if (!key) continue;
