@@ -8,12 +8,14 @@ import {
   LAST_MIDI,
   type KeyGeometry,
   type LabelMode,
+  type Hand,
 } from "./piano";
 
 export interface VisNote {
   midi: number;
   time: number; // start time in seconds
   duration: number; // seconds
+  hand?: Hand; // which hand plays this note (issue #36); absent reads as "unknown"
 }
 
 const MAX_KEYBOARD_HEIGHT = 140;
@@ -169,6 +171,24 @@ export class Visualizer {
       ctx.shadowBlur = isActive ? 20 : 18;
       this.roundRect(x, top, w, barHeight, 4);
       ctx.fill();
+
+      // Hand accent stripe (issue #36): a thin neutral rail on one edge of the bar so the
+      // eye reads which hand plays it without disturbing the pitch hue. Dark rail on the
+      // LEFT edge = left hand; light rail on the RIGHT edge = right hand. Drawn after the
+      // body fill, with the glow off, and before the contact stroke. It inherits the bar's
+      // current globalAlpha, so off-range bars (0.35) keep a dimmed stripe. "unknown" draws
+      // nothing, so single-staff and audio-derived scores render exactly as before.
+      if (note.hand === "left" || note.hand === "right") {
+        const stripeW = Math.max(3, Math.min(6, w * 0.16));
+        ctx.shadowBlur = 0;
+        if (note.hand === "left") {
+          ctx.fillStyle = "rgba(10, 7, 18, 0.85)";
+          ctx.fillRect(x + 1, top + 1, stripeW, barHeight - 2);
+        } else {
+          ctx.fillStyle = "rgba(255, 255, 255, 0.92)";
+          ctx.fillRect(x + w - 1 - stripeW, top + 1, stripeW, barHeight - 2);
+        }
+      }
 
       // Clamped off-window bars get neither the contact glow nor a label: they are a
       // dimmed "a note is happening off-screen" hint, not a precise target.

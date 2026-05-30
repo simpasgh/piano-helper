@@ -54,6 +54,18 @@ export function midiToName(midi: number): string {
 
 export type LabelMode = "solfege" | "letters" | "off";
 
+// Which hand plays a note (issue #36). "right" = treble staff, "left" = bass staff,
+// "unknown" = single-staff or audio-derived scores with no hand information.
+export type Hand = "left" | "right" | "unknown";
+
+// Maps a note's staff index within its instrument to a hand. Grand-staff piano music
+// has two staves: index 0 (treble) is the right hand, index 1 (bass) is the left hand.
+// A single-staff part cannot be split into hands, so it degrades to "unknown".
+export function handFromStaffIndex(index: number, staffCount: number): Hand {
+  if (staffCount < 2 || index < 0) return "unknown";
+  return index === 0 ? "right" : "left";
+}
+
 // Always-sharp spellings; "Si" (not "Ti") for the 7th degree per the solfege spec.
 const LETTER_CLASSES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const SOLFEGE_CLASSES = [

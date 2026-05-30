@@ -325,6 +325,87 @@ relevant section, dated.
   triangle glyph on `#play-btn`; converting the remaining inline slider gradient hex to the
   `--accent-deep` / `--accent-gradient` tokens (cosmetic refactor, no visual change).
 
+## Left vs right hand on falling notes (issue #36)
+
+- **2026-05-30 - Spec for distinguishing left-hand vs right-hand falling notes.** Canvas-2D
+  ready spec for `drawFallingNotes` in `src/visualizer.ts`. No new deps, no DOM. Each note
+  now carries `hand: "left" | "right" | "unknown"` ("right" = treble, "left" = bass,
+  "unknown" = single-staff or audio-derived, no hand info). `VisNote` gets the new field.
+
+  **Chosen treatment: a hand accent stripe on one EDGE of the bar.** Keep the bar body in
+  its full issue #12 pitch-class color (hue = pitch, unchanged). Paint a thin vertical
+  stripe inside the rounded rect, on the **left edge for left-hand** notes and the **right
+  edge for right-hand** notes. The bar's own colored corner radius still frames it; the
+  stripe sits flush to the inner edge. This adds a second, orthogonal channel (which side
+  the marker is on) so hue keeps meaning pitch while side means hand. Clarity over subtlety:
+  side-of-bar is a hard binary the eye reads in peripheral vision as bars stream down a lane.
+
+  Rejected alternatives, briefly: recoloring the whole bar by hand destroys the #12 pitch
+  palette (the primary pitch cue); an opacity/saturation shift collides with the #33
+  off-range dimming (alpha 0.35 already means "off-screen") and is too quiet for a learning
+  aid; corner-shape differences are illegible at speed and fight the uniform r=4 rounding.
+
+  **1. Exact stripe geometry + values.**
+  - **Width:** `STRIPE_W = Math.max(3, Math.min(6, w * 0.16))` px. Clamped 3-6px so it is
+    visible on a ~13px black-key bar at 320px (issue #33) yet never eats a wide bar's hue.
+  - **Inset:** the stripe is drawn 1px inside the bar so the bar's rounded corner still shows
+    around it. Left-hand stripe rect: `x + 1, top + 1, STRIPE_W, barHeight - 2`. Right-hand
+    stripe rect: `x + w - 1 - STRIPE_W, top + 1, STRIPE_W, barHeight - 2`. Square corners on
+    the stripe are fine (it is masked visually by sitting inside the rounded body); use a
+    plain `fillRect`, not `roundRect`, to keep it cheap.
+  - **Color (fixed, NOT pitch-derived, NOT hand-hued):** a single neutral so it stays legible
+    over all 12 hues and over both white-key (L62%) and black-key (L50%) fills.
+    - **Left hand:** near-black `rgba(10, 7, 18, 0.85)` (the stage `#0a0712` at 0.85 alpha).
+      Reads as a dark inset rail. Dark-on-color is unambiguous over every L50-62% hue.
+    - **Right hand:** bright `rgba(255, 255, 255, 0.92)` (near-white). Light-on-color, the
+      polar opposite of the left rail.
+    - This dark-left / light-right pairing is itself a second cue beyond side: even if a bar
+      is half-clipped at a screen edge, dark-rail vs light-rail still tells the hand. The
+      pairing is also colorblind-safe (pure luminance contrast, no hue).
+  - **No glow on the stripe.** Set `ctx.shadowBlur = 0` for the stripe `fillRect` (the bar
+    fill before it set a hue glow; reset it, draw the stripe, and the contact stroke below
+    re-sets its own shadow). One `fillStyle` + one `fillRect` per non-unknown bar. Within the
+    per-bar budget (the #12 rule allows one fill + shadow assignments; this is one extra flat
+    fill with shadow off, no gradient, no measureText).
+
+  **2. "Unknown" fallback = identical to today.** When `note.hand === "unknown"` (or the
+  field is absent), draw NO stripe. The bar renders exactly as the current #12 + #27 code:
+  full pitch-class fill, hue glow, active brightening, contact stroke, top label. Single-staff
+  and audio-derived scores look pixel-for-pixel unchanged. Guard with a single
+  `if (note.hand === "left" || note.hand === "right")` around the stripe block.
+
+  **3. Layering order (precise, so effects do not fight).** Per bar, in this sequence:
+  1. Body `fill()` (pitch hue + hue glow), unchanged from #12/#27.
+  2. **Stripe:** if hand is left/right, `ctx.shadowBlur = 0`, set the neutral
+     `fillStyle`, `fillRect` the edge rail. The stripe sits ON TOP of the body fill, inside
+     the rounded corner, BELOW the contact stroke and label.
+  3. Contact glow stroke (#27), unchanged: re-walk the rounded-rect path and `stroke()` with
+     `colors.glow`, `shadowBlur 22`. The stroke is the full bar outline, so it frames the
+     stripe too; they do not collide (stroke is on the path edge, stripe is inset 1px).
+  4. Name label (#27): collected and drawn after the fill pass with `shadowBlur` reset. The
+     label is centered (`x + w/2`) and the stripe is at most 6px on one edge, so for any bar
+     wide enough to show a label (`w >= 16`) the centered glyph clears a 6px edge rail with
+     room to spare. No label reposition needed. If profiling ever shows a 1-2 glyph label
+     brushing a fat stripe on a borderline-narrow active bar, nudge the label x by
+     `+STRIPE_W/2` when `hand === "left"` and `-STRIPE_W/2` when `hand === "right"` to recenter
+     in the remaining body width; treat that as optional polish, not required.
+
+  **4. Off-range clamped bars (#33).** These already draw at `globalAlpha 0.35` and get no
+  label and no contact stroke. Keep the stripe ON them (it inherits the 0.35 alpha), so a
+  dimmed off-edge note still shows its hand. The stripe alphas above multiply with 0.35 and
+  stay readable as a darker/lighter rail; no special-casing.
+
+  **5. Keyboard + landing bloom are untouched.** Hand is a falling-note cue only. The lit
+  key, landing bloom, and key-face labels stay pitch-hued (#12); a key can be pressed by
+  either hand and the keyboard is a shared position display, so coloring keys by hand would
+  be ambiguous and is out of scope. The falling lane carries the hand signal; by the time a
+  note lands the player has already read which hand from the descending bar.
+
+  **6. Optional legend (NICE-TO-HAVE, defer).** A tiny static key somewhere in the topbar
+  ("dark edge = left, light edge = right") would teach the convention faster, but the
+  dark-left / light-right + side-of-bar pairing is learnable from one or two notes and the
+  bar is already busy. Skip for v1; revisit only if playtests show confusion.
+
 ## Visualizer color + polish (issue #12)
 
 - **2026-05-30 — Beautify the piano + falling-notes view: pitch-class palette + bar/key/
@@ -926,4 +1007,6 @@ relevant section, dated.
 
 ## Open UX questions
 
-- Hand/voice coloring (left vs right hand) like Synthesia.
+- ~~Hand/voice coloring (left vs right hand) like Synthesia.~~ RESOLVED in issue #36: a
+  dark-left / light-right edge accent stripe on the falling bar, keeping the #12 pitch hue on
+  the body. See the "Left vs right hand on falling notes (issue #36)" spec above.
