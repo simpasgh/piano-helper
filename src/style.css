@@ -155,6 +155,38 @@ body {
   height: 20px;
 }
 
+/* Heroicons (MIT) across the toolbar/transport (issue #48). Icons are inline SVG using
+   currentColor, so they inherit each button's tier color and its hover/active/disabled
+   treatment for free (no extra rules). Standard sizing: 18px in labeled action buttons,
+   16px in the compact Names pill, 20px in the square step satellites (above). Outline icons
+   are stroked (stroke-width 1.5, the Heroicons native weight); the solid Play/Pause hero
+   is filled. Labeled buttons lay out as an icon + text row with a consistent gap. */
+.file-btn,
+#export-btn,
+#play-btn,
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.btn-icon {
+  display: block;
+  flex: none;
+  width: 18px;
+  height: 18px;
+}
+
+/* The Names pill is compact, so its eye icon is a touch smaller and tighter. */
+.toggle .btn-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.toggle {
+  gap: 0.35rem;
+}
+
 #seek-slider {
   appearance: none;
   -webkit-appearance: none;

@@ -35,6 +35,9 @@ const seekSlider = document.getElementById("seek-slider") as HTMLInputElement;
 const timeReadout = document.getElementById("time-readout") as HTMLSpanElement;
 const exportBtn = document.getElementById("export-btn") as HTMLButtonElement;
 const namesBtn = document.getElementById("names-btn") as HTMLButtonElement;
+const namesLabel = document.getElementById("names-label") as HTMLSpanElement;
+const playLabel = document.getElementById("play-label") as HTMLSpanElement;
+const playIcon = playBtn.querySelector(".play-icon") as SVGSVGElement | null;
 const handMutes = document.getElementById("hand-mutes") as HTMLDivElement;
 const muteRightBtn = document.getElementById("mute-right-btn") as HTMLButtonElement;
 const muteLeftBtn = document.getElementById("mute-left-btn") as HTMLButtonElement;
@@ -237,9 +240,21 @@ async function loadAudioFile(file: File): Promise<void> {
   loadNotes({ notes, stepTimes: [], duration }, file.name, false);
 }
 
+// Heroicons (MIT) solid play / pause path data. We swap only the icon path and the label
+// span so the inline <svg> and its currentColor wiring survive (replacing playBtn.textContent
+// would wipe the icon).
+const PLAY_ICON_PATH =
+  "M4.5 5.65257C4.5 4.22644 6.029 3.32239 7.2786 4.00967L18.8192 10.357C20.1144 11.0694 20.1144 12.9304 18.8192 13.6428L7.2786 19.9901C6.029 20.6774 4.5 19.7733 4.5 18.3472V5.65257Z";
+const PAUSE_ICON_PATH =
+  "M6.75 5.25C6.75 4.83579 7.08579 4.5 7.5 4.5H9C9.41421 4.5 9.75 4.83579 9.75 5.25V18.75C9.75 19.1642 9.41421 19.5 9 19.5H7.5C7.30109 19.5 7.11032 19.421 6.96967 19.2803C6.82902 19.1397 6.75 18.9489 6.75 18.75L6.75 5.25ZM14.25 5.25C14.25 4.83579 14.5858 4.5 15 4.5H16.5C16.6989 4.5 16.8897 4.57902 17.0303 4.71967C17.171 4.86032 17.25 5.05109 17.25 5.25V18.75C17.25 19.1642 16.9142 19.5 16.5 19.5H15C14.5858 19.5 14.25 19.1642 14.25 18.75V5.25Z";
+
 function setPlaying(value: boolean): void {
   playing = value;
-  playBtn.textContent = value ? "Pause" : "Play";
+  const label = value ? "Pause" : "Play";
+  if (playLabel) playLabel.textContent = label;
+  playBtn.setAttribute("aria-label", label);
+  const iconPath = playIcon?.querySelector("path");
+  if (iconPath) iconPath.setAttribute("d", value ? PAUSE_ICON_PATH : PLAY_ICON_PATH);
 }
 
 async function togglePlay(): Promise<void> {
@@ -600,7 +615,8 @@ const NAME_CYCLE: Record<LabelMode, LabelMode> = {
 
 function applyLabelMode(mode: LabelMode): void {
   visualizer.setLabelMode(mode);
-  namesBtn.textContent = NAME_LABELS[mode];
+  // Swap only the label span so the inline eye icon survives.
+  if (namesLabel) namesLabel.textContent = NAME_LABELS[mode];
   // Rebuild the sheet overlay to match (no-op until a score is rendered).
   renderSheetLabels(osmd, sheetContainer, mode);
 }

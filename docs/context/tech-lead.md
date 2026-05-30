@@ -30,6 +30,35 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-30 - Heroicons adopted via INLINE SVG, not the npm package (#48).** Toolbar/transport
+  icons now use Heroicons (MIT), delivered as inline `<svg>` with paths copied from the official
+  set (`tailwindlabs/heroicons` `src/24/{outline,solid}`), NOT the `heroicons` npm package nor any
+  React wrapper. Why inline over a dependency: (1) the project is vanilla Vite + TS with no JSX, so
+  the React package is unusable and the raw-SVG package would need a `?raw`/loader import per icon
+  for zero runtime benefit; (2) zero new deps keeps the bundle-size discipline (the #19 tfjs note)
+  and matches the EXISTING pattern - #46 already shipped the step glyphs as inline SVG. This is
+  strictly "swap the path data + add a few icons", same delivery mechanism as #46.
+  - **Convention:** outline icons use `fill="none" stroke="currentColor" stroke-width="1.5"`
+    (Heroicons' native outline weight); the SOLE solid icon is the Play/Pause hero
+    (`fill="currentColor"`). `currentColor` is the whole point: every icon inherits its button's
+    tier color and the #46 hover/active/disabled treatment with no extra CSS. The hardcoded
+    `#0F172A` Heroicons ship on each path is stripped (a markup test asserts it never appears).
+  - **JS-swapped icons (the one gotcha).** `setPlaying` used to do `playBtn.textContent = "Play" |
+    "Pause"`, and `applyLabelMode` did `namesBtn.textContent = ...`; with an inline `<svg>` in the
+    button, that wipes the icon. Fix: each such button wraps its text in a dedicated label span
+    (`#play-label`, `#names-label`), and the JS now sets `.textContent` on the SPAN only. For
+    Play/Pause the icon also changes shape (triangle <-> two bars), so `setPlaying` swaps the
+    single `<path d=...>` between `PLAY_ICON_PATH`/`PAUSE_ICON_PATH` (Heroicons solid play/pause
+    path constants in main.ts) and updates the button's `aria-label`. A guard test forbids
+    `playBtn.textContent =` / `namesBtn.textContent =` so this regression can't silently return.
+  - **Tests.** 11 new markup/CSS guards in `src/toolbar.test.ts` (no jsdom, same text-read pattern
+    as #46): each of the 8 inlined Heroicons matched by a fragment of its authentic path, the
+    `currentColor`/no-`#0F172A` convention, solid-only-for-Play, and the label-span swap discipline
+    (reads `src/main.ts` too now). Full suite 162 green, `npm run build` green.
+  - **Verification caveat:** preview port 5173 is bound to a different worktree, so verified by a
+    WebKit static render (qlmanage) of the built header + the 11 guards; live in-browser + 720px +
+    the play/pause swap remain for the post-merge QA gate.
+
 - **2026-05-30 - Accidental spelling is LOST at `halfTone -> midi` (review #40).** Documented
   during the #40 accidentals review (design.md has the full UX writeup + follow-ups). Root cause for
   any future "show flats / enharmonic spelling" work: `extractScore` (`src/score.ts:28`) and the sheet
