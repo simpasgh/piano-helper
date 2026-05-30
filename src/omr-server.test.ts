@@ -2,11 +2,9 @@ import { describe, it, expect } from "vitest";
 import {
   mimeToExt,
   validateUpload,
-  buildDispatchRequest,
   MAX_UPLOAD_BYTES,
   uploadKey,
   resultKey,
-  errorKey,
   isValidJobId,
 } from "./omr-server";
 
@@ -52,10 +50,10 @@ describe("validateUpload", () => {
     expect(v.ext).toBe("png");
   });
 
-  it("rejects an unsupported type with 400", () => {
+  it("rejects an unsupported type with 415", () => {
     const v = validateUpload("image/gif", 1000);
     expect(v.ok).toBe(false);
-    expect(v.status).toBe(400);
+    expect(v.status).toBe(415);
     expect(v.error).toBeTruthy();
   });
 
@@ -65,10 +63,10 @@ describe("validateUpload", () => {
     expect(v.status).toBe(400);
   });
 
-  it("rejects a file over the size cap with 400", () => {
+  it("rejects a file over the size cap with 413", () => {
     const v = validateUpload("application/pdf", MAX_UPLOAD_BYTES + 1);
     expect(v.ok).toBe(false);
-    expect(v.status).toBe(400);
+    expect(v.status).toBe(413);
   });
 
   it("accepts a file exactly at the size cap", () => {
@@ -77,28 +75,9 @@ describe("validateUpload", () => {
   });
 });
 
-describe("buildDispatchRequest", () => {
-  it("builds the repository_dispatch request with the contract payload", () => {
-    const req = buildDispatchRequest("tok123", "job-abc", "png");
-    expect(req.url).toBe("https://api.github.com/repos/simpasgh/piano-helper/dispatches");
-    expect(req.method).toBe("POST");
-    expect(req.headers.Authorization).toBe("Bearer tok123");
-    expect(req.headers.Accept).toBe("application/vnd.github+json");
-    expect(req.headers["User-Agent"]).toBe("piano-helper-omr");
-    expect(req.headers["X-GitHub-Api-Version"]).toBe("2022-11-28");
-
-    const body = JSON.parse(req.body);
-    expect(body).toEqual({
-      event_type: "omr-job",
-      client_payload: { jobId: "job-abc", ext: "png" },
-    });
-  });
-});
-
 describe("R2 key helpers", () => {
-  it("derives upload, result, and error keys from a job id", () => {
+  it("derives upload and result keys from a job id", () => {
     expect(uploadKey("abc")).toBe("uploads/abc");
     expect(resultKey("abc")).toBe("results/abc.musicxml");
-    expect(errorKey("abc")).toBe("results/abc.error");
   });
 });

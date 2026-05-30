@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { submitOmr, pollOmrResult } from "./omr";
+import { submitOmr, pollOmrResult, isFailureSentinel } from "./omr";
 
 function jsonResponse(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), {
@@ -14,6 +14,15 @@ function textResponse(body: string, status: number): Response {
 
 const fakeFile = (): File =>
   new File([new Uint8Array([1, 2, 3])], "scan.png", { type: "image/png" });
+
+const SENTINEL_XML = `<?xml version="1.0"?>
+<score-partwise>
+  <identification>
+    <miscellaneous>
+      <miscellaneous-field name="omr-status">failed</miscellaneous-field>
+    </miscellaneous>
+  </identification>
+</score-partwise>`;
 
 describe("submitOmr", () => {
   it("POSTs multipart form data and returns the jobId", async () => {
@@ -33,10 +42,20 @@ describe("submitOmr", () => {
 
   it("throws the server error when submission fails", async () => {
     const fetchFn = vi.fn(async () =>
-      jsonResponse({ error: "File too large." }, 400),
+      jsonResponse({ error: "File too large." }, 413),
     ) as unknown as typeof fetch;
 
     await expect(submitOmr(fakeFile(), fetchFn)).rejects.toThrow("File too large.");
+  });
+});
+
+describe("isFailureSentinel", () => {
+  it("detects the worker's failure sentinel MusicXML", () => {
+    expect(isFailureSentinel(SENTINEL_XML)).toBe(true);
+  });
+
+  it("does not flag a real score", () => {
+    expect(isFailureSentinel("<score-partwise><part/></score-partwise>")).toBe(false);
   });
 });
 
@@ -63,14 +82,14 @@ describe("pollOmrResult", () => {
     expect(sleep).toHaveBeenCalledTimes(2);
   });
 
-  it("throws the server message on 422", async () => {
+  it("throws a friendly error when the result is the failure sentinel", async () => {
     const fetchFn = vi.fn(async () =>
-      jsonResponse({ error: "Could not detect any staves." }, 422),
+      textResponse(SENTINEL_XML, 200),
     ) as unknown as typeof fetch;
 
     await expect(
       pollOmrResult("job-1", { fetchFn, sleep: async () => {}, now: () => 0 }),
-    ).rejects.toThrow("Could not detect any staves.");
+    ).rejects.toThrow("Could not recognize any notes");
   });
 
   it("throws on timeout while still pending", async () => {
