@@ -9,47 +9,81 @@
     <div id="app">
       <header class="topbar">
         <h1>Piano Helper</h1>
-        <div class="controls">
-          <label class="file-btn">
-            Load MusicXML
-            <input id="file-input" type="file" accept=".xml,.musicxml" hidden />
-          </label>
-          <label class="file-btn">
-            Scan sheet (PDF/image)
-            <input
-              id="scan-input"
-              type="file"
-              accept="image/png,image/jpeg,application/pdf,.png,.jpg,.jpeg,.pdf"
-              hidden
-            />
-          </label>
-          <label class="file-btn">
-            From audio (MP3/WAV)
-            <input
-              id="audio-input"
-              type="file"
-              accept="audio/*,.mp3,.wav,.ogg,.flac"
-              hidden
-            />
-          </label>
-          <button id="play-btn" disabled>Play</button>
-          <button id="export-btn" disabled>Export video</button>
-          <button id="names-btn" class="toggle">Names: Solfege</button>
-          <div class="tempo">
-            <span class="tempo-label">Tempo</span>
-            <input
-              id="tempo-slider"
-              type="range"
-              min="25"
-              max="200"
-              value="100"
-              step="5"
-              aria-label="Playback tempo, percent of score speed"
-            />
-            <button id="tempo-readout" class="tempo-readout" title="Reset to 100%">100%</button>
+        <div class="topbar-rows">
+          <div class="controls">
+            <label class="file-btn">
+              Load MusicXML
+              <input id="file-input" type="file" accept=".xml,.musicxml" hidden />
+            </label>
+            <label class="file-btn">
+              Scan sheet (PDF/image)
+              <input
+                id="scan-input"
+                type="file"
+                accept="image/png,image/jpeg,application/pdf,.png,.jpg,.jpeg,.pdf"
+                hidden
+              />
+            </label>
+            <label class="file-btn">
+              From audio (MP3/WAV)
+              <input
+                id="audio-input"
+                type="file"
+                accept="audio/*,.mp3,.wav,.ogg,.flac"
+                hidden
+              />
+            </label>
+            <button id="export-btn" disabled>Export video</button>
+            <button id="names-btn" class="toggle">Names: Solfege</button>
+            <div class="tempo">
+              <span class="tempo-label">Tempo</span>
+              <input
+                id="tempo-slider"
+                type="range"
+                min="25"
+                max="200"
+                value="100"
+                step="5"
+                aria-label="Playback tempo, percent of score speed"
+              />
+              <button id="tempo-readout" class="tempo-readout" title="Reset to 100%">100%</button>
+            </div>
+            <span id="track-name" class="track-name">No file loaded</span>
+            <span id="sound-status" class="sound-status"></span>
           </div>
-          <span id="track-name" class="track-name">No file loaded</span>
-          <span id="sound-status" class="sound-status"></span>
+          <div class="transport">
+            <button
+              id="prev-note-btn"
+              class="step-btn"
+              title="Previous note (Left arrow)"
+              aria-label="Previous note"
+              disabled
+            >
+              <span aria-hidden="true">&#9664;&#124;</span>
+            </button>
+            <button id="play-btn" title="Play / pause (Space)" disabled>Play</button>
+            <button
+              id="next-note-btn"
+              class="step-btn"
+              title="Next note (Right arrow)"
+              aria-label="Next note"
+              disabled
+            >
+              <span aria-hidden="true">&#124;&#9654;</span>
+            </button>
+            <input
+              id="seek-slider"
+              type="range"
+              min="0"
+              max="1000"
+              value="0"
+              step="1"
+              aria-label="Playback position"
+              aria-valuetext="0:00 / 0:00"
+              disabled
+            />
+            <span id="time-readout" class="time-readout" aria-hidden="true">0:00 / 0:00</span>
+          </div>
         </div>
       </header>
       <div id="sheet"></div>

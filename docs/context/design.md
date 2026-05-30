@@ -358,7 +358,59 @@ relevant section, dated.
   group keeps its intrinsic size and the track name gives way. Do not let the slider drop under
   `72px` wide (thumb travel gets too coarse for 5% steps).
 
+## Playback transport: seek + step (issue #29)
+
+- **2026-05-30 — Spec for the scrub timeline + prev/next-note step buttons.** Ready to
+  implement, no new deps. Native `<input type="range">` + buttons styled to match the violet
+  pills; behavior wiring is the Tech Lead's.
+
+  **1. A dedicated second topbar row, not inline.** The seek bar must be wide for usable thumb
+  travel, so it gets its own `.transport` row below `.controls`. The topbar becomes a
+  two-row vertical stack: wrap both rows in a `.topbar-rows` flex column (`flex: 1; min-width:
+  0`) so the seek bar and track name can shrink instead of overflowing, and keep `<h1>` to its
+  left. Change `.topbar { align-items: center }` to `flex-start` so the title pins to the top
+  of the taller stack.
+
+  **2. Relocate `#play-btn` into the transport row.** Play moves out of `.controls` (where it
+  sat among the file loaders) into `.transport`, clustered with prev/next. Order in
+  `.transport`: `#prev-note-btn`, `#play-btn`, `#next-note-btn`, then the wide `#seek-slider`
+  (`flex: 1`), then `#time-readout` on the right. Rationale: Play, prev, next, and seek all
+  operate on a loaded score, so they belong together; the loaders (Load/Scan/From audio),
+  Export, Names, and tempo stay in the top `.controls` row.
+
+  **3. Seek slider range is fixed `0..1000` (per-mille), not seconds.** Map `value/1000 *
+  duration` to time; drive `value` from playback position each frame (throttled is fine). A
+  fixed range keeps native step granularity smooth and avoids resetting `max` on every load.
+  Track styling mirrors `#tempo-slider`: `height 5px`, `border-radius 3px`, gradient
+  `linear-gradient(90deg, #7a2fd6, var(--accent))` painted on `::-webkit-slider-runnable-track`
+  / `::-moz-range-track`. Firefox `::-moz-range-progress` fills the played portion in
+  `var(--accent)`. Thumb is an 18px `#f2ecf8` circle, `2px solid var(--accent)`, `box-shadow
+  0 0 8px var(--accent-glow)`, growing to 12px glow + `scale(1.08)` on hover/active for drag
+  feedback. Input has `padding: 8px 0` so the vertical hit target clears ~28px (>= 24px AA).
+  Disabled state: `opacity 0.4`, no glow, `cursor: not-allowed`.
+
+  **4. Step buttons use Unicode transport glyphs, no icon lib.** Prev `◀|`
+  (`&#9664;&#124;`), Next `|▶` (`&#124;&#9654;`) (standard skip-to-prev/next marks). Glyph is
+  wrapped in an `aria-hidden` span; the accessible name comes from `aria-label` ("Previous
+  note" / "Next note") on the button. `title` surfaces the keyboard shortcut ("Previous note
+  (Left arrow)" etc). `.step-btn` is compact: `min-width 2.4rem`, `padding 0.5rem 0.6rem`,
+  inheriting the existing button gradient + hover/disabled rules (no extra color work).
+
+  **5. Keyboard-shortcut hints live in tooltips, not visible text.** Space = play/pause,
+  Left/Right = prev/next note. Surface via `title` on Play and the step buttons rather than a
+  visible hint line, to keep the neon bar uncluttered. A muted `0.7rem` line under the
+  transport row is the place if an always-visible hint is wanted later (skip for v1).
+
+  **6. Time readout.** `#time-readout` shows `current / total` as `m:ss` (e.g. `0:00 /
+  3:24`), `font-variant-numeric: tabular-nums`, `min-width 9ch`, `text-align right` so digits
+  do not jitter. It is `aria-hidden`; instead set the slider's `aria-valuetext` to the same
+  `m:ss` string so screen-reader users get position without a duplicate live region.
+
+  **7. Lifecycle + responsive.** All four interactive transport elements start `disabled`,
+  enabled together when a score loads (same lifecycle as today's Play). Responsive: hide
+  `#time-readout` first under 720px, then shrink step-button `min-width` to `2.1rem`; the seek
+  bar's `flex: 1` + `min-width: 120px` keeps it usable.
+
 ## Open UX questions
 
-- Seek/scrub control and a progress/time indicator.
 - Hand/voice coloring (left vs right hand) like Synthesia.
