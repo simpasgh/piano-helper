@@ -3,6 +3,7 @@ import {
   isBlackKey,
   midiToLabel,
   midiToBarLabel,
+  noteColor,
   type KeyGeometry,
   type LabelMode,
 } from "./piano";
@@ -15,7 +16,6 @@ export interface VisNote {
 
 const KEYBOARD_HEIGHT = 140;
 const LOOK_AHEAD = 4; // seconds of notes visible above the keyboard
-const ACCENT = "#b14bff";
 
 export class Visualizer {
   private ctx: CanvasRenderingContext2D;
@@ -25,6 +25,8 @@ export class Visualizer {
   private height = 0;
   private dpr = 1;
   private labelMode: LabelMode = "solfege";
+  // Cached vertical background gradient; depends only on height, rebuilt in resize().
+  private bgGradient: CanvasGradient | null = null;
 
   constructor(private canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext("2d");
@@ -50,6 +52,13 @@ export class Visualizer {
     this.canvas.height = this.height * this.dpr;
     this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     this.keys = buildKeyLayout(this.width);
+
+    // Background gradient depends only on height; cache it so the rAF loop never
+    // calls createLinearGradient. Replaces the clearRect-to-transparent fill.
+    const bg = this.ctx.createLinearGradient(0, 0, 0, this.height);
+    bg.addColorStop(0, "#0a0712");
+    bg.addColorStop(1, "#120b1f");
+    this.bgGradient = bg;
   }
 
   private keyboardTop(): number {
@@ -68,7 +77,10 @@ export class Visualizer {
 
   render(currentTime: number): void {
     const { ctx, width, height } = this;
-    ctx.clearRect(0, 0, width, height);
+    // Fill the cached background gradient over the whole canvas; this both clears
+    // the previous frame and paints the stage in one pass (no separate clearRect).
+    ctx.fillStyle = this.bgGradient ?? "#0a0712";
+    ctx.fillRect(0, 0, width, height);
 
     const keyboardTop = this.keyboardTop();
     const pps = (height - KEYBOARD_HEIGHT) / LOOK_AHEAD; // pixels per second
@@ -104,9 +116,17 @@ export class Visualizer {
       const w = key.width * (black ? 1 : 0.82);
       const x = key.x + (key.width - w) / 2;
 
-      ctx.fillStyle = black ? "#8a2fe0" : ACCENT;
-      ctx.shadowColor = ACCENT;
-      ctx.shadowBlur = 18;
+      // Per-pitch-class colors come from a precomputed table (no per-bar string
+      // building). Active bars get a brighter fill and a wider glow.
+      const colors = noteColor(note.midi);
+      const isActive = active.has(note.midi);
+      ctx.fillStyle = isActive
+        ? colors.activeFill
+        : black
+          ? colors.blackFill
+          : colors.whiteFill;
+      ctx.shadowColor = colors.glow;
+      ctx.shadowBlur = isActive ? 26 : 18;
       this.roundRect(x, top, w, barHeight, 4);
       ctx.fill();
 
@@ -142,12 +162,17 @@ export class Visualizer {
   private drawKeyboard(top: number, active: Set<number>): void {
     const { ctx, width } = this;
 
-    // glow strip along the top edge of the keyboard
+    // Dim resting glow strip along the top edge of the keyboard (one gradient
+    // per frame, never per key). Dimmer than before so it does not fight hues.
     const grad = ctx.createLinearGradient(0, top - 30, 0, top);
     grad.addColorStop(0, "rgba(177,75,255,0)");
-    grad.addColorStop(1, "rgba(177,75,255,0.35)");
+    grad.addColorStop(1, "rgba(177,75,255,0.18)");
     ctx.fillStyle = grad;
     ctx.fillRect(0, top - 30, width, 30);
+
+    // Per-active-key landing bloom: a short vertical glow in the note's own hue,
+    // just above the keyboard where bars land. At most "notes sounding" draws.
+    this.drawLandingBloom(top, active);
 
     ctx.fillStyle = "#15101f";
     ctx.fillRect(0, top, width, KEYBOARD_HEIGHT);
@@ -155,7 +180,9 @@ export class Visualizer {
     // white keys first, then black keys on top
     for (const key of this.keys) {
       if (key.black) continue;
-      ctx.fillStyle = active.has(key.midi) ? ACCENT : "#f2ecf8";
+      ctx.fillStyle = active.has(key.midi)
+        ? noteColor(key.midi).activeWhiteKey
+        : "#f2ecf8";
       ctx.strokeStyle = "#2a2238";
       ctx.lineWidth = 1;
       ctx.fillRect(key.x, top, key.width, KEYBOARD_HEIGHT);
@@ -163,11 +190,35 @@ export class Visualizer {
     }
     for (const key of this.keys) {
       if (!key.black) continue;
-      ctx.fillStyle = active.has(key.midi) ? "#d89bff" : "#100b1a";
+      ctx.fillStyle = active.has(key.midi)
+        ? noteColor(key.midi).activeBlackKey
+        : "#100b1a";
       ctx.fillRect(key.x, top, key.width, KEYBOARD_HEIGHT * 0.62);
     }
 
     this.drawKeyLabels(top, active);
+  }
+
+  // Vertical bloom above each sounding key, in that note's glow hue, sitting just
+  // above the keyboard top where bars land. Drawn before the keybed/keys so the
+  // glow reads behind the keys. Resets shadow state when done.
+  private drawLandingBloom(top: number, active: Set<number>): void {
+    if (active.size === 0) return;
+    const { ctx } = this;
+    const BLOOM_HEIGHT = 22;
+    ctx.globalAlpha = 0.55;
+    for (const midi of active) {
+      const key = this.keys[midi - 21];
+      if (!key) continue;
+      const colors = noteColor(midi);
+      ctx.fillStyle = colors.glow;
+      ctx.shadowColor = colors.glow;
+      ctx.shadowBlur = 16;
+      this.roundRect(key.x, top - BLOOM_HEIGHT, key.width, BLOOM_HEIGHT, 4);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur = 0;
   }
 
   // White-key pitch-class labels (no octave). Never shrinks below 11px, and
