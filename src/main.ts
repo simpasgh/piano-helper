@@ -23,6 +23,11 @@ import {
   TEMPO_DEFAULT_PERCENT,
 } from "./tempo";
 import type { LabelMode } from "./piano";
+import {
+  deriveDefaultSheetName,
+  resolveEditedSheetName,
+  DEFAULT_SHEET_NAME,
+} from "./sheet-name";
 
 const canvas = document.getElementById("stage") as HTMLCanvasElement;
 const fileInput = document.getElementById("file-input") as HTMLInputElement;
@@ -52,7 +57,10 @@ function reflectHandMute(btn: HTMLButtonElement, muted: boolean): void {
 const tempoSlider = document.getElementById("tempo-slider") as HTMLInputElement;
 const tempoReadout = document.getElementById("tempo-readout") as HTMLButtonElement;
 const sheetContainer = document.getElementById("sheet") as HTMLDivElement;
-const trackName = document.getElementById("track-name") as HTMLSpanElement;
+const sheetNameBtn = document.getElementById("sheet-name") as HTMLButtonElement;
+const sheetNameInput = document.getElementById("sheet-name-input") as HTMLInputElement;
+const sheetNoteCount = document.getElementById("sheet-note-count") as HTMLSpanElement;
+const trackStatus = document.getElementById("track-status") as HTMLSpanElement;
 const soundStatus = document.getElementById("sound-status") as HTMLSpanElement;
 
 const visualizer = new Visualizer(canvas);
@@ -77,6 +85,14 @@ let userSeeking = false;
 // Whether the current score has a rendered sheet + cursor. MusicXML/OMR scores do;
 // audio-transcribed scores (issue #19) are falling-notes only, so the cursor stays hidden.
 let hasSheet = false;
+// User-editable sheet name (issue #44). `sheetName` is the current friendly title (defaulted
+// from the MusicXML title or file name, overridable by the user via inline edit). It persists
+// for the session and survives status messages (scanning/transcribing/errors) that temporarily
+// take over the toolbar slot. `noteCount` is shown next to the name. `nameEditing` guards the
+// inline edit so background updates do not clobber an in-progress rename.
+let sheetName = "";
+let noteCount = 0;
+let nameEditing = false;
 // Per-hand audio mute (issue #37). Read fresh inside the Part callback so toggling a hand
 // mutes/unmutes its audio with no Part rebuild. "unknown" notes always sound. The visualizer
 // draws every note from score.notes regardless, so muting only affects audio, not the falling
@@ -148,7 +164,9 @@ async function loadScoreFile(file: File): Promise<void> {
 
 // Rebuild the audio + falling-notes pipeline from a ScoreData. Shared by the MusicXML
 // path (which also renders a sheet + cursor) and the audio path (falling notes only).
-// `sheet` records whether a sheet/cursor is active so rewind/sync can skip cursor work.
+// `name` is the default sheet title for this load (issue #44): the MusicXML title or file
+// name, already derived by the caller; the user can rename it afterward. `sheet` records
+// whether a sheet/cursor is active so rewind/sync can skip cursor work.
 function loadNotes(data: ScoreData, name: string, sheet: boolean): void {
   score = data;
   hasSheet = sheet;
@@ -196,7 +214,15 @@ function loadNotes(data: ScoreData, name: string, sheet: boolean): void {
 
   stepIndex = 0;
   onsets = uniqueOnsets(score.notes);
-  trackName.textContent = `${name} (${score.notes.length} notes)`;
+  // Issue #44: adopt the derived default name (the user can rename it) and show it with the
+  // note count. A new load always resets to the source default; an in-progress edit is
+  // cancelled so the new piece's name is not overwritten by a stale rename.
+  cancelNameEdit();
+  noteCount = score.notes.length;
+  trackStatus.hidden = true;
+  sheetNameBtn.hidden = false;
+  sheetNoteCount.hidden = false;
+  setSheetName(name);
   playBtn.disabled = false;
   exportBtn.disabled = false;
   setTransportControlsEnabled(true);
@@ -214,7 +240,11 @@ async function loadScoreXml(xml: string, name: string): Promise<void> {
   // Rebuild the note-name overlay against the freshly rendered noteheads.
   renderSheetLabels(osmd, sheetContainer, labelMode);
 
-  loadNotes(extractScore(osmd), name, true);
+  // Issue #44: default the sheet name to the MusicXML title when present, else the file name.
+  // `osmd.Sheet.TitleString` is the parsed work title; guard defensively in case a score has
+  // no title metadata.
+  const xmlTitle = (osmd.Sheet as { TitleString?: string } | undefined)?.TitleString ?? null;
+  loadNotes(extractScore(osmd), deriveDefaultSheetName(name, xmlTitle), true);
 }
 
 // Transcribe an uploaded audio file (issue #19) into falling notes. There is no sheet
@@ -234,10 +264,11 @@ async function loadAudioFile(file: File): Promise<void> {
   // fetched only when a user actually transcribes audio, not on every page load.
   const { transcribeAudioFile } = await import("./transcribe");
   const notes = await transcribeAudioFile(file, (fraction) => {
-    trackName.textContent = `Transcribing audio... ${Math.round(fraction * 100)}%`;
+    showStatus(`Transcribing audio... ${Math.round(fraction * 100)}%`);
   });
   const duration = notes.reduce((max, n) => Math.max(max, n.time + n.duration), 0);
-  loadNotes({ notes, stepTimes: [], duration }, file.name, false);
+  // Audio has no MusicXML title, so the default name comes from the file name (issue #44).
+  loadNotes({ notes, stepTimes: [], duration }, deriveDefaultSheetName(file.name, null), false);
 }
 
 // Heroicons (MIT) solid play / pause path data. We swap only the icon path and the label
@@ -255,6 +286,81 @@ function setPlaying(value: boolean): void {
   playBtn.setAttribute("aria-label", label);
   const iconPath = playIcon?.querySelector("path");
   if (iconPath) iconPath.setAttribute("d", value ? PAUSE_ICON_PATH : PLAY_ICON_PATH);
+}
+
+// Render the loaded-piece view of the toolbar slot: the editable name button + the note
+// count, with the status text hidden. Called after a score loads and whenever the name
+// changes. Does nothing visible while a status message is showing or the name field is open;
+// those paths manage the slot themselves.
+function renderSheetName(): void {
+  sheetNameBtn.textContent = sheetName;
+  sheetNameBtn.title = `Rename sheet (currently "${sheetName}")`;
+  sheetNoteCount.textContent = noteCount === 1 ? "1 note" : `${noteCount} notes`;
+}
+
+// Switch the slot from a loaded piece to a transient status message (scanning, transcribing,
+// recording, an error). Hides the editable name + count so a long job does not look like a
+// sheet title; `restoreSheetName` brings the name back. A no-op when no score is loaded
+// (the boot placeholder already lives in the status span).
+function showStatus(message: string): void {
+  cancelNameEdit();
+  sheetNameBtn.hidden = true;
+  sheetNoteCount.hidden = true;
+  trackStatus.hidden = false;
+  trackStatus.textContent = message;
+}
+
+// Return the slot to showing the editable sheet name + note count after a status message.
+function restoreSheetName(): void {
+  if (!score) return;
+  trackStatus.hidden = true;
+  sheetNameBtn.hidden = false;
+  sheetNoteCount.hidden = false;
+  renderSheetName();
+}
+
+// Adopt a new sheet name (from a load default or a user edit) and reflect it in the UI plus
+// the document title so the rename is visible beyond the toolbar.
+function setSheetName(name: string): void {
+  sheetName = name || DEFAULT_SHEET_NAME;
+  document.title = `${sheetName} - Piano Helper`;
+  if (!trackStatus.hidden) return; // a status message owns the slot; restore later.
+  renderSheetName();
+}
+
+// Open the inline rename field: swap the name button for a text input seeded with the
+// current name, focused and selected so the user can type immediately.
+function enterNameEdit(): void {
+  if (!score || nameEditing) return;
+  nameEditing = true;
+  sheetNameInput.value = sheetName;
+  sheetNameBtn.hidden = true;
+  sheetNameInput.hidden = false;
+  sheetNameInput.focus();
+  sheetNameInput.select();
+}
+
+// Commit the inline edit: an empty submission reverts to the current name (a rename cannot
+// blank the title); otherwise the normalized edit becomes the new name.
+function commitNameEdit(): void {
+  if (!nameEditing) return;
+  const next = resolveEditedSheetName(sheetNameInput.value, sheetName);
+  closeNameEdit();
+  setSheetName(next);
+}
+
+// Discard an in-progress edit without changing the name.
+function cancelNameEdit(): void {
+  if (!nameEditing) return;
+  closeNameEdit();
+  renderSheetName();
+}
+
+// Tear down the inline field and show the name button again. Shared by commit and cancel.
+function closeNameEdit(): void {
+  nameEditing = false;
+  sheetNameInput.hidden = true;
+  sheetNameBtn.hidden = false;
 }
 
 async function togglePlay(): Promise<void> {
@@ -386,7 +492,7 @@ function setBusyUI(active: boolean): void {
 
 async function scanSheet(file: File): Promise<void> {
   setBusyUI(true);
-  trackName.textContent = "Scanning sheet... (this can take a minute)";
+  showStatus("Scanning sheet... (this can take a minute)");
   try {
     const jobId = await submitOmr(file);
     const xml = await pollOmrResult(jobId);
@@ -402,7 +508,7 @@ scanInput.addEventListener("change", () => {
   if (!file) return;
   scanSheet(file).catch((err) => {
     console.error("Scan failed:", err);
-    trackName.textContent = "Scan failed.";
+    showStatus("Scan failed.");
     alert(`Scan failed: ${err.message}`);
   });
   // Allow re-selecting the same file to retry.
@@ -411,7 +517,7 @@ scanInput.addEventListener("change", () => {
 
 async function transcribeAudio(file: File): Promise<void> {
   setBusyUI(true);
-  trackName.textContent = "Transcribing audio... (this can take a minute)";
+  showStatus("Transcribing audio... (this can take a minute)");
   try {
     await loadAudioFile(file);
   } finally {
@@ -425,7 +531,7 @@ audioInput.addEventListener("change", () => {
   if (!file) return;
   transcribeAudio(file).catch((err) => {
     console.error("Transcription failed:", err);
-    trackName.textContent = "Transcription failed.";
+    showStatus("Transcription failed.");
     alert(`Could not transcribe audio: ${err.message}`);
   });
   // Allow re-selecting the same file to retry.
@@ -502,7 +608,8 @@ async function exportVideo(): Promise<void> {
     return;
   }
 
-  const labelBeforeExport = trackName.textContent ?? "performance";
+  // Reuse the user's sheet name for the exported file (issue #44).
+  const exportLabel = sheetName || "performance";
   setBusyUI(true);
 
   let streamDest: MediaStreamAudioDestinationNode | null = null;
@@ -540,7 +647,7 @@ async function exportVideo(): Promise<void> {
     const transport = Tone.getTransport();
     transport.start();
     setPlaying(true);
-    trackName.textContent = "Recording video...";
+    showStatus("Recording video...");
 
     // Wait until playback reaches the end. The rAF loop calls rewind() at the end of the
     // score, which stops the transport; we detect that here and finalize the recording.
@@ -561,14 +668,14 @@ async function exportVideo(): Promise<void> {
     await recorderStopped;
 
     const blob = new Blob(chunks, { type: format.mimeType });
-    downloadBlob(blob, buildExportFilename(labelBeforeExport, format.extension));
+    downloadBlob(blob, buildExportFilename(exportLabel, format.extension));
   } catch (err) {
     console.error("Video export failed:", err);
     alert(`Video export failed: ${(err as Error).message}`);
   } finally {
     if (streamDest) Tone.getDestination().disconnect(streamDest);
     canvasStream?.getTracks().forEach((t) => t.stop());
-    trackName.textContent = labelBeforeExport;
+    restoreSheetName();
     setBusyUI(false);
     playBtn.disabled = !score;
     exportBtn.disabled = !score;
@@ -650,6 +757,21 @@ muteLeftBtn.addEventListener("click", () => {
   reflectHandMute(muteLeftBtn, handMuted.left);
   visualizer.setMutedHands(handMuted);
 });
+
+// Inline sheet rename (issue #44): the name button opens the edit field; Enter commits,
+// Escape cancels, and blur commits (so clicking away keeps the typed name). Editing is only
+// reachable once a score is loaded (the button is hidden before that).
+sheetNameBtn.addEventListener("click", () => enterNameEdit());
+sheetNameInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    commitNameEdit();
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    cancelNameEdit();
+  }
+});
+sheetNameInput.addEventListener("blur", () => commitNameEdit());
 
 namesBtn.addEventListener("click", () => {
   labelMode = NAME_CYCLE[labelMode];

@@ -3,6 +3,35 @@
 UX, visual design, interaction decisions. Append durable learnings at the top of the
 relevant section, dated.
 
+## Editable sheet name (issue #44)
+
+- **2026-05-30 - SHIPPED: inline click-to-edit sheet title in the right-trailing toolbar slot.**
+  Chose click-to-edit on the name itself over a separate "Rename" button (the issue left the
+  call to the Designer). Rationale: lowest friction, no extra toolbar control (the #46 spec and
+  the #48 Heroicons heads-up both want the bar minimal), and it slots into the existing
+  `#track-name` flexible right slot the #46 redesign explicitly reserved for #44. The name reads
+  as quiet muted text (not a loud button) with a dashed-underline + trailing pencil glyph
+  (`\270E`) that appears on hover, so the affordance is discoverable without shouting.
+  - **Interaction:** the name is a real `<button id="sheet-name">` (keyboard/AT operable,
+    `aria-label="Sheet name, click to rename"`). Click/Enter opens an inline `<input
+    id="sheet-name-input" maxlength="80">` seeded with the current name and text-selected.
+    **Enter or blur commits** (clicking away keeps the typed name, the forgiving default),
+    **Escape cancels**. An empty submission reverts to the current name (a rename can never blank
+    the title). The note count moved out of the name into its own muted `#sheet-note-count`
+    span so editing the title does not fight the "(N notes)" suffix.
+  - **Default name:** MusicXML title (`osmd.Sheet.TitleString`) when present, else the file name
+    with its extension stripped, else "Untitled sheet". Persisted for the session in a module
+    variable; survives status messages (scan/transcribe/record/error) which now live in a
+    separate `#track-status` span and restore the name afterward. The chosen name also drives
+    the exported video filename (#15) and the document `<title>`, satisfying the issue's "reuse
+    the title for export" note.
+  - **Mobile:** the whole `#track-name` slot is still hidden at <=720px by the #33 rule, so the
+    rename is desktop-only for v1. Accepted: the phone toolbar is space-constrained and renaming
+    is not a core phone action. Revisit if mobile rename is requested.
+  - **Cross-session persistence is OUT of scope** (the issue says "and across reloads if/when we
+    have persistence"); there is no score-persistence layer yet, so the name lives for the
+    session only. Wire it into that layer when it lands.
+
 ## Sharp / flat (accidental) visualization review (issue #40)
 
 - **2026-05-30 - Review/spike: how accidentals are labeled and positioned today, plus a
