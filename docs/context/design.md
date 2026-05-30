@@ -251,7 +251,6 @@ relevant section, dated.
      #1; once spelling is threaded through, solfege mode needs flat tokens, not just the current
      always-sharp `SOLFEGE_CLASSES`. Captured so the solfege side of the flats work is not forgotten.
 
-<<<<<<< HEAD
 ## Heroicons across the toolbar/transport (issue #48)
 
 - **2026-05-30 - Adopted Heroicons (MIT) as the toolbar/transport icon language.** Follow-up to
@@ -303,7 +302,7 @@ relevant section, dated.
   the solid Play triangle on the violet hero), the 11 new markup guards, and `npm run build`
   green. The 720px breakpoint and the live play<->pause icon swap remain for the post-merge QA
   gate.
-=======
+
 ## Note-name labeling: falling bars + keyboard keys (issues #42, #43)
 
 - **2026-05-30 - One unified labeling model shipped for both the falling-note names and the
@@ -344,7 +343,6 @@ relevant section, dated.
   off-window dimming, #54 muted-hand ghosting, #36 hand stripe, and #27 contact glow are all
   untouched: the dedupe only chooses WHICH bars try to label, and the key gate only chooses WHICH
   keys show a name; legibility, dimming, and color rules are unchanged.
->>>>>>> 898cd45 (fix: unified note-name labeling across hands + approaching keys (#42, #43))
 
 ## Toolbar redesign v2 (issue #46)
 
