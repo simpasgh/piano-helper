@@ -389,8 +389,8 @@ button:disabled {
 }
 
 /* "Rotate to landscape" hint (issue #33): a non-blocking pill shown only on a narrow
-   portrait phone. It never intercepts touches and fades out on its own; main.ts also
-   removes it on the first orientation change. */
+   portrait phone. It never intercepts touches, fades out on its own after 4s, and the
+   orientation media query below hides it once the phone is in landscape. CSS only. */
 #rotate-hint {
   position: fixed;
   left: 50%;
