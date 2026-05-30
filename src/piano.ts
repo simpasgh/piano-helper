@@ -166,6 +166,94 @@ export function fitBarLabel(
   return { show: true, fontSize: size };
 }
 
+// --- Unified note-name labeling (issues #42, #43): one consistent model for both the
+// falling-note names and the keyboard key names, shared across hands. ---
+
+// A note as seen by the labeling helpers: just its identity and timing. Both the
+// falling-bar labeling (#42) and the approaching-key labeling (#43) decide off this
+// shape, so the two label sets are derived from one source and stay consistent.
+export interface LabelNote {
+  midi: number;
+  time: number;
+  duration: number;
+  hand?: Hand;
+}
+
+// Tiny epsilon so notes that share an onset (a chord) or sit a hair apart still group
+// as one run / one chord. Seconds.
+const LABEL_TIME_EPSILON = 1e-3;
+
+// Decides, per note, whether its falling bar should carry a name (issue #42). The rule
+// is identity-based and HAND-AGNOSTIC, which fixes the bug where right-hand (short, quick
+// melody) notes were silently dropped by the height-derived fit while left-hand (longer,
+// sustained) notes were always labeled: that per-hand difference was an emergent artifact
+// of bar height, not an intentional rule. Here both hands obey the same rule.
+//
+// Rule: label the FIRST note of every run of consecutive same-pitch notes, and re-label
+// only when the pitch changes. A run is consecutive same-`midi` notes within the same
+// hand lane, ordered by time; the second, third, ... repeat of a pitch is left unlabeled
+// so a repeated "Do Do Do" reads as one clear name instead of a noisy stack. Notes of a
+// different pitch (or the same pitch in the other hand's lane) each start their own run.
+//
+// Returns a boolean per input note, index-aligned to `notes` AS GIVEN (the caller keeps
+// its own order; we do not reorder the caller's array). Pure and DOM-free for unit tests.
+export function labelableFallingNotes(notes: readonly LabelNote[]): boolean[] {
+  // Track the last labeled pitch per hand lane independently, so the left and right
+  // melodic lines each dedupe within themselves and never suppress each other.
+  const lastMidiByLane = new Map<string, number>();
+  // Sort indices by time so "consecutive" means consecutive in playback, not array order;
+  // map the decision back onto the original indices.
+  const order = notes
+    .map((n, i) => ({ n, i }))
+    .sort((a, b) => a.n.time - b.n.time || a.i - b.i);
+
+  const result = new Array<boolean>(notes.length).fill(false);
+  for (const { n, i } of order) {
+    const lane = n.hand ?? "unknown";
+    const prev = lastMidiByLane.get(lane);
+    // First note in the lane, or a pitch change from the previous note in this lane,
+    // gets the label; an immediate repeat of the same pitch does not.
+    const isRunStart = prev === undefined || prev !== n.midi;
+    result[i] = isRunStart;
+    lastMidiByLane.set(lane, n.midi);
+  }
+  return result;
+}
+
+// The look-ahead window (seconds) for which keyboard keys get a name (issue #43). Set
+// equal to the falling-note visible window so a key shows its name exactly while its note
+// is visible falling toward it: the keyboard label set is "keys whose note you can see
+// coming", which is the cleanest, least-surprising rule and keeps the two label systems
+// (falling bars and keys) in lockstep. Kept here so the visualizer's LOOK_AHEAD and this
+// stay a single shared number.
+export const KEY_LABEL_LOOK_AHEAD = 4;
+
+// The set of midi notes whose key should be labeled right now (issue #43): only keys with
+// a falling note approaching within the look-ahead window, plus any note currently
+// sounding. Replaces "label every key" with "label the keys that matter right now". When
+// nothing is approaching the set is empty (no key labels); a chord puts every chord pitch
+// in the set, so chords stay fully labeled.
+//
+// A note counts as approaching/active when `currentTime` is within
+// `[note.time - lookAhead, note.time + note.duration]`: it has entered the visible window
+// above the keyboard (start) and has not yet finished sounding (end). Pure and DOM-free.
+export function approachingKeyMidis(
+  notes: readonly LabelNote[],
+  currentTime: number,
+  lookAhead: number = KEY_LABEL_LOOK_AHEAD,
+): Set<number> {
+  const midis = new Set<number>();
+  for (const n of notes) {
+    if (
+      currentTime >= n.time - lookAhead - LABEL_TIME_EPSILON &&
+      currentTime <= n.time + n.duration + LABEL_TIME_EPSILON
+    ) {
+      midis.add(n.midi);
+    }
+  }
+  return midis;
+}
+
 // --- Color (issue #12): pitch-class hue wheel, purple-anchored. ---
 
 // Pitch class 0..11 (C..B), handling negative midi defensively.

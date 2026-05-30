@@ -1,13 +1,16 @@
 import {
+  approachingKeyMidis,
   buildKeyLayout,
   fitBarLabel,
   isBlackKey,
   isHandMuted,
+  labelableFallingNotes,
   midiToLabel,
   midiToBarLabel,
   noteBarWidth,
   noteColor,
   FIRST_MIDI,
+  KEY_LABEL_LOOK_AHEAD,
   LAST_MIDI,
   type KeyGeometry,
   type LabelMode,
@@ -23,7 +26,9 @@ export interface VisNote {
 
 const MAX_KEYBOARD_HEIGHT = 140;
 const MIN_KEYBOARD_HEIGHT = 96;
-const LOOK_AHEAD = 4; // seconds of notes visible above the keyboard
+// Seconds of notes visible above the keyboard. Shared with the keyboard-label window
+// (issue #43) so a key shows its name exactly while its falling bar is visible.
+const LOOK_AHEAD = KEY_LABEL_LOOK_AHEAD;
 
 // Below this keyboard height the per-key face labels crowd, so they are suppressed
 // (the falling-bar names still show). Matches the issue #11 legibility-floor rule.
@@ -37,6 +42,10 @@ export class Visualizer {
   private lastVisibleMidi = LAST_MIDI;
   private keyboardHeight = MAX_KEYBOARD_HEIGHT;
   private notes: VisNote[] = [];
+  // Per-note flag: whether this note's falling bar should carry a name (issue #42).
+  // Precomputed in setNotes (index-aligned to `notes`) so the rAF loop only does a lookup,
+  // and so the run-dedupe / per-hand-consistency decision is made once, not every frame.
+  private labelableNote: boolean[] = [];
   private mutedHands = { left: false, right: false };
   private width = 0;
   private height = 0;
@@ -55,6 +64,10 @@ export class Visualizer {
 
   setNotes(notes: VisNote[]): void {
     this.notes = notes;
+    // Decide once which bars carry a name: label the first of every repeated same-pitch
+    // run, per hand lane, so both hands obey one rule (issue #42). The fit check (#39)
+    // still applies per frame as a legibility guard.
+    this.labelableNote = labelableFallingNotes(notes);
   }
 
   // Which hands are muted (issue #54). A muted hand's falling notes are ghosted so the
@@ -126,9 +139,13 @@ export class Visualizer {
     const keyboardTop = this.keyboardTop();
     const pps = (height - this.keyboardHeight) / LOOK_AHEAD; // pixels per second
     const active = this.activeMidis(currentTime);
+    // Keys to label this frame (issue #43): only those whose note is approaching within
+    // the look-ahead window or currently sounding, so the keyboard shows just the names
+    // that matter right now instead of every key.
+    const approaching = approachingKeyMidis(this.notes, currentTime, LOOK_AHEAD);
 
     this.drawFallingNotes(currentTime, keyboardTop, pps, active);
-    this.drawKeyboard(keyboardTop, active);
+    this.drawKeyboard(keyboardTop, active, approaching);
   }
 
   private drawFallingNotes(
@@ -150,7 +167,8 @@ export class Visualizer {
       alpha: number;
     }[] = [];
 
-    for (const note of this.notes) {
+    for (let i = 0; i < this.notes.length; i++) {
+      const note = this.notes[i];
       const delta = note.time - currentTime;
       if (delta > LOOK_AHEAD || delta + note.duration < 0) continue; // off-screen
 
@@ -240,7 +258,10 @@ export class Visualizer {
         ctx.globalAlpha = 1;
       }
 
-      if (this.labelMode !== "off") {
+      // Label only the first bar of a repeated same-pitch run, per hand (issue #42), so
+      // both hands obey one rule and a "Do Do Do" run reads as one clear name. The fit
+      // check below is still the per-frame legibility guard (issue #39).
+      if (this.labelMode !== "off" && this.labelableNote[i] !== false) {
         // The name must always FIT the bar (issue #39): scale the font to the bar size
         // and only label when a legible name fits within both the width and the height.
         // No forced label on tiny bars (that produced the detached/oversized-pill look);
@@ -284,7 +305,11 @@ export class Visualizer {
     }
   }
 
-  private drawKeyboard(top: number, active: Set<number>): void {
+  private drawKeyboard(
+    top: number,
+    active: Set<number>,
+    approaching: Set<number>,
+  ): void {
     const { ctx, width } = this;
 
     // Dim resting glow strip along the top edge of the keyboard (one gradient
@@ -318,17 +343,25 @@ export class Visualizer {
       ctx.fillRect(key.x, top, key.width, kbH * 0.62);
     }
 
-    this.drawKeyLabels(top, active);
+    this.drawKeyLabels(top, active, approaching);
   }
 
-  // White-key pitch-class labels (no octave). Never shrinks below 11px, and
-  // skips all-or-nothing: if the widest label for this mode plus a small gutter
-  // won't fit a white key, draw no key-face labels this pass (uniform > ragged).
-  private drawKeyLabels(top: number, active: Set<number>): void {
+  // White-key pitch-class labels (no octave). Only labels keys with an approaching or
+  // sounding note (issue #43), so the keyboard shows the names that matter right now, not
+  // every key. Never shrinks below 11px, and the width check is all-or-nothing: if the
+  // widest possible label plus a small gutter would not fit a white key, draw no key-face
+  // labels this pass (uniform > ragged).
+  private drawKeyLabels(
+    top: number,
+    active: Set<number>,
+    approaching: Set<number>,
+  ): void {
     if (this.labelMode === "off") return;
     // Below the legibility floor the keybed is too short to seat readable glyphs, so
     // skip key-face labels entirely on small screens (the falling-bar names remain).
     if (this.keyboardHeight < KEY_LABEL_MIN_HEIGHT) return;
+    // Nothing approaching -> no key labels at all (issue #43).
+    if (approaching.size === 0) return;
     const { ctx } = this;
     const whiteWidth = this.keys.find((k) => !k.black)?.width ?? 0;
     if (whiteWidth <= 0) return;
@@ -339,6 +372,9 @@ export class Visualizer {
     ctx.shadowBlur = 0;
 
     const GUTTER = 4; // px of breathing room each side so glyphs do not touch key edges
+    // Measure the widest label across the whole mode (not just approaching keys) so the
+    // fit decision is stable frame-to-frame as the approaching set changes; a key that
+    // would not fit at 11px never gets a name regardless of which subset is showing.
     let widest = 0;
     for (const key of this.keys) {
       if (key.black) continue;
@@ -349,6 +385,11 @@ export class Visualizer {
     const baseline = top + this.keyboardHeight - 10;
     for (const key of this.keys) {
       if (key.black) continue;
+      // Only label a key whose own note is approaching or sounding right now. The
+      // approaching set keys off each note's true midi, so a note clamped to an off-window
+      // edge column (issue #33) does not falsely label the edge key; that key labels only
+      // when it has its own approaching note.
+      if (!approaching.has(key.midi)) continue;
       ctx.fillStyle = active.has(key.midi) ? "#1a0f2b" : "#5b4a72";
       ctx.fillText(midiToLabel(key.midi, this.labelMode), key.x + key.width / 2, baseline);
     }

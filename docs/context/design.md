@@ -251,6 +251,7 @@ relevant section, dated.
      #1; once spelling is threaded through, solfege mode needs flat tokens, not just the current
      always-sharp `SOLFEGE_CLASSES`. Captured so the solfege side of the flats work is not forgotten.
 
+<<<<<<< HEAD
 ## Heroicons across the toolbar/transport (issue #48)
 
 - **2026-05-30 - Adopted Heroicons (MIT) as the toolbar/transport icon language.** Follow-up to
@@ -302,6 +303,48 @@ relevant section, dated.
   the solid Play triangle on the violet hero), the 11 new markup guards, and `npm run build`
   green. The 720px breakpoint and the live play<->pause icon swap remain for the post-merge QA
   gate.
+=======
+## Note-name labeling: falling bars + keyboard keys (issues #42, #43)
+
+- **2026-05-30 - One unified labeling model shipped for both the falling-note names and the
+  keyboard key names.** Two related tickets, one branch (`fix/note-name-labeling`), because they
+  share the same "what gets a name, when" question and would have conflicted if split.
+
+  **#42 root cause (the per-hand inconsistency was a BUG, not a rule).** Left-hand notes appeared
+  to label every note while right-hand notes only labeled the leading one. There was never a
+  per-hand code path: the falling-bar label gate is purely `fitBarLabel(width, height, chars)` and
+  the font size derives from bar HEIGHT (`duration * pps`). Right-hand (treble) melody notes are
+  typically short/quick, so their small bars fell below the legibility floor and the name was
+  omitted; left-hand (bass) notes are typically longer/sustained, so their taller bars always
+  cleared it. The hand correlation was incidental (duration-correlated), not intentional. Fix:
+  make the label decision IDENTITY-based and hand-agnostic, so both hands obey one rule and the
+  fit check stays only as a legibility guard.
+
+  **#42 repeated-run rule (decided as Designer):** label the FIRST note of every run of
+  consecutive same-pitch notes, and re-label only when the pitch changes. A run is consecutive
+  same-`midi` notes within the same HAND lane (left/right/unknown dedupe independently, so a
+  shared pitch in both hands is labeled once per hand, never suppressed across hands). A "Do Do
+  Do" run now reads as one clear name instead of a noisy stack. The decision is over playback
+  time, not array order, so an out-of-order notes array still labels the time-first note of a run.
+
+  **#43 approaching-key rule (decided as PM look-ahead window):** stop labeling every keyboard
+  key. Only label a white key whose note is approaching within the look-ahead window OR currently
+  sounding. The window is set EQUAL to the falling-note visible lane (`LOOK_AHEAD` = 4s, shared as
+  `KEY_LABEL_LOOK_AHEAD`), so a key shows its name exactly while its falling bar is visible coming
+  down the lane: the cleanest, least-surprising mental model and it keeps the two label systems in
+  lockstep. A note counts from `time - lookAhead` (entered the top of the lane) through
+  `time + duration` (finished sounding). When nothing is approaching, NO key labels (clean
+  keyboard). A chord puts every chord pitch in the window, so chords stay fully labeled. Black-key
+  (sharp) faces remain unlabeled (too narrow), unchanged from before.
+
+  **How the two systems avoid double-labeling / losing the name.** The falling bar carries the
+  name as it descends (deduped per run); the key carries the name only while that note is in the
+  window. They share `LOOK_AHEAD`, so the key's name appears at the same moment the bar becomes
+  visible and clears when the note finishes, never both fighting nor both blank. The #39 fit, #33
+  off-window dimming, #54 muted-hand ghosting, #36 hand stripe, and #27 contact glow are all
+  untouched: the dedupe only chooses WHICH bars try to label, and the key gate only chooses WHICH
+  keys show a name; legibility, dimming, and color rules are unchanged.
+>>>>>>> 898cd45 (fix: unified note-name labeling across hands + approaching keys (#42, #43))
 
 ## Toolbar redesign v2 (issue #46)
 

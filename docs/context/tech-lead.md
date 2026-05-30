@@ -30,6 +30,56 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-30 - Unified note-name labeling SHIPPED (#42 + #43): two pure helpers in `piano.ts`,
+  one shared look-ahead, both label systems derive from one model.** One branch
+  (`fix/note-name-labeling`), one PR, because the falling-bar names and the keyboard-key names are
+  the same "what gets a name, when" question and would conflict if split. No new deps.
+  - **#42 root cause (recorded so nobody re-chases it):** the apparent "left hand labels every
+    note, right hand only the leading note" was NOT a per-hand code path. The falling-bar label
+    gate is purely `fitBarLabel(w, barHeight, chars)` and font size derives from bar HEIGHT
+    (`duration * pps`). Right-hand (treble) notes are usually short -> small bar -> name omitted by
+    the #39 floor; left-hand (bass) notes are usually long/sustained -> tall bar -> always labeled.
+    Hand correlation was incidental (duration-correlated), not intended. Fix = make the decision
+    identity-based + hand-agnostic; `fitBarLabel` stays only as a per-frame legibility guard.
+  - **Helper 1: `labelableFallingNotes(notes): boolean[]`** (pure, index-aligned to the input
+    array). Labels the FIRST note of each run of consecutive same-`midi` notes per HAND lane
+    (left/right/unknown dedupe independently via a `Map<lane, lastMidi>`), re-labels on a pitch
+    change. Sorts indices BY TIME internally (so "consecutive" means consecutive in playback) then
+    maps the decision back to original indices, so an out-of-time-order `notes` array still labels
+    the time-first note of a run. `extractScore` emits notes in chronological order and
+    `transcribe` sorts by time, so in practice array order == time order, but the helper does not
+    rely on it.
+  - **Helper 2: `approachingKeyMidis(notes, currentTime, lookAhead = KEY_LABEL_LOOK_AHEAD): Set<number>`**
+    (pure). Returns the midis whose key should be labeled now: any note with
+    `currentTime in [time - lookAhead - eps, time + duration + eps]` (entered the top of the visible
+    lane through end of sounding). Empty set when nothing is approaching. `KEY_LABEL_LOOK_AHEAD = 4`
+    is exported and the visualizer's `LOOK_AHEAD` now ALIASES it, so the keyboard-label window and
+    the falling-note visible window can never drift apart (a key shows its name exactly while its
+    bar is visible).
+  - **Visualizer wiring (`src/visualizer.ts`):** `setNotes` precomputes `labelableNote: boolean[]`
+    once (not per frame). The falling-note loop switched to an index loop and gates the label block
+    on `this.labelableNote[i] !== false` (the `!== false` is a deliberate safe default if the array
+    were ever short). `render` computes `approaching = approachingKeyMidis(...)` once per frame
+    (O(n), same budget as the existing `activeMidis`) and threads it through `drawKeyboard` ->
+    `drawKeyLabels`, which now `continue`s past any white key not in the approaching set and
+    early-returns when the set is empty (saving the measureText fit loop in quiet moments). Black
+    keys stay unlabeled as before. The #39 fit, #33 off-window dim, #54 muted ghosting, #36 stripe,
+    #27 contact glow are all untouched.
+  - **Tests: 14 new in `src/piano.test.ts`** (`labelableFallingNotes` 7, `approachingKeyMidis` 7):
+    repeated-run dedupe, re-label on pitch change, BOTH-HANDS-CONSISTENCY (identical left vs right
+    runs label identically), per-hand independent dedupe, time-order-not-array-order, unknown lane,
+    empty; and for keys: nothing-in-window -> empty, enters/leaves window boundary, sounding note
+    stays until release, full chord labeled, custom window, default == 4 == lane. Canvas paint stays
+    untested (the decision is fully in the two pure helpers). Full suite 165 green, `npm run build`
+    green.
+  - **Code review (self, tech-lead, high effort):** no findings. Verified no broken call sites
+    (helpers are new exports; `drawKeyboard`/`drawKeyLabels` are private), the dedupe lands on the
+    time-first run note, and the muted/ghost + off-window-clamp interactions are unchanged.
+  - **Verification caveat: could NOT verify the UI live from this agent worktree** (the preview MCP
+    server is bound to a different worktree, same limit as #36/#37/#38/#39). Covered by the 14 unit
+    tests + build + code reasoning. This is exactly the label-on-screen class that has shipped
+    broken-but-green before, so the post-merge live QA gate on `main` is required.
+
 - **2026-05-30 - Editable sheet name SHIPPED (#44): pure naming logic + inline toolbar edit.**
   The user can rename the loaded piece inline in the right-trailing `#track-name` toolbar slot.
   - **Pure module `src/sheet-name.ts` (16 unit tests):** `deriveDefaultSheetName(fileName,
