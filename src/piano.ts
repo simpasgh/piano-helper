@@ -78,6 +78,24 @@ export function handFromStaffIndex(index: number, staffCount: number): Hand {
   return index === 0 ? "right" : "left";
 }
 
+// Decides a note's hand from its staff (issue #36 follow-up). The clef is the primary
+// signal and is what makes this work regardless of how the file packages the piano: a
+// grand staff is sometimes ONE instrument with two staves and sometimes TWO separate
+// single-staff parts (music21 fragments export the latter, and keying only off staff
+// COUNT then left every note "unknown", so the per-hand controls never appeared). Treble
+// => right, bass => left. Only when the clef carries no hand convention (C, percussion) do
+// we fall back to staff position, and that fallback needs a multi-staff instrument to be
+// meaningful; a lone staff with such a clef stays "unknown".
+export function handFromStaff(
+  clef: "treble" | "bass" | "other" | undefined,
+  staffIndexInInstrument: number,
+  staffCountInInstrument: number,
+): Hand {
+  const byClef = clef ? handFromClef(clef) : null;
+  if (byClef) return byClef;
+  return handFromStaffIndex(staffIndexInInstrument, staffCountInInstrument);
+}
+
 // Maps a staff's clef to a hand: treble clef = right hand, bass clef = left hand. This is
 // the primary hand signal because it reflects the music itself, not the staff's position in
 // the file. A MusicXML file may declare its staves bass-first (treble on the second staff);

@@ -9,6 +9,7 @@ import {
   midiToBarLabel,
   handFromStaffIndex,
   handFromClef,
+  handFromStaff,
   handFromPitch,
   HAND_SPLIT_MIDI,
   isHandMuted,
@@ -132,6 +133,34 @@ describe("handFromClef (clef is the primary hand signal, robust to staff order)"
 
   it("returns null for clefs with no hand convention so the caller can fall back", () => {
     expect(handFromClef("other")).toBeNull();
+  });
+});
+
+describe("handFromStaff (clef-first, works for grand staff AND two single-staff parts)", () => {
+  // The regression: a piano exported as two separate single-staff parts (each
+  // staffCount === 1) used to never be tagged, so the per-hand controls stayed hidden.
+  it("tags a treble single-staff part as right and a bass single-staff part as left", () => {
+    expect(handFromStaff("treble", 0, 1)).toBe("right");
+    expect(handFromStaff("bass", 0, 1)).toBe("left");
+  });
+
+  it("tags both staves of a one-instrument grand staff by clef, regardless of order", () => {
+    expect(handFromStaff("treble", 0, 2)).toBe("right");
+    expect(handFromStaff("bass", 1, 2)).toBe("left");
+    // Bass-first file: the bass clef on staff index 0 still resolves to the left hand.
+    expect(handFromStaff("bass", 0, 2)).toBe("left");
+    expect(handFromStaff("treble", 1, 2)).toBe("right");
+  });
+
+  it("falls back to staff position only when the clef carries no hand convention", () => {
+    expect(handFromStaff("other", 0, 2)).toBe("right");
+    expect(handFromStaff("other", 1, 2)).toBe("left");
+    expect(handFromStaff(undefined, 0, 2)).toBe("right");
+  });
+
+  it("leaves a lone hand-less staff unknown (nothing to split a single staff into)", () => {
+    expect(handFromStaff("other", 0, 1)).toBe("unknown");
+    expect(handFromStaff(undefined, -1, 1)).toBe("unknown");
   });
 });
 

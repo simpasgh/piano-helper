@@ -30,6 +30,22 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-30 - Hand tagging is now CLEF-first so the per-hand controls also appear when the piano is two separate single-staff parts (not just a one-instrument grand staff).**
+  Reported as "controls show on localhost but not in production". It was NOT a deploy gap: the prod
+  bundle matched `main` byte-for-byte (same hash). The two screenshots simply loaded DIFFERENT files,
+  a clean grand-staff `twohand` test vs a `Music21 Fragment`. Root cause: `extractScore` in `score.ts`
+  only tagged hands when ONE instrument had `staves.length >= 2`. A music21 fragment exports the piano
+  as TWO separate `<part>`s (treble part + bass part), each a single-staff instrument, so every note
+  fell through to `hand="unknown"`, `hasBothHands` was false, and `#hand-mutes` stayed hidden. Fix:
+  new pure `handFromStaff(clef, staffIndexInInstrument, staffCount)` in `piano.ts` that resolves hand
+  from the CLEF first (treble=>right, bass=>left), which works for both packagings, and only falls back
+  to staff position (multi-staff instrument) when the clef has no hand convention (C/percussion).
+  `score.ts` calls it for every note. Verified end to end in the browser: a two-single-staff-part file
+  now shows "Right hand / Left hand / Balance"; a single treble part keeps them hidden. Unit-tested via
+  `handFromStaff` (the OSMD-dependent `extractScore` itself stays untested, hence the pure helper).
+  **Gotcha that cost time:** the dev server on :5173 was a DIFFERENT worktree's process, so HMR never
+  reflected this branch's edit; ran this worktree's own `vite` on :5199 to verify the real code.
+
 - **2026-05-30 - Audio-derived scores now split into hands by PITCH so the per-hand controls are reachable (#70 follow-up, PR #80).**
   Symptom: the per-hand mute toggles and the Balance slider never appeared for audio imports. Root
   cause: `transcribeAudioFile` -> `noteEventsToVisNotes` left every note `hand="unknown"`, so
