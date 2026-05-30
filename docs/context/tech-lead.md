@@ -30,6 +30,29 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-30 - Sampled piano (issue #13): Tone.Sampler with Salamander Grand, lazy-loaded, synth fallback.**
+  Swapped the sound source only; no timing/scheduling change, so the sync invariant holds.
+  - **Sample set + license:** Salamander Grand Piano by Alexander Holm, **CC-BY 3.0** (free to use and
+    redistribute with attribution). Attribution + license noted in `src/sampler.ts` header.
+  - **Hosting:** stream mp3 buffers from the official, uncapped Tone.js sample CDN, base URL
+    `https://tonejs.github.io/audio/salamander/` (`SALAMANDER_BASE_URL`). No mp3s in the repo, no R2 for
+    audio. Satisfies free/uncapped + no-large-binaries constraints.
+  - **Sample map is pure + unit-tested:** `buildSalamanderSampleMap()` in `src/sampler.ts` returns the
+    Tone.Sampler `note->filename` map at ~one sample per minor third (A/C/D#/F# per octave). 30 entries:
+    `A0` only in octave 0, A/C/D#/F# in octaves 1..7, plus `C8` (the partial top octave only ships C8).
+    Sharps map to the CDN's "s" filename spelling (`"D#1" -> "Ds1.mp3"`, `"F#1" -> "Fs1.mp3"`); Tone keys
+    keep the `#`. Tests in `src/sampler.test.ts` (8). Tone.Sampler itself is not jsdom-testable, so only
+    the pure map is covered.
+  - **Lazy-load + fallback design (`src/main.ts`):** `startSamplerLoad()` runs at startup (background); it
+    only fetches buffers and does not need a running AudioContext, so it never blocks initial render or
+    Play. `getInstrument()` returns the sampler when `sampler.loaded` is true, else `ensureSynth()`. The
+    Tone.Part callback calls `getInstrument()` **at trigger time** (not captured at Part-build time), so
+    playback upgrades to the sampler the moment it finishes loading, even mid-session. On `onerror` (or a
+    constructor throw) the sampler is dropped and the synth is used permanently. Sampler volume -6 dB.
+  - **Loading UX:** a `#sound-status` span in the header (`.sound-status`, hidden when empty via
+    `:empty`) shows "Loading piano sound..." during load, clears on `onload`, and shows
+    "Using basic sound (piano samples unavailable)." on failure. Non-blocking and non-fatal.
+
 - **2026-05-30 - Visualizer colors (issue #12): pitch-class hue wheel, purple-anchored.**
   Color math lives in `src/piano.ts` next to the label helpers and is pure/unit-testable:
   `pitchClass(midi)` (normalizes negatives), `pitchHue(midi): number` returns

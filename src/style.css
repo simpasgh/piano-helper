@@ -85,6 +85,16 @@ button:disabled {
   opacity: 0.65;
 }
 
+.sound-status {
+  font-size: 0.8rem;
+  opacity: 0.55;
+  font-style: italic;
+}
+
+.sound-status:empty {
+  display: none;
+}
+
 #sheet {
   height: 42%;
   overflow-y: auto;
