@@ -137,6 +137,53 @@ relevant section, dated.
   - **Scope guard:** palette + bar glow recolor + active-key hue + one landing flash + bg
     gradient. No new note metadata, no libraries, no DOM/layout changes.
 
+## Contact glow + label move (issue #27)
+
+- **2026-05-30 — Replace the note-name "label box" on the contact point with a top-anchored
+  light label plus a glow-on-contact border.** Canvas-2D-ready spec for `drawFallingNotes`
+  / `drawLandingBloom` in `src/visualizer.ts`. No new deps, no DOM.
+
+  **1. Label moves from the bar BOTTOM (leading edge, where it lands) to just inside the bar
+  TOP (trailing edge).** New anchor: `y = top + 14`, still `x = x + w/2`, `textAlign center`,
+  `textBaseline alphabetic`. Rationale: the bottom is exactly where the eye watches for the
+  contact flash, so it must stay clear; the top rides with the note, sits inside the colored
+  fill for contrast, and never collides with the key-face labels or the active-key hue flip.
+  Putting the name "on the key" was rejected: short bars have no key to write on, and it
+  would fight `drawKeyLabels` and the active-key fill.
+
+  **2. Lighter label treatment (drop the "box" feel).** Was `700 12px` solid `#ffffff`. Now
+  `600 11px` at `rgba(255,255,255,0.82)`, keep the `rgba(0,0,0,0.5)` 2px text shadow for
+  legibility over L62% hues. Reads as a quiet annotation, not a stamped chip. Do not go below
+  11px (legibility floor).
+
+  **3. Visibility gate raised for the new anchor.** Was `w >= 16 && barHeight >= 18`. Now
+  `w >= 16 && barHeight >= 22` (the top-anchored glyph + inset needs ~22px before it would
+  crowd the freed contact point). Keep the `isActive` override so the sounding note is always
+  named even when narrow.
+
+  **4. Contact glow border (the "hit" cue).** A note is "in contact" when
+  `isActive && bottom >= keyboardTop - 10` (leading edge within a 10px band of the keybed,
+  AND sounding). After the bar `fill()`, re-walk the same rounded-rect path and `stroke()`
+  once: `lineWidth 2`, `strokeStyle = colors.glow` (per-pitch hue), `shadowColor = colors.glow`,
+  `shadowBlur 22`, `globalAlpha 0.9`, then reset. This is one extra stroke only on the small
+  "sounding-and-touching" set, within budget (same class as the bloom). The stroke sits just
+  outside the fill so it reads as a crisp neon outline igniting on the bar edge.
+
+  **5. Make the contact border DISTINCT from the existing active-fill.** Lower the active
+  bar's body `shadowBlur` from `26` to `20` so the brighter `activeFill` alone is the gentle
+  "this is playing" cue, and the stroked border becomes the separate "touching right now"
+  cue. Three tiers: falling (`shadowBlur 18`, no stroke); active above the keys (`activeFill`
+  + `shadowBlur 20`, no stroke); active at contact (`activeFill` + `20` body PLUS the `glow`
+  stroke with `shadowBlur 22`). Without lowering the active blur, a bar glowing hard high
+  above the keyboard would not let the hit read as its own event.
+
+  **6. Keep `drawLandingBloom` but dial it back so the effects do not double up.** Both the
+  bar stroke and the bloom now stack at the same x. Lower bloom `globalAlpha` 0.55 -> 0.4 and
+  `BLOOM_HEIGHT` 22 -> 16, keep `shadowBlur 16` and the per-pitch `colors.glow`. The stroked
+  border is the sharp signal; the bloom is the soft hue pool washing onto the keys (so the
+  KEY, not just the bar, still reads as lit). Removing the bloom entirely was rejected for
+  losing that key-lit sense.
+
 ## Layout
 
 - **2026-05-30 — Split view:** sheet music on top (~42% height, light panel, scrollable),
