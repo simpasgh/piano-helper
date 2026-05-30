@@ -15,7 +15,7 @@ const DEFAULT_MAX_ATTEMPTS = 300; // ~15 minutes at 3s
 
 // The runner writes this sentinel MusicXML to the result key when both engines
 // fail, so the browser stops polling. Detect it and surface a real error instead
-// of silently loading a near-empty score. Kept in sync with .github/workflows/omr.yml.
+// of silently loading a near-empty score. Kept in sync with omr-worker/worker.py.
 const FAILURE_SENTINEL_RE = /name="omr-status"\s*>\s*failed/;
 
 export function isFailureSentinel(xml: string): boolean {

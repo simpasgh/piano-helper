@@ -22,6 +22,32 @@ Accounts available:
 
 ## CI/CD
 
+- **2026-05-30 - OMR compute moved OFF GitHub Actions to an Oracle Always Free ARM VM (issue #5, PR #18).**
+  Reason: running OMR on Actions runners uses Actions as the app's runtime compute backend, which
+  breaks GitHub's Actions usage policy and risks account suspension. The "public repo = unlimited
+  minutes" point from the earlier spike does not make this allowed. `.github/workflows/omr.yml` was
+  DELETED. New backend: an always-on Python worker (`omr-worker/`, committed in the repo) on an
+  Oracle Cloud Always Free `VM.Standard.A1.Flex` (Ubuntu 22.04 ARM), run by systemd
+  (`omr-worker.service`, restart on failure). Cost stays $0: Oracle Always Free ARM (up to 4 OCPU /
+  24 GB) plus the existing free Cloudflare R2.
+  - **Trigger is now "VM polls R2 `uploads/*`"** (default every 5s, env `OMR_POLL_SECONDS`). There is
+    NO `repository_dispatch` and NO GitHub PAT anymore. The Pages Function `POST /api/omr` only
+    validates and writes the upload to R2 and returns 202 `{jobId}`; it notifies nobody.
+  - **R2 transport contract unchanged:** input `uploads/<jobId>`, output
+    `results/<jobId>.musicxml`, plus the failure-sentinel MusicXML when both engines fail. R2 bucket
+    is still `piano-helper-omr` with the `OMR_BUCKET` Pages binding.
+  - **Credential moves:** the four R2 S3 creds (`R2_S3_ENDPOINT`, `R2_ACCESS_KEY_ID`,
+    `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`) move from GitHub Actions secrets to VM env vars in a
+    root-owned `/etc/piano-helper-omr.env` (chmod 600), loaded by the systemd unit. The Pages
+    Function secret `GITHUB_DISPATCH_TOKEN` and var `GITHUB_REPOSITORY` are now UNUSED and should be
+    removed from the Pages project; the GitHub fine-grained PAT can be revoked.
+  - **Runbook** (provision Ubuntu ARM deps: `apt install poppler-utils python3 python3-venv`, venv +
+    `pip install -r requirements.txt`; set the four R2 env vars; install + enable the systemd unit)
+    lives in `omr-worker/README.md`, with a keep-alive note: Oracle reclaims Always Free VMs that sit
+    under ~20% CPU over a 7-day window, so a tiny periodic CPU nudge (cron) keeps the worker alive.
+  - The "OMR Actions workflow built" and "OMR trigger ... repository_dispatch" entries below are
+    SUPERSEDED by this one (kept for history).
+
 - **2026-05-30 - OMR Actions workflow built + R2 bucket `piano-helper-omr` created (issue #5).**
   Added `.github/workflows/omr.yml`: triggers ONLY on `repository_dispatch` (event_type
   `omr-job`, fired by the Pages Function) and manual `workflow_dispatch` (a `jobId` input
@@ -157,14 +183,21 @@ Repo **secrets**: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`.
 
 ### OMR (issue #5) setup status
 
+Architecture as of 2026-05-30 (PR #18): VM worker polls R2; no Actions, no PAT.
+
 - [x] R2 bucket `piano-helper-omr` created (`wrangler r2 bucket create`).
-- [x] `.github/workflows/omr.yml` added (dispatch-only, never runs on PR/push, so it
-      cannot break CI or turn `main` red before secrets exist).
+- [x] `.github/workflows/omr.yml` DELETED (OMR no longer runs on Actions; ToS reasons).
+- [x] VM worker committed at `omr-worker/` (`worker.py`, `omr-worker.service`,
+      `requirements.txt`, `README.md` runbook).
+- [ ] Provision the Oracle Always Free ARM VM (Ubuntu 22.04, `VM.Standard.A1.Flex`) and
+      install deps per `omr-worker/README.md`. (manual)
 - [ ] Mint R2 S3 API token (Object Read & Write, bucket `piano-helper-omr`). (manual)
-- [ ] Set Actions secrets `R2_S3_ENDPOINT`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`,
-      `R2_BUCKET=piano-helper-omr` (`gh secret set ...`). (needs the token above)
-- [ ] Mint GitHub fine-grained PAT (this repo, Actions read+write) for the Pages Function.
-- [ ] Bind on Pages project: R2 binding `OMR_BUCKET` -> `piano-helper-omr`, secret
-      `GITHUB_DISPATCH_TOKEN`, var `GITHUB_REPOSITORY=simpasgh/piano-helper`. (app + infra)
-- [ ] End-to-end smoke: upload to `uploads/<jobId>`, `gh workflow run omr.yml -f jobId=...`,
-      confirm `results/<jobId>.musicxml` lands.
+- [ ] On the VM, set the four R2 env vars in `/etc/piano-helper-omr.env` (chmod 600):
+      `R2_S3_ENDPOINT`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET=piano-helper-omr`.
+- [ ] Install + enable the systemd unit (`systemctl enable --now omr-worker.service`).
+- [ ] Add the idle keep-alive cron (Oracle reclaims idle Always Free VMs).
+- [ ] Bind on Pages project: R2 binding `OMR_BUCKET` -> `piano-helper-omr`. (app + infra)
+- [ ] Remove the now-unused Pages secret `GITHUB_DISPATCH_TOKEN` and var
+      `GITHUB_REPOSITORY`; revoke the GitHub fine-grained PAT.
+- [ ] End-to-end smoke: upload to `uploads/<jobId>` (UUID), confirm the worker writes
+      `results/<jobId>.musicxml` and deletes the upload.

@@ -30,6 +30,37 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-30 - OMR compute moved off GitHub Actions to an Oracle Always Free ARM VM (issue #5, PR #18).**
+  We reverted the Actions-runner design. Using GitHub Actions as the app's runtime compute backend
+  violates GitHub's Actions usage policy (it is for CI/CD on the repo, not as a free job server) and
+  risks account suspension, regardless of the public-repo "unlimited minutes" fact the earlier spike
+  leaned on. New backend: an always-on Python worker (`omr-worker/worker.py`) on an Oracle Cloud
+  Always Free `VM.Standard.A1.Flex` (Ubuntu 22.04 ARM), managed by systemd
+  (`omr-worker/omr-worker.service`, `Restart=always`). The R2 transport contract is UNCHANGED:
+  input `uploads/<jobId>`, output `results/<jobId>.musicxml`, same failure-sentinel MusicXML
+  (`<miscellaneous-field name="omr-status">failed</miscellaneous-field>`) that `src/omr.ts`
+  `FAILURE_SENTINEL_RE` matches. The browser contract is also unchanged (POST returns 202 `{jobId}`,
+  then poll `/api/omr/result`), so `src/omr.ts` and its tests did not need behavioral changes (they
+  mock fetch). **Trigger change:** there is no longer any push notification. The Pages Function
+  `POST /api/omr` (`functions/api/omr.ts`) now ONLY validates + writes to R2 and returns 202; all
+  `repository_dispatch` / GitHub-PAT code was removed, the 503 gate is now `!env.OMR_BUCKET` only,
+  and the 502 dispatch-failure path is gone. The worker discovers jobs by listing R2 `uploads/*`
+  every ~5s (env `OMR_POLL_SECONDS`), so no PAT, no webhook, no inbound port. Worker loop per job:
+  validate jobId is a UUID (path-safety, before any S3 key/filesystem use); skip if
+  `results/<jobId>.musicxml` already exists (idempotent); download; rasterize PDFs first page with
+  poppler `pdftoppm -r 300` (same as the old workflow); run oemer, fall back to homr; on both failing,
+  write the sentinel; upload the result, THEN delete `uploads/<jobId>` (delete-after-write so a crash
+  mid-job just retries). Per-job and per-cycle exceptions are caught so one bad upload never kills the
+  loop. Gotchas worth keeping: tsconfig `include: ["src"]`, so neither `functions/` nor `omr-worker/`
+  is typechecked by `tsc`, and Vitest globs `**/*.test.ts`; the Python worker is outside the JS
+  test/build entirely (verified with `python3 -m py_compile`). `.github/workflows/omr.yml` was deleted.
+  The `GITHUB_DISPATCH_TOKEN` Pages secret and `GITHUB_REPOSITORY` var are now unused and should be
+  removed from the Pages project. The four R2 S3 creds moved from Actions secrets to VM env vars
+  (`/etc/piano-helper-omr.env`, root-owned 600). See `omr-worker/README.md` for the runbook, including
+  an Oracle idle-reclamation keep-alive note (Oracle reclaims Always Free VMs under ~20% CPU over 7
+  days). The earlier "OMR runs in GitHub Actions" and "OMR trigger via repository_dispatch" entries
+  below are SUPERSEDED by this one.
+
 - **2026-05-30 - Note-name labels (issue #11): piano.ts produces strings, visualizer is presentation-only.**
   Two helpers sit next to `midiToName` in `src/piano.ts`: `midiToLabel(midi, mode)` returns the
   pitch-class token only (no octave) for both key faces and solfege, and `midiToBarLabel(midi, mode)`
