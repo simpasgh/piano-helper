@@ -30,6 +30,31 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-30 - Note-entry artifact FIXED (#38): removed `drawLandingBloom`, the only contact
+  element wider than the note.** The "rectangular layer wider than the note, sticking out on both
+  sides at the keyboard entry" was the per-active-key landing bloom in `src/visualizer.ts`
+  (`drawLandingBloom`), a rounded rect drawn at `key.x` with the FULL `key.width` just above the
+  keybed (`top - 16`). Falling white-note bars are only `key.width * 0.82` wide and centered, so the
+  bloom overhung ~9% of the key on each side: exactly the artifact. (Black-note bars fill their key
+  width, so the overhang was white-note-specific.) Removed the method and its call entirely. The #27
+  contact-glow stroke is now the sole per-note contact highlight, and it strokes the exact bar path
+  (`w` = bar width), so it can never exceed the note's width. NOT removed: the resting glow strip in
+  `drawKeyboard` is a full-keybed ambient gradient (`fillRect(0, top-30, width, 30)`), not a per-note
+  box, so it does not read as "a box wider than one note" and is untouched. Hand stripe (#36, inset in
+  the bar) and note-name labels are unaffected.
+  - **Reusable geometry helper added:** `noteBarWidth(keyWidth, black)` + `WHITE_BAR_WIDTH_RATIO`
+    (0.82) in `src/piano.ts`, so the bar-width math is named once instead of the inline
+    `key.width * (black ? 1 : 0.82)`. The visualizer now calls it. This is the invariant the bloom
+    broke (any keybed highlight must use the bar width, never the full key width). Regression coverage:
+    3 tests in `src/piano.test.ts` (white = 82%, black = full, and a loop asserting the bar width never
+    exceeds the key width so a centered highlight always has non-negative gutter on both sides). Canvas
+    paint itself stays untested; the geometry is the testable core.
+  - **Verification caveat:** the preview MCP server was bound to a DIFFERENT worktree (port 5173,
+    `gifted-fermi-...`) and `preview_start` reused it instead of launching one for this branch, so no
+    live in-browser visual pass was possible from the agent worktree. Verified instead by full suite
+    (139 green) + `npm run build` green + code reasoning that the only full-key-width draw at the entry
+    point was the removed bloom.
+
 - **2026-05-30 - Toolbar redesign v2 SHIPPED (#46): three-tier palette + SVG step icons.**
   Follow-up to #34, which fixed grouping/ghost-vs-filled but left the palette monochrome (all
   three loaders AND Play were the same filled violet gradient) and shipped broken step glyphs

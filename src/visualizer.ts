@@ -3,6 +3,7 @@ import {
   isBlackKey,
   midiToLabel,
   midiToBarLabel,
+  noteBarWidth,
   noteColor,
   FIRST_MIDI,
   LAST_MIDI,
@@ -154,7 +155,7 @@ export class Visualizer {
       const top = bottom - barHeight;
 
       const black = isBlackKey(note.midi);
-      const w = key.width * (black ? 1 : 0.82);
+      const w = noteBarWidth(key.width, black);
       const x = key.x + (key.width - w) / 2;
 
       // Per-pitch-class colors come from a precomputed table (no per-bar string
@@ -255,10 +256,6 @@ export class Visualizer {
     ctx.fillStyle = grad;
     ctx.fillRect(0, top - 30, width, 30);
 
-    // Per-active-key landing bloom: a short vertical glow in the note's own hue,
-    // just above the keyboard where bars land. At most "notes sounding" draws.
-    this.drawLandingBloom(top, active);
-
     const kbH = this.keyboardHeight;
     ctx.fillStyle = "#15101f";
     ctx.fillRect(0, top, width, kbH);
@@ -283,28 +280,6 @@ export class Visualizer {
     }
 
     this.drawKeyLabels(top, active);
-  }
-
-  // Vertical bloom above each sounding key, in that note's glow hue, sitting just
-  // above the keyboard top where bars land. Drawn before the keybed/keys so the
-  // glow reads behind the keys. Resets shadow state when done.
-  private drawLandingBloom(top: number, active: Set<number>): void {
-    if (active.size === 0) return;
-    const { ctx } = this;
-    const BLOOM_HEIGHT = 16;
-    ctx.globalAlpha = 0.4;
-    for (const midi of active) {
-      const key = this.keyByMidi.get(midi);
-      if (!key) continue;
-      const colors = noteColor(midi);
-      ctx.fillStyle = colors.glow;
-      ctx.shadowColor = colors.glow;
-      ctx.shadowBlur = 16;
-      this.roundRect(key.x, top - BLOOM_HEIGHT, key.width, BLOOM_HEIGHT, 4);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-    ctx.shadowBlur = 0;
   }
 
   // White-key pitch-class labels (no octave). Never shrinks below 11px, and

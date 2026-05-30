@@ -8,6 +8,7 @@ import {
   midiToLabel,
   midiToBarLabel,
   handFromStaffIndex,
+  noteBarWidth,
 } from "./piano";
 
 describe("isBlackKey", () => {
@@ -183,5 +184,29 @@ describe("midiToBarLabel", () => {
 
   it("returns an empty string in off mode", () => {
     expect(midiToBarLabel(60, "off")).toBe("");
+  });
+});
+
+describe("noteBarWidth", () => {
+  it("insets a white-note bar to 82% of its key so a gutter frames the lane", () => {
+    expect(noteBarWidth(20, false)).toBeCloseTo(16.4);
+  });
+
+  it("lets a black-note bar fill its (already narrow) key width", () => {
+    expect(noteBarWidth(12, true)).toBe(12);
+  });
+
+  it("never exceeds the key width, so a centered contact highlight cannot stick out past the note (issue #38)", () => {
+    for (const keyWidth of [8, 13, 20, 33]) {
+      for (const black of [false, true]) {
+        const w = noteBarWidth(keyWidth, black);
+        expect(w).toBeGreaterThan(0);
+        expect(w).toBeLessThanOrEqual(keyWidth);
+        // A highlight of width `w` centered in the key has equal gutter on both
+        // sides, so it is contained within the key and never wider than the note.
+        const gutter = (keyWidth - w) / 2;
+        expect(gutter).toBeGreaterThanOrEqual(0);
+      }
+    }
   });
 });
