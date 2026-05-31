@@ -19,6 +19,54 @@ performance on an animated piano, with the score highlighted in sync. Make the f
 
 ## Decisions
 
+### 2026-05-31 - OMR backlog reconciliation against the Clarity-OMR migration (#135/#142)
+
+The PDF recognition engine changed: Clarity-OMR is now PRIMARY for PDFs (reads the PDF directly via
+pymupdf + YOLO, tie-aware, 145 notes on icarus vs oemer's 109/128, two stdlib post-transforms
+merge_to_grand_staff + normalize_ties). oemer/homr survive ONLY as a fallback and for PNG/JPEG
+uploads. Reviewed the 7 open OMR tickets against this; verdicts (orchestrator to apply via gh):
+
+- **#112 (DPI sweep) -> CLOSE as obsolete.** The whole ticket is about tuning pdftoppm DPI feeding
+  oemer. Clarity reads the PDF directly and does NOT rasterize on the PDF path, so the sweep no longer
+  governs PDF recall. DPI only matters for the PNG/JPEG fallback path now, which is not where the
+  fidelity complaints came from. Done as a primary-path lever.
+- **#88 (raise raw OMR fidelity, engine selection) -> CLOSE as obsolete.** This spike's central
+  question, "engine selection ... whether running both and picking the better MusicXML is feasible,"
+  has been ANSWERED and ACTED on: we evaluated Audiveris, olimpic/Zeus, and Clarity, and shipped
+  Clarity as primary. The spike's premise (oemer/homr config + preprocessing + which engine) is spent.
+  Remaining fidelity gains are either engine-internal Clarity tuning (full-beam/DPI, an engine-side
+  question per #135) or handled by the correction UI. File any future engine-tuning as a fresh,
+  Clarity-specific ticket rather than reopening this oemer-era umbrella.
+- **#130 (evidence-based tie-arc raster post-pass) -> CLOSE as wontfix.** The ticket explicitly
+  self-conditions: "If the new engine captures ties cleanly on real scores, this may be unnecessary,
+  close as wontfix." Clarity now emits ties natively and recovered the icarus RH E6 cross-barline tie
+  end to end. The spike's raster detector was oemer-geometry-specific (notehead_extraction.extract,
+  staff_pred) at 1/9 precision; it is moot against a tie-aware engine. The ONE residual gap (terminal
+  dangling LH tie on the final measure) is an engine-side pairing/DPI question, not a raster post-pass.
+- **#118 (close honest recall gaps without fabricating) -> RE-SCOPE.** Still valid (recall is never
+  "done" and fabrication-safety is permanent), but the body is oemer-era. Stale claims to fix: (1)
+  "oemer+homr worker" -> now "Clarity-OMR primary for PDFs (oemer/homr fallback + image path)"; (2)
+  "~109-128 range depending on DPI" -> "Clarity ~145 notes on icarus; the per-DPI numbers were the
+  oemer path and are stale for PDFs"; (3) "only 4 of 27 bars retained a triad" -> re-measure on
+  Clarity output (not yet quantified per-bar). Candidate levers also drift: drop the DPI-sweep (#112)
+  and stronger-engine (#88) levers (both resolved by the migration); the remaining honest lever is the
+  correction UI (#6/#105). Keep the no-fabrication acceptance and the fidelity-on-icarus-by-eye gate.
+- **#113 (complete LH chords post-pass) -> CLOSE as wontfix.** Already attempted in #114 and REVERTED
+  in #116 as fabrication (pattern-stamped a guessed harmony, invented Fa# across natural triads). The
+  approach is forbidden by the no-fabrication rule regardless of engine, AND Clarity's higher recall
+  (145 vs 109) recovers more LH tones for free, so the premise ("LH triads 4 -> >=10 via post-pass")
+  is both unsafe and partly obsolete. Genuine remaining LH gaps go through the correction UI.
+- **#105 (correction UI #6a: pitch nudge + delete) -> KEEP as-is.** Engine-agnostic UI work on the
+  in-memory score.notes array. The Clarity migration does not touch it; if anything it raises its
+  value as the one honest fidelity escape hatch.
+- **#6 (correction UI epic) -> KEEP as-is.** Engine-agnostic parent epic, now the active feature. The
+  migration reinforces it: native ties reduce one error class, but octave/chord/recall errors remain,
+  so a human-in-the-loop review step is still the linchpin (per the phased roadmap).
+
+Net: 4 closes (#112, #88, #130, #113), 1 re-scope (#118), 2 keep (#105, #6). The Clarity migration
+retired the oemer-era preprocessing/engine-selection/post-pass cluster; the durable backlog is now
+the correction UI line plus a fresh Clarity-specific tuning ticket if/when needed.
+
 ### 2026-05-31 - Monetization model: launch FREE, gate on conversion volume, add a one-time Pro unlock later (NOT a subscription at launch)
 
 - **Chosen model: free product with a hard daily/monthly conversion cap, plus a future one-time

@@ -75,6 +75,24 @@ visibly broken. To close that gap, **every user-visible change gets a live QA pa
 
 A change is only "done" once it has cleared this gate, not when CI goes green.
 
+## Post-release backlog reconciliation (mandatory)
+
+A shipped change can quietly invalidate tickets still sitting in the backlog: it may
+resolve them, make their premise obsolete, or leave their description citing numbers,
+engines, or behavior that no longer hold. Stale tickets waste a future session's time and
+can send it down a dead path. So **after every release, the Product Manager role reviews
+the open backlog against what just shipped** and reconciles it:
+
+1. Read the merged change and the open issues in its area.
+2. For each affected ticket decide: **close** (resolved or made moot), **re-scope** (still
+   valid but the description now cites stale facts; edit it, or prepend a dated update note
+   that supersedes the stale parts), or **keep** (unaffected).
+3. Apply the verdicts (close with a rationale comment that references the shipping PR; edit
+   bodies), and record the reconciliation in [docs/context/product.md](context/product.md).
+
+Like the QA gate, this is part of "done": a release is not finished until the backlog it
+touched has been reconciled.
+
 ## Hotfix
 
 Same flow on a `fix/...` branch. Do not skip tests or smoke test; speed comes from a small

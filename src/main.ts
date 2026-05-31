@@ -87,6 +87,10 @@ const osmd = new OpenSheetMusicDisplay("sheet", {
   autoResize: true,
   backend: "svg",
   followCursor: true,
+  // Piano Helper is single-instrument, so the per-part instrument label is noise.
+  // The Clarity-OMR engine emits a UUID as the part name, which OSMD would render
+  // as "Instr. P93a6af..." down the left margin; suppress part names entirely.
+  drawPartNames: false,
 });
 
 let synth: Tone.PolySynth | null = null;
