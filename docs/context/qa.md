@@ -4,6 +4,65 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-05-31: issue #113 / PR #114 (additive LH chord-completion post-pass in
+  `omr-worker/worker.py`: `complete_lh_chords` learns the dominant LH triad SHAPE oemer DID
+  detect, then completes lone staff-2 notes at a matching duration to that shape, keeping the
+  existing note as the lowest; never touches RH, never mutates an existing pitch/duration,
+  returns input unchanged on any failure) -> **PASS** (all #113 acceptance rows met). Real
+  end-to-end live scan against the LOCAL Mac worker running the new code (restarted 12:41:34
+  CEST; live `~/piano-helper-omr/worker.py` contains `complete_lh_chords`, verified by IT and
+  re-confirmed `grep -c complete_lh_chords == 4`). Fixture: the user's own
+  `/Users/simonepasculli/Documents/MuseScore4/Scores/icarus.pdf` (clean 1-page vector grand
+  staff). Same HTTP flow the app uses, not simulated.
+  - HTTP FLOW: `POST /api/omr` multipart `file` (application/pdf) -> 202
+    `{"jobId":"6c7998a0-a11e-462b-8e90-a5d759d9eebe"}`. Polled `/api/omr/result?jobId=...`
+    every 10s -> 404 `{"status":"pending"}` throughout, then 200 + **40187 bytes of real
+    MusicXML** (`<work-title>Stitched</work-title>`, NOT the omr-status="failed" sentinel;
+    `grep 'name="omr-status"'` and `grep failed` both 0).
+  - ENGINE: **oemer won** (NOT homr). Worker log slice (from line 1551): `detected mime
+    'application/pdf'` (12:43:02) -> `rasterized 1 page(s) at 400 DPI` -> `recognized via
+    engine output .../oemer-out/stitched.musicxml` + `done ...; upload deleted` (12:48:57).
+    WALL CLOCK upload 12:42:59 -> done 12:48:57 = **~358s (~5m58s)**, in line with #109's
+    ~6.5 min budget (post-pass is XML-only, sub-second; no material slowdown). No homr
+    fallback, no traceback/MemoryError/killed/exception in this run's slice (only the benign
+    sklearn `InconsistentVersionWarning` unpickle lines + per-symbol `not a valid note`).
+  - FIDELITY TABLE (measured this run vs #109 baseline vs #113 requirement):
+
+    | metric | #109 baseline | now (#113) | required by #113 | result |
+    | --- | --- | --- | --- | --- |
+    | parts | 1 | 1 | 1 | PASS |
+    | staves | 2 (G+F) | 2 (`<staves>2</staves>`, clefs G@1 / F@2) | 2 (G+F) | PASS |
+    | measures | 27 | 27 | 27 | PASS |
+    | total pitched notes | 109 | **139** | strictly > 109 | PASS |
+    | RH notes (staff 1) | 66 | **66** | exactly 66 (untouched) | PASS |
+    | LH measures with a chord (>=2) | 12 of 27 | **26 of 27** | >= 18 | PASS |
+    | LH triads (>=3) | 4 | **19** | >= 10 | PASS |
+
+    (LH staff went 43 -> 73 pitched notes; LH group histogram: 19 triads + 8 dyads.)
+  - GUARD CHECKS (the pass's safety contract, all verified on the live output): (1) RH
+    untouched, staff-1 count is exactly 66, identical to #109. (2) NO measure with zero LH
+    notes gained a chord (walked all 27 measures; the "chord-but-no-LH-note" set is empty).
+    (3) Completed triads are well-formed pitched chords with the existing oemer note as the
+    LOWEST, e.g. m1 `[G3,C4,E4]`, m3/m4 `[A3,D4,F#4]` (dominant detected shape, offsets
+    (0,5,9) above the kept low note). (4) Output still parses as 1 part / 2 staves / 27
+    measures with real G + F clefs, so `#hand-mutes` stays valid live.
+  - VERDICT: **PASS / ticket criteria fully met.** This run's pre-pass oemer detection was
+    richer than #109's one sample (so the post-pass had a solid dominant triad shape to
+    learn), and the post-pass then completed lone LH leads up to 19 triads across 26 of 27
+    measures while leaving RH at 66 and never inventing a chord in an empty-LH bar. The
+    headline "left hand collapses to single notes" gap is now closed on the user's fixture:
+    nearly every measure carries an LH chord, almost all triads, matching the source.
+  - METHOD NOTE (reuse for OMR post-pass QA): the post-pass logs NOTHING on success (it only
+    logs `LH chord-completion skipped (...)` via the try/except on parse/shape failure), so
+    "did it run" is read from the OUTPUT NUMBERS, not the log: oemer alone yields ~4 LH triads
+    on icarus (the #109 sample), so 19 triads + 30 extra LH notes with RH unchanged at 66 IS
+    the proof the pass fired. To attribute a miss honestly: grep this run's slice for
+    `skipped` (pass bailed: bad parse, not a 2-staff grand staff, or zero detected LH chords
+    to learn a shape from) vs no skip line + chord counts that didn't move (pass ran but
+    didn't reach targets). Parser mirrors the worker's `_chord_groups`/`_is_lh_note`: group a
+    staff-2 lead note with following `<chord>` siblings, count size>=2 (chord) and size>=3
+    (triad); RH = staff-1 non-rest count. Temp artifacts under /tmp/qa-icarus-113/ (deleted).
+
 - 2026-05-31: issue #109 / PR #110 (tune the image fed to OMR for higher scan fidelity: PDF
   raster DPI 300 -> 400, ALL PDF pages now rasterized + stitched vertically into one tall
   PNG, and oemer run with `--without-deskew` on the vector-PDF path) -> **PASS** (fidelity
