@@ -19,6 +19,37 @@ performance on an animated piano, with the score highlighted in sync. Make the f
 
 ## Decisions
 
+### 2026-05-31 - OMR fidelity round 2: ship LH chord-completion post-pass, NOT the DPI sweep
+
+- **Context:** after #109 (400 DPI + stitch + no-deskew, merged + deployed), QA's icarus.pdf
+  end-to-end run showed the headline LH-chord gap only partly closed (oemer recovers an LH
+  chord in just 12 of 27 measures, 8 dyads + 4 triads, where the source has a triad in nearly
+  every one of the first ~16 bars) AND total recall DROPPED 128 -> 109 with scan time up to
+  ~6.5 min. Open follow-ups: #112 (DPI sweep 300/350/400/500), #88 (umbrella fidelity spike),
+  #6/#105 (correction UI, deferred).
+- **Decision: the single next increment is a bounded MusicXML post-processing pass that
+  completes detected left-hand chords, NOT the DPI sweep and NOT an oemer+homr ensemble.**
+  Filed as the next #88 child.
+- **Why override the "DPI sweep first" prior:** the sweep is cheap but low-ceiling and the
+  evidence says DPI is already past oemer's sweet spot (300 -> 400 LOST 19 notes). A sweep
+  yields a tuning number, not the feature the user asked for, and costs ~6.5 min per data
+  point. It is worth running as a quick parallel tuning chore (keep #112 open, priority:med),
+  but it is not THE leverage move and will not close the LH-triad gap.
+- **Why not the ensemble (yet):** running both engines and picking/merging the better
+  MusicXML is the right long-term move but is research-shaped for one PR: two different
+  MusicXML schemas, homr is only a crash fallback today (unproven on a real grand staff), and
+  "merge two scores" reintroduces note-invention risk. Keep it in the #88 spike, not this PR.
+- **Why chord-completion is the highest-leverage tight slice:** the user's literal complaint
+  is "left hand collapses to single notes." The fix is additive and bounded: where oemer
+  already emitted a left-hand chord shape, complete same-rhythm LH single-notes/dyads to that
+  detected shape. It targets the exact reported gap, fits one PR, and is measurable on
+  icarus.pdf (LH triad count 4 -> target, dyad+ measures 12 -> target, total recall 109 -> up).
+- **Scope discipline / non-goals:** chord completion ONLY. Explicitly DEFER octave/pitch
+  repair (gap 2: that path fabricates wrong pitches, high risk) and rhythm correction to the
+  #88 spike. The pass must be conservative: never invent a chord in a measure where oemer
+  found no LH chord evidence, and never touch the right-hand/melody staff. Stays on free
+  tooling (pure Python in worker.py on the MusicXML already produced), R2 contract untouched.
+
 ### 2026-05-31 - OMR fidelity: first #88 child is image preprocessing, defer note heuristics
 
 - **Context:** user re-scanned their clean 1-page vector PDF icarus.pdf (the #88 fixture).

@@ -30,6 +30,93 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-31 - #113 PRE-MERGE REVIEW: APPROVE-WITH-NITS. No blockers; the DOCTYPE drop and the ElementTree billion-laughs vector were both assessed and are acceptable here.**
+  Separate skeptical review of `fix/omr-lh-chord-completion` (code-review + security-review since the pass parses
+  engine-derived-from-untrusted-upload XML inside the always-on poller). Verdict APPROVE-WITH-NITS.
+  - **DOCTYPE drop is ACCEPTABLE, not a blocker.** Confirmed empirically: when `complete_lh_chords` changes the
+    tree it re-serializes via `ET.tostring(xml_declaration=True)`, which DROPS oemer's
+    `<!DOCTYPE score-partwise PUBLIC ...>` and rewrites the decl with single quotes
+    (`<?xml version='1.0' encoding='utf-8'?>`). OSMD does NOT require the DOCTYPE: the existing real-parse
+    fixtures in `src/score.test.ts` (SINGLE_STAFF_TREBLE_TO_BASS, GRAND_STAFF, DB_MAJOR_FLATS) all have NO
+    DOCTYPE and `osmd.load()` parses them fine, so a DOCTYPE-less completed score loads. The pass-through path
+    (no chord changed) returns the ORIGINAL bytes WITH their DOCTYPE intact; only a changed body loses it.
+  - **No failure-sentinel collision.** The sentinel is the `else` branch (`body = FAILURE_SENTINEL`) and is NEVER
+    run through the pass (the call sits inside `if result_path is not None:`, verified at worker.py:655-662 and
+    locked by the JS source-guard). The pass only ADDS `<note><chord/>` siblings; it never writes
+    `omr-status`/`failed`, so it cannot fabricate a sentinel match (`FAILURE_SENTINEL_RE` in src/omr.ts).
+  - **Namespaced-document failure mode is a clean no-op** (verified): a defaulted-xmlns score makes
+    `root.findall("part")` find nothing, so `len(parts) != 1` returns the input unchanged. No crash, no corruption.
+  - **Conservative guards hold (verified by running the pass):** RH staff-1 notes are byte-identical in count and
+    pitch; a measure whose LH slot is a rest gains nothing; a lone LH note whose `<duration>` does not match a
+    detected-chord duration is NOT completed (rhythm guard works); existing pitches/durations are never mutated;
+    `_complete_one` re-reads `list(measure)` and `children.index(lead)` by identity each call, so sequential
+    insertions in one measure do not use stale indices. Any parse/shape failure returns the ORIGINAL bytes
+    (try/except in `complete_lh_chords`), never raises into `process_job`, never emits a sentinel.
+  - **NIT / known-risk (not blocking): ElementTree IS vulnerable to billion-laughs.** Confirmed a deeply-nested
+    internal-entity payload OOM-kills the Python process (exit 137) inside `ET.fromstring`; expat's default
+    expansion budget did not save it at depth ~14. This matters because the input is parsed by the always-on
+    poller, and an OS OOM-kill is NOT catchable by the `try/except` (same class of risk as the #109 stitch OOM).
+    Why it is NOT a blocker here: the pass parses ENGINE OUTPUT (oemer/homr MusicXML), not the raw upload. oemer
+    emits the standard MusicXML PUBLIC/SYSTEM DOCTYPE with NO internal entity subset and does not echo
+    user-controlled DTD entities into its output, so an attacker cannot get a malicious internal `<!ENTITY ...>`
+    subset into the bytes the pass parses. The OOM vector requires an attacker-controlled internal entity subset,
+    which the engine never produces. A namespaced or undefined-entity doc is a clean caught no-op (verified). If a
+    future change ever feeds upload-derived or untrusted XML directly into this parser, swap to `defusedxml` or
+    disable DTD/entity processing FIRST; leaving a one-line note here so that constraint is not rediscovered.
+  - **Tests genuinely cover the contract (RED-GREEN spot-checked):** ran the 14 core Python assertions by hand
+    (pytest is not installed in the shell python; boto3 stubbed at import like the existing suite) - pitch
+    roundtrip, dominant triad-over-dyad + dyad fallback, the grand-staff fixture completing lones 3/4/5 to (0,4,7)
+    with the original kept as lowest, measure-6 rest gains nothing, RH untouched (6 notes identical),
+    single-staff + malformed passthrough - all 14 pass. The RH-untouched and no-LH-rest tests would fail if those
+    guards were removed (they assert exact pitch lists and empty LH note lists). JS suite 308/308 green
+    (no jsdom ERR_MODULE_NOT_FOUND this run), `npm run build` green. Left the diff untouched (no blocker to fix).
+
+- **2026-05-31 - #113: additive LH chord-completion post-pass in `omr-worker/worker.py`, run on engine MusicXML before R2.**
+  oemer reads the RH but collapses many LH block chords to single notes (icarus.pdf: 12 of 27 LH
+  measures kept a chord, 4 triads, where the source has a triad almost every bar). New pure
+  `complete_lh_chords(xml_bytes)` learns the dominant LH chord SHAPE oemer DID detect elsewhere and
+  completes lone LH notes (at a chord-matching duration) to that shape, existing note kept as the lowest.
+  - **Hook:** in `process_job`, INSIDE the `result_path is not None` (engine-success) branch, after
+    reading the engine bytes and BEFORE `client.put_object`: `body = complete_lh_chords(body)`. NOT on
+    the failure-sentinel else branch (a sentinel must never be mutated). R2 contract unchanged
+    (`results/<jobId>.musicxml`, same content-type).
+  - **Conservatism (the whole pass is wrapped in try/except and returns the ORIGINAL bytes on ANY
+    failure, never raises into process_job, never emits a sentinel):** uses stdlib
+    `xml.etree.ElementTree` (no new dep). Returns input unchanged when: not exactly one `<part>`, no
+    `<staff>2</staff>` note anywhere (single-staff part), zero detected LH chords (nothing to learn from),
+    or no usable dominant shape. Only ADDS `<chord/>` `<note>` siblings on staff 2; never alters an
+    existing note's pitch/duration, never touches staff-1 (RH), never changes part/staff/measure
+    structure, divisions, clefs, or time sigs.
+  - **Dominant-shape heuristic (`_dominant_pattern`):** tally each detected LH chord-group's interval
+    pattern as semitone offsets above its lowest note (root-position major triad = (0,4,7)). Pick the most
+    common pattern of size >= 3 (a triad); fall back to the most common size-2 if no triad was detected.
+    Ties broken deterministically by (count, len, pattern). Completion only fires on lone LH notes whose
+    `<duration>` matches a duration seen on the detected chords (rhythm alignment guard), inserting the
+    transposed `<chord/>` notes immediately after the lead in document order.
+  - **Pitch helpers (the unit-testable core):** `pitch_to_semitone(step, alter, octave)` (C4 = 60, MIDI
+    convention) and `semitone_to_pitch(semitone)` -> canonical SHARP spelling; octave from the absolute
+    value so an added note sounds in the right register. Sharps are intentional (sounding pitch is what
+    drives playback + the falling-notes/sheet sync; OSMD renders them fine).
+  - **Chord grouping gotcha:** `_chord_groups` walks a measure's children in document order; a non-`<note>`
+    child (`<backup>`, `<forward>`, `<attributes>`) resets the current group, so a `<backup>` between the
+    RH voice and the LH voice correctly separates them. A chord sibling is a `<note>` that has BOTH a
+    `<chord/>` child AND a live current group.
+  - **Tests:** Python `omr-worker/test_worker.py` +12 (pitch roundtrip, dominant-pattern triad-over-dyad +
+    dyad fallback, interval-pattern offsets, a 1-part/2-staff grand-staff fixture asserting lone LH notes
+    become the dominant triad with the original as lowest, RH staff-1 notes byte-identical in count+pitch,
+    a no-LH-note rest measure gains nothing, chord/triad counts rise, single-staff + multi-part + malformed
+    + no-detected-chords all pass through unchanged). pytest 9 -> 21, all pass (Pillow + pytest installed
+    in this worktree). JS source-guard `src/omr-worker.test.ts` +1 describe (#113): the function exists, is
+    called before `put_object`, only on the engine-success branch (between `if result_path is not None:`
+    and `body = FAILURE_SENTINEL`), keys off `LH_STAFF = "2"` + `find("chord")`, no em/en dash. JS suite
+    303 -> 308, `npm run build` green. `npm test` first hit the known jsdom ERR_MODULE_NOT_FOUND; a plain
+    `npm install` fixed it.
+  - **CI gap / NEEDS LIVE QA:** repo CI is Node-only (no pytest gate); the JS source-guard is the
+    CI-enforced net. CI does NOT run the OMR engine, so QA must re-scan icarus.pdf on `main` and confirm
+    the #113 acceptance table: total notes > 109, RH (staff 1) exactly 66 (unchanged), LH triads 4 -> >= 10,
+    LH chord-bearing measures 12 -> >= 18, still 1 part / 2 staves (G + F) / 27 measures, `#hand-mutes`
+    visible, no measure that had zero LH notes gains a chord, scan wall-clock not materially worse.
+
 - **2026-05-31 - #109 review fix (BLOCKING): the new all-pages vertical stitch was an unbounded-bitmap OOM vector; added page-count + total-area caps and armed Pillow's bomb guard.**
   Pre-merge review of `fix/omr-raster-preprocessing`. The rest of the diff was clean
   (all subprocess calls are list-form, no `shell=True`; only the UUID-validated jobId
