@@ -4,6 +4,71 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-05-31: #118 / #112 / PR #119 (lower OMR worker `PDF_RASTER_DPI` 400 -> 350 to recover
+  collapsed LH block chords WITHOUT fabricating pitches; PR merged to main, Pages app deployed
+  smoke-green, LOCAL Mac OMR worker redeployed at DPI 350 and restarted via launchd
+  `com.pianohelper.omr` 14:27:35, pid 74764) -> **PASS** (fidelity-first, the #113 lesson).
+  Real end-to-end live scan of the user's own `/Users/simonepasculli/Documents/MuseScore4/
+  Scores/icarus.pdf` through the same HTTP flow the app uses against prod, then a VISUAL diff
+  of the rendered output vs the source PDF. This is the acceptance check #113 taught us: judge
+  by eye on the renders (accidentals + recovered chords), NOT by a note count alone.
+  - WORKER STATE (DPI 350 live): `grep PDF_RASTER_DPI ~/piano-helper-omr/worker.py` ==
+    `PDF_RASTER_DPI = 350`; `grep -c complete_lh_chords` == **0** (the #113 fabrication post-pass
+    is still gone, revert intact); #109 levers present (`pdftoppm -r 350`, `stitch_pages_vertical`,
+    `--without-deskew`). Worker log for this run starts after line 1838.
+  - HTTP FLOW: `POST /api/omr` multipart `file` (application/pdf) -> 202
+    `{"jobId":"6d50cfad-2ed4-4845-84ef-67b1a7ecc35f"}` at 14:29:39. Polled
+    `/api/omr/result?jobId=...` every 10s -> 404 `{"status":"pending"}` (20 bytes) throughout,
+    then **200 + 40121 bytes of real MusicXML** at 14:34:51. `<work-title>Stitched</work-title>`,
+    `<creator>Transcribed by Oemer</creator>`, NOT the omr-status="failed" sentinel (`grep
+    'name="omr-status"'` and `grep failed` both 0). WALL CLOCK upload 14:29:39 -> result 14:34:51
+    = **~312s (~5m12s)**. The 350 DPI raster (1612x2280 stitched, vs 400's larger) is a bit
+    slower than the reverted ~226s run but well inside the app's 15-min poll budget. Output is
+    40121 bytes (note: SIZE is not a fidelity signal; #113's inflated 40187 bytes were
+    fabrication, this 40121 is genuine recovered chords, proven by the accidental check below).
+  - THE KEY GATE (#113 lesson: musical fidelity vs the SOURCE PDF, not a count): rendered the
+    source with `pdftoppm -png -r 150 icarus.pdf` and confirmed the original is C major (EMPTY
+    key sig, `<fifths>0</fifths>`), 27 bars, 4/4, with whole-note natural block triads in nearly
+    every LH bass bar and **ZERO accidental symbols (no sharps/flats) anywhere in either staff**.
+    The 350-DPI OUTPUT matches: every one of the **123 `<alter>` elements is `<alter>0</alter>`
+    (natural); ZERO `<alter>1</alter>` (sharps), ZERO `<alter>-1</alter>` (flats), no other alter
+    value; ZERO `<accidental>` symbol elements**. NO FABRICATION. (b) acceptance gate PASS.
+  - FIDELITY TABLE (350 DPI this run vs 400 baseline vs the reverted #113):
+
+    | metric | 400 baseline (#109) | now (350 DPI #118) | result |
+    | --- | --- | --- | --- |
+    | parts | 1 | 1 | match |
+    | staves | 2 (G@1/F@2) | 2 (G@1/F@2) | match |
+    | measures | 27 | 27 | match |
+    | total pitched notes | 109 | **123** | +14 |
+    | RH notes (staff 1) | 66 | **66** | UNCHANGED (expected) |
+    | LH notes (staff 2) | 43 | **57** | +14 (all the gain is LH) |
+    | LH chords (>=2) | 12 | **17** | +5 |
+    | LH triads (>=3) | 4 | **11** | **+7 (the headline win)** |
+
+    LH group histogram now {1:12, 2:6, 3:11} (12 lone, 6 dyads, 11 triads). The triad jump from
+    4 -> 11 is the (a) gate: materially more bass-clef chords recovered.
+  - WHY THIS IS RECOVERY, NOT #113-style FABRICATION: the 11 triads are oemer-detected, each a
+    DIFFERENT source-appropriate natural triad (m2 [G3,B3,E4], m3 [A3,C4,E4], m7 [A3,C4,E4],
+    m8 [A3,C4,F4], ...), not one guessed shape stamped on every lone note. #113 stamped the same
+    D-major-type triad everywhere, inventing the Fa# the user saw; here EVERY alter is natural.
+  - VISUAL DIFF (the real QA): rendered the OUTPUT with `"/Applications/MuseScore 4.app/.../mscore"
+    result.musicxml -o omrout.png` (writes omrout-1.png) and read it next to the source render.
+    System 1 (bars 1-8): the OMR output now shows stacked bass-clef triads/dyads in bars 1-3, 5,
+    6, 8 where the 400 baseline left lone notes -- a visible, materially-more-recovered LH, no
+    sharps/flats in any brace, empty key sig, 27 measures, G+F clefs, single grand-staff part.
+    Matches the source's natural block triads. Source render /tmp/qa-icarus-350/source-1.png,
+    output render /tmp/qa-icarus-350/omrout-1.png.
+  - HONEST NON-RESULT (verified, NOT failed on): RH recall is UNCHANGED by the DPI lever (RH = 66
+    at both 400 and 350, as the offline sweep predicted). The bars 9-16 arpeggio figures still
+    read partially (some dropped notes / rests) in the output -- that is the oemer engine ceiling
+    left to #88/#6, an expected limit, NOT a regression and NOT a reason to fail this gate.
+  - VERDICT: **PASS.** All three acceptance gates met: (a) LH block chords visibly more recovered
+    (4 -> 11 triads, stacked in the first-system bars), (b) ZERO fabricated accidentals (all 123
+    alters natural, 0 sharps, 0 flats, 0 accidental symbols), (c) 27 measures / 2 staves (G@1,
+    F@2) / 1 part. The DPI 350 lever did exactly its job: more genuine LH triads, no invented
+    pitches. Artifacts under /tmp/qa-icarus-350/ (result.musicxml, source-1.png, omrout-1.png).
+
 - 2026-05-31: #113 REVERT CONFIRMATION SCAN (PR #116 merged to main, reverted worker.py
   redeployed to the LOCAL Mac OMR worker, launchd `com.pianohelper.omr` restarted 13:17:13)
   -> **PASS: the fabricated sharps are GONE.** Real end-to-end live scan of the user's own
