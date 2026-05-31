@@ -30,6 +30,41 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-31 - #109 review fix (BLOCKING): the new all-pages vertical stitch was an unbounded-bitmap OOM vector; added page-count + total-area caps and armed Pillow's bomb guard.**
+  Pre-merge review of `fix/omr-raster-preprocessing`. The rest of the diff was clean
+  (all subprocess calls are list-form, no `shell=True`; only the UUID-validated jobId
+  reaches keys/paths and pdftoppm reads a local temp file, never a shell string; the
+  `(image_path, is_pdf)` tuple refactor reaches all call sites incl. the homr fallback;
+  `--without-deskew` is gated to the PDF path only via `without_deskew=is_pdf`; page
+  ordering is correct because pdftoppm zero-pads to a UNIFORM width within one run so
+  `sorted()` == numeric; the R2 transport contract is byte-identical). The one real
+  defect: `stitch_pages_vertical` allocated `Image.new("RGB", widest x sum_of_heights)`
+  with NO bound. The upload Function caps inputs at 10 MB (`src/omr-server.ts
+  MAX_UPLOAD_BYTES`), but a SPARSE vector PDF compresses so well that 10 MB holds
+  hundreds of near-empty A4 pages; at 400 DPI each page is ~15.5 MP, so a crafted
+  ~200-page PDF stitches to a multi-GP / multi-GB RGB bitmap on a box that ALSO runs the
+  oemer PyTorch/onnx stack. The OS OOM-killer is not catchable by `poll_once`, so that
+  kills the always-on poller (a single-upload DoS). Also `Image.new` is NOT subject to
+  Pillow's decompression-bomb check (that only runs on decode), so Pillow gave zero
+  protection here.
+  - **Fix (worker.py):** new `MAX_STITCH_PAGES = 60` and `MAX_STITCH_PIXELS = 1_000_000_000`
+    (~1 GP). `stitch_pages_vertical` rejects >60 pages BEFORE opening any image, and
+    rejects total area > 1 GP AFTER measuring but BEFORE `Image.new` (so the giant canvas
+    is never allocated); both raise `RuntimeError`, which `poll_once` already turns into a
+    clean failure sentinel instead of a crash. The area check raises inside the `try`, so
+    the `finally` still closes every opened page handle (no leak on the reject path). Also
+    set `Image.MAX_IMAGE_PIXELS = MAX_STITCH_PIXELS` so a single crafted page can't
+    bomb-decode on `Image.open` (the prior code never armed it). 1 GP is ~64x a real A4
+    page, so legitimate multi-page scores are unaffected.
+  - **Tests:** +3 pytest (too-many-pages rejects before any open, oversized-total-area
+    rejects with a lowered cap, both `RuntimeError`) and +1 vitest source-guard locking
+    the two caps, both enforcement sites, and the armed `MAX_IMAGE_PIXELS`. pytest 6 -> 9
+    (Pillow IS installed in this worktree, all 9 pass), JS suite 302 -> 303, build green.
+  - **Gotcha for the area test:** setting `Image.MAX_IMAGE_PIXELS` to the worker constant
+    means a too-low monkeypatched cap also trips Pillow's bomb guard (fires at 2x cap) on
+    `Image.open` BEFORE the area check. Pick a cap above a single page's pixels but below
+    the multi-page total (cap=2000 for two 40x40 pages) to isolate the area `RuntimeError`.
+
 - **2026-05-31 - #109: OMR worker rasterization tuned for clean vector PDFs (DPI 300 -> 400, all pages stitched, oemer deskew off on PDF path).**
   Concrete first child of spike #88. oemer has NO DPI/quality CLI knob (only `-o`,
   `--use-tf`, `--save-cache`, `-d/--without-deskew`), so the raster we hand it in

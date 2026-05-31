@@ -115,3 +115,30 @@ def test_stitch_preserves_document_page_order(tmp_path):
 def test_stitch_rejects_empty_page_list(tmp_path):
     with pytest.raises(RuntimeError):
         worker.stitch_pages_vertical([], str(tmp_path / "stitched.png"))
+
+
+def test_stitch_rejects_too_many_pages(tmp_path):
+    # A crafted many-page 10 MB vector PDF must not be able to drive an unbounded stitch
+    # (OOM risk on the Always Free VM). Reject before opening any page image.
+    paths = [
+        str(tmp_path / ("page-%03d.png" % i))
+        for i in range(worker.MAX_STITCH_PAGES + 1)
+    ]
+    # The files need not exist: the page-count guard fires before any Image.open.
+    with pytest.raises(RuntimeError):
+        worker.stitch_pages_vertical(paths, str(tmp_path / "stitched.png"))
+
+
+def test_stitch_rejects_oversized_total_area(tmp_path, monkeypatch):
+    # Lower the pixel cap so a couple of small pages exceed it, proving the area guard
+    # rejects (raising) instead of allocating a giant canvas. Two pages stay under the
+    # page-count cap, so this isolates the AREA guard.
+    # Cap = 2000: a single 40x40 page (1600 px) still opens (Pillow bomb guard is 2x cap),
+    # but the two-page total (3200 px) trips the pre-allocation area guard.
+    monkeypatch.setattr(worker, "MAX_STITCH_PIXELS", 2000)
+    a = tmp_path / "page-1.png"
+    b = tmp_path / "page-2.png"
+    _make_png(a, (40, 40), (0, 0, 0))   # 1600 px each, 3200 total > 2000
+    _make_png(b, (40, 40), (0, 0, 0))
+    with pytest.raises(RuntimeError):
+        worker.stitch_pages_vertical([str(a), str(b)], str(tmp_path / "stitched.png"))

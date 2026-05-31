@@ -56,6 +56,18 @@ DEFAULT_POLL_SECONDS = 5
 # image below, so the working bitmap stays bounded. Bump cautiously if the VM allows.
 PDF_RASTER_DPI = 400
 
+# Resource guards for the stitched raster. The upload Function caps inputs at 10 MB
+# (src/omr-server.ts MAX_UPLOAD_BYTES), but a sparse VECTOR PDF compresses so well that
+# 10 MB can still hold hundreds of pages. At 400 DPI each A4 page is ~15.5 MP, so an
+# unbounded vertical stitch of a crafted many-page PDF would allocate a multi-GB RGB
+# bitmap on a box that also runs the oemer PyTorch/onnx stack: a real OOM that would
+# kill the always-on poller (the OS OOM-killer is not catchable by poll_once). Bound BOTH
+# the page count and the total stitched pixel area; exceeding either raises RuntimeError,
+# which poll_once turns into a clean failure sentinel instead of crashing the worker.
+# 60 pages * 15.5 MP ~= 930 MP is also the ceiling we hand oemer (well past any real score).
+MAX_STITCH_PAGES = 60
+MAX_STITCH_PIXELS = 1_000_000_000  # ~1 GP; RGB canvas ~3 GB worst case, then freed.
+
 # Byte-compatible with src/omr.ts FAILURE_SENTINEL_RE = /name="omr-status"\s*>\s*failed/.
 # Written to the result key when both engines fail so the browser stops polling and
 # shows a friendly error instead of rendering a near-empty score as success.
@@ -225,11 +237,26 @@ def stitch_pages_vertical(page_paths, dest_path):
 
     Pillow is already an oemer runtime dependency (see requirements.txt), so this adds
     no new dependency. Imported lazily so the rest of the module (and its unit tests)
-    stays importable on a host without Pillow installed."""
+    stays importable on a host without Pillow installed.
+
+    Resource-safety: a crafted many-page 10 MB vector PDF could otherwise stitch into a
+    multi-GB bitmap and OOM-kill the worker, so reject more than MAX_STITCH_PAGES pages
+    and any total area over MAX_STITCH_PIXELS before allocating the canvas. Pillow's
+    decompression-bomb guard is also armed (MAX_IMAGE_PIXELS) so a single crafted page
+    cannot bomb-decode on Image.open."""
     if not page_paths:
         raise RuntimeError("no pages to stitch")
+    if len(page_paths) > MAX_STITCH_PAGES:
+        raise RuntimeError(
+            "too many pages to stitch: %d > %d" % (len(page_paths), MAX_STITCH_PAGES)
+        )
 
     from PIL import Image
+
+    # Arm Pillow's decompression-bomb guard so an Image.open of a crafted page raises
+    # rather than silently decoding a giant bitmap. MAX_STITCH_PIXELS comfortably exceeds
+    # one real 400 DPI A4 page (~15.5 MP), so legitimate pages are unaffected.
+    Image.MAX_IMAGE_PIXELS = MAX_STITCH_PIXELS
 
     if len(page_paths) == 1:
         # Single page: just normalize to RGB at dest_path, no compositing.
@@ -243,6 +270,13 @@ def stitch_pages_vertical(page_paths, dest_path):
             images.append(Image.open(path).convert("RGB"))
         total_width = max(img.width for img in images)
         total_height = sum(img.height for img in images)
+        # Reject before allocating: the canvas alone would be total_width*total_height*3
+        # bytes of RAM, so cap the area to keep the worker inside the VM's budget.
+        if total_width * total_height > MAX_STITCH_PIXELS:
+            raise RuntimeError(
+                "stitched image too large: %d px > %d"
+                % (total_width * total_height, MAX_STITCH_PIXELS)
+            )
         canvas = Image.new("RGB", (total_width, total_height), (255, 255, 255))
         y = 0
         for img in images:
