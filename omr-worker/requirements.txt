@@ -9,6 +9,12 @@
 # ML stack and requires a modern numpy (>=2.2.6).
 homr
 
+# Pin the numpy band both engines tolerate. oemer 0.1.8 runs on numpy 2.x but a future
+# numpy 3.0 could re-break it the way numpy 1.24 broke 0.1.5 (and the failure is silent:
+# the worker just falls back to homr and collapses the grand staff). Lower bound matches
+# homr's floor.
+numpy>=2.2.6,<3
+
 # oemer's runtime dependencies, listed here so the second (--no-deps) install of oemer
 # still has everything it imports. oemer itself is pinned in requirements-oemer.txt and
 # installed with --no-deps because it declares onnxruntime-gpu, which has no ARM/macOS

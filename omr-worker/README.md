@@ -34,6 +34,9 @@ free allocation) with Ubuntu 22.04. Then on the VM:
 
 ```bash
 # 1. System packages: pdftoppm (PDF rasterizer) + python tooling.
+# Use Python 3.11 or 3.12: homr caps Python <3.13, and onnxruntime/scikit-learn wheels
+# need >=3.11, so a distro that defaults to 3.13 will fail the pip install. On Ubuntu 22.04
+# python3 is 3.10; if your image ships 3.13, install python3.11 explicitly and build the venv with it.
 sudo apt-get update
 sudo apt-get install -y poppler-utils python3 python3-venv python3-pip file git
 
