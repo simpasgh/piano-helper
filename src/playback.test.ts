@@ -7,6 +7,7 @@ import {
   scoreTimeToSeek,
   seekToScoreTime,
   formatClock,
+  controlsEnabledForScore,
   SEEK_RANGE,
 } from "./playback";
 import type { VisNote } from "./visualizer";
@@ -167,5 +168,15 @@ describe("formatClock", () => {
   it("clamps negative and non-finite values to 0:00", () => {
     expect(formatClock(-3)).toBe("0:00");
     expect(formatClock(NaN)).toBe("0:00");
+  });
+});
+
+describe("controlsEnabledForScore", () => {
+  it("enables play/export/transport when a score is loaded", () => {
+    expect(controlsEnabledForScore(true)).toBe(true);
+  });
+
+  it("disables them when no score is loaded", () => {
+    expect(controlsEnabledForScore(false)).toBe(false);
   });
 });

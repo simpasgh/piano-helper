@@ -30,6 +30,37 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-31 - #86 cancel-path bug fixes: a cancelled audio job no longer loads its score, and Cancel re-enables a still-loaded score's controls.**
+  Code review of the #86 overlay found two blocking defects in the cancel path; both fixed in
+  `src/main.ts` with pure-helper-backed regression tests.
+  - **BLOCKING 1 (cancelled/superseded audio job still loaded its score):** `loadAudioFile` calls
+    `loadNotes` INTERNALLY, so the old `if (cancelRequested) return` in `transcribeAudio` ran only
+    AFTER the load had already happened. Worse, `showScanOverlay` resets `cancelRequested=false` when
+    a new job starts, so a cancel-then-restart let job A's late result load under job B's overlay.
+    Fix: `loadAudioFile(file, shouldApply: () => boolean)` checks the guard immediately before
+    `loadNotes` (and before each progress narration). `transcribeAudio` captures its `generation` and
+    passes `() => shouldApplyResult(generation, jobGeneration, cancelRequested)`. New pure
+    `shouldApplyResult(generation, currentGeneration, cancelled)` in `src/scan-overlay.ts` returns
+    `generation === currentGeneration && !cancelled`. The GENERATION check (not just cancelRequested,
+    which gets reset per job) is what drops job A under job B. The existing generation-guarded
+    `finally` already prevented a stale teardown; this adds the matching load guard.
+  - **BLOCKING 2 (cancel left a prior score's Play/Export/seek/step disabled):** `setBusyUI(active)`
+    disabled play/export/transport on `active=true` but its not-busy branch never re-enabled them;
+    only a successful `loadNotes` did, which never runs on the cancel/abandon path. Fix: the not-busy
+    branch now sets `enabled = controlsEnabledForScore(!!score)` (new pure helper in `src/playback.ts`,
+    currently just `scoreLoaded`) and writes `playBtn/exportBtn.disabled = !enabled` +
+    `setTransportControlsEnabled(enabled)`. `exportVideo`'s finally dropped its now-redundant manual
+    re-enable lines (setBusyUI(false) handles it), so there is one source of truth.
+  - **Tests:** `shouldApplyResult` 4 cases (normal applies; same-gen+cancelled drops; restart bumps
+    gen so job A drops; superseded+cancelled drops) and `controlsEnabledForScore` 2 cases in the pure
+    suites. A new jsdom `src/cancel-controls.test.ts` asserts the real disabled-flag behavior on actual
+    elements (booting all of main.ts under jsdom pulls in Tone/OSMD/canvas/sampler/rAF, so it mirrors
+    setBusyUI's not-busy branch against the shared predicate). Source guards in `src/toolbar.test.ts`
+    lock the actual main.ts wiring for both fixes (the `shouldApply` param, the `!shouldApply() return`,
+    the `shouldApplyResult(generation, jobGeneration, cancelRequested)` call, and the setBusyUI else
+    branch driving `controlsEnabledForScore(!!score)`). Suite 268 green, `npm run build` green. Live
+    cancel-with-prior-score + cancel-then-restart in a real browser is the post-merge QA gate.
+
 - **2026-05-31 - Scan/transcribe loading overlay SHIPPED (#86): a blocking stage overlay + a client-side Cancel that abandons the wait, never aborts the server job.**
   Replaced the too-quiet `#track-status` line with a full-stage overlay per the Designer spec (design.md top
   section). One `#scan-overlay` node in `index.html` AFTER `#stage` (role=dialog, aria-modal, aria-busy,

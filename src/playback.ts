@@ -73,6 +73,15 @@ export function seekToScoreTime(value: number, duration: number): number {
   return clamp(value / SEEK_RANGE, 0, 1) * duration;
 }
 
+// Whether the play / export / transport controls should be enabled: only once a score is
+// loaded. This is the single source of truth for the "not busy" enable decision (issue #86
+// cancel fix), shared by setBusyUI's not-busy branch and the export finally, so a cancel or
+// an abandoned job re-enables a still-loaded score's controls and correctly leaves them
+// disabled when nothing is loaded.
+export function controlsEnabledForScore(scoreLoaded: boolean): boolean {
+  return scoreLoaded;
+}
+
 // Format a seconds value as m:ss (e.g. 84 -> "1:24"). Negative/NaN clamp to "0:00".
 export function formatClock(seconds: number): string {
   const total = Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds) : 0;

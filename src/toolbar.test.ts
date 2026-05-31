@@ -234,6 +234,34 @@ describe("scan overlay markup + CSS (issue #86)", () => {
     expect(main).toContain("isCancelled(err)");
   });
 
+  it("gates the audio load behind shouldApplyResult so a cancelled job never loads (BLOCKING 1)", () => {
+    // loadAudioFile takes a shouldApply guard and checks it before loadNotes; transcribeAudio
+    // passes shouldApplyResult(generation, jobGeneration, cancelRequested). The generation
+    // check (not just cancelRequested, which showScanOverlay resets per job) is what stops a
+    // cancel-then-restart job A from loading under job B's overlay.
+    expect(main).toContain("shouldApplyResult");
+    expect(main).toMatch(/loadAudioFile\(\s*file\s*:\s*File\s*,\s*shouldApply/);
+    expect(main).toMatch(/if\s*\(\s*!shouldApply\(\)\s*\)\s*return/);
+    expect(main).toMatch(
+      /shouldApplyResult\(\s*generation\s*,\s*jobGeneration\s*,\s*cancelRequested\s*\)/,
+    );
+  });
+
+  it("re-enables play/export/transport in setBusyUI's not-busy branch (BLOCKING 2)", () => {
+    // The not-busy branch must restore the controls based on whether a score is loaded, so a
+    // cancel with a previously loaded score does not leave them stuck disabled. Guard that an
+    // else branch exists and drives the enable off controlsEnabledForScore(!!score).
+    const busyFn = main.slice(
+      main.indexOf("function setBusyUI"),
+      main.indexOf("function setBusyUI") + 900,
+    );
+    expect(busyFn).toContain("} else {");
+    expect(busyFn).toContain("controlsEnabledForScore(!!score)");
+    expect(busyFn).toMatch(/playBtn\.disabled\s*=\s*!enabled/);
+    expect(busyFn).toMatch(/exportBtn\.disabled\s*=\s*!enabled/);
+    expect(busyFn).toMatch(/setTransportControlsEnabled\(enabled\)/);
+  });
+
   it("keeps the overlay copy free of em and en dashes", () => {
     const overlay = html.slice(
       html.indexOf('id="scan-overlay"'),
