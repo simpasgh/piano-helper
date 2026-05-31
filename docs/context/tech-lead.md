@@ -30,6 +30,45 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-31 - #87 fix-forward (#90): readClefDeclarations dropped EVERY clef on a real collapsed single-staff parse, so the controls still stayed hidden in prod. Two OSMD-extraction gotchas + the first real-parse test.**
+  The #87 timeline helpers were correct, but `readClefDeclarations` (the OSMD extraction that feeds them)
+  collected ZERO declarations for a single-staff treble->bass score, so `buildStaffClefTimeline` was empty
+  and every note resolved to `handFromClefInEffect(undefined) === "unknown"`. CI was green because
+  `piano.test.ts`/`playback.test.ts` fed hand-built `ClefDeclaration[]` arrays and never ran the extraction.
+  Two compounding OSMD 1.9.9 gotchas (verified by instrumenting a live parse, per #90):
+  - **`ParentStaff` is `undefined` on the clef-carrying instruction staff entries of a SINGLE-STAFF
+    instrument**, even though the staff has `idInMusicSheet === 0`. The `staffId == null` guard (added for
+    the multi-instrument #82/#83 case) therefore discarded the treble AND bass clef. Fix: when an entry has
+    no `ParentStaff` AND the whole sheet is one instrument with one staff, attribute the clef to that lone
+    staff's `idInMusicSheet` (`sheet.Instruments[0].Staves[0].idInMusicSheet`). Do NOT guess for
+    multi-staff/multi-instrument scores; keep the guard there so #73/#82/#36 stay correct.
+  - **A mid-piece clef change lives in `LastInstructionsStaffEntries` of the PRECEDING measure**, not
+    `FirstInstructionsStaffEntries` of the new measure. The bass clef showed up as `{measure:0, where:last}`.
+    `readClefDeclarations` only read the First bucket, so it was missed even once ParentStaff was handled.
+    Fix: read BOTH buckets; a `last`-bucket clef is attributed to `measureIndex + 1` (it applies from the
+    next measure). To order ties, `ClefDeclaration` gained `source?: "first" | "last"` and
+    `buildStaffClefTimeline` lets a `first`-source clef at a measure win over a `last`-source clef carried to
+    that same measure (a measure opens with the clef printed at its head). Order-independent (the tie-break
+    is by source, not push order). A missing `source` counts as "first" so hand-built arrays keep
+    last-write-wins.
+  - **`readClefDeclarations(sheet: MusicSheet)` is now EXPORTED and takes the Sheet** (was private, took the
+    osmd). `extractScore` calls `readClefDeclarations(osmd.Sheet)`.
+  - **First real-OSMD-parse test (`src/score.test.ts`, `// @vitest-environment jsdom`).** This is the gap
+    that let the bug ship: there was no test exercising the extraction against a real parse. Added `jsdom`
+    (devDep) so a small MusicXML string loads through a real `OpenSheetMusicDisplay`. CANNOT run the full
+    `extractScore`: `osmd.render()` drives VexFlow which needs a real Canvas2D (`measureText`/`font`) jsdom
+    lacks (throws "Cannot set properties of null (setting 'font')"), and the cursor iterator only exists
+    after render. But `osmd.load()` populates the Sheet model WITHOUT rendering, so the test calls
+    `readClefDeclarations(osmd.Sheet)` (the exact broken code) and composes the pure helpers
+    (`buildStaffClefTimeline` -> `handFromClefInEffect`, `buildStaffClefMap` -> `handFromStaff`) to assert the
+    user-visible "both hands" outcome. Stub `HTMLCanvasElement.prototype.getContext = () => null` in
+    `beforeAll` to silence jsdom's noisy "Not implemented: getContext" (the parse path does not need a real
+    canvas). RED-GREEN VERIFIED: with the old extraction body the two single-staff cases FAIL (collect 0
+    decls) and the grand-staff guard still passes; with the fix all 3 pass. Suite 242 green, build green.
+  - **Future: if the cursor/iterator path ever needs testing**, you'd need a Canvas2D polyfill (the `canvas`
+    npm package or a measureText stub) so `osmd.render()` succeeds; not worth it for this bug since the break
+    was entirely in the Sheet-model extraction.
+
 - **2026-05-31 - Hand tagging now branches on staff count: a single COLLAPSED staff splits by the clef IN EFFECT, a real grand staff keeps first-clef-per-staff (#87).**
   Scanning a piano PDF (icarus.pdf, "Andante") makes the OMR engine flatten the grand staff onto ONE
   staff that switches clef mid-piece (treble, then bass at ~measure 9). The old `readStaffClefs` recorded
