@@ -4,6 +4,61 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-05-31: issue #88 / PR #97 (upgrade OMR worker to oemer 0.1.8 on numpy 2.x so the
+  primary engine stops crashing on `np.int` and scanned grand-staff piano scores stop
+  collapsing into one part) -> **PASS** on prod (https://piano-helper.pages.dev, bundle
+  `index-5TCZSbdV.js`). This is the FIRST real OMR end-to-end QA: prior #88-blocked passes
+  could not exercise the scan path. Drove the live site in real Chromium (Playwright) with
+  the EXACT user-reported file `/Users/simonepasculli/Documents/MuseScore4/Scores/icarus.pdf`
+  (clean 27-measure grand staff: treble melody + bass block chords, 4/4, no key sig).
+  - CORE ACCEPTANCE (the proof oemer recovered BOTH staves): after the scan loaded,
+    `#hand-mutes` is VISIBLE (`hidden:false`, computed `display:flex`, rect 457.875x29.78 on
+    screen) with Right hand + Left hand toggles + Balance "L100 R100". Baseline before load
+    was correctly hidden (`display:none`, rect 0x0). Visible == `hasBothHands` true == oemer
+    produced both a right- and left-hand note set. The collapsed homr shape would leave it
+    hidden. Track read "Page-1 / 119 notes", 0:52 duration. Screenshot /tmp/qa-icarus/02-loaded.png
+    shows the rendered GRAND STAFF: a piano brace joining a treble (G-clef) melody staff over
+    a bass (F-clef) block-chord staff, 4/4, measure numbers 3/5/7/9, subtitle "Transcribed by
+    Oemer" (confirms the oemer engine, not the homr fallback). 04-playing.png: Pause showing,
+    0:01/0:52, cursor advanced into m2, a SECOND multi-staff system (m10-20) rendered, falling
+    notes split into treble + bass registers with solfege labels.
+  - NETWORK proof (full trace captured): `POST /api/omr` -> 202 with a real jobId; ~112 polls
+    of `/api/omr/result` returned 404 `{"status":"pending"}` while oemer ran; the final poll
+    returned **200 with 39290 bytes of real MusicXML** (`<?xml ... score-partwise PUBLIC
+    "-//Recordare//DTD MusicXML 4.0 Partwise...`), NOT the failure sentinel. PAGE ERRORS: 0.
+    The 102 "console errors" are EXACTLY one per pending-poll 404 ("Failed to load resource:
+    404"); that is expected polling noise, not a regression (the result endpoint returns 404
+    until ready by design, src/omr.ts treats 404 as pending).
+  - ENGINE-LEVEL proof (ran oemer directly on the rasterized page before the live drive): the
+    worker venv at `/Users/simonepasculli/piano-helper-omr/.venv` has oemer 0.1.8 on numpy
+    2.4.6; running `oemer page-1.png` produced a 39KB MusicXML with `<staves>2</staves>` (ONE
+    part, TWO staves = correct grand-staff shape), BOTH a `<sign>G</sign>` and `<sign>F</sign>`
+    clef, 72 notes on staff 1 (treble/RH) + 56 on staff 2 (bass/LH), 27 measures, exit 0, NO
+    `np.int` crash, NOT the sentinel. The homr-collapsed failure would have been a single
+    staff/one clef/no `<staves>2</staves>`. This is the root-cause fix verified at the engine.
+  - WORKER TOPOLOGY (correction to omr-worker/README.md, which describes an Oracle ARM VM):
+    in this environment the worker actually runs LOCALLY on this Mac via launchd job
+    `com.pianohelper.omr` (plist ~/Library/LaunchAgents/com.pianohelper.omr.plist), code at
+    `/Users/simonepasculli/piano-helper-omr/worker.py`, log at `.../worker.log`. It polls R2,
+    rasterizes PDFs with poppler `pdftoppm -r 300`, runs oemer (CoreML/CPU onnxruntime) then
+    homr. The worker shells oemer as a subprocess, so the in-place venv upgrade took effect
+    with no restart. Confirmed it sniffed icarus as `application/pdf` (not the octet-stream of
+    old QA fake-PNG injects) and logged "recognized via engine output ...oemer-out/page-1.musicxml".
+  - PERFORMANCE GOTCHA (record for future scan QA): on this Mac, oemer 0.1.8 on a single
+    300-DPI page took ~3 min wall (700+s user across cores) when run alone, and the prod run
+    took ~5 min wall (04:01:13 upload -> 04:06:28 result) because it shared cores with the
+    direct probe. So the README's "1-2 min/page" is optimistic here; budget UP TO ~5-6 min and
+    do NOT run two oemer jobs at once. The app polls every 3s for 15 min (src/omr.ts), so it
+    tolerates this; the scan overlay just stays up the whole time ("Scanning sheet... this can
+    take a minute"), which is expected, not a hang. To distinguish hang vs work: oemer pid in
+    ps state `R` with climbing CPU time == still computing; the slow tail is the single-threaded
+    note-assembly phase AFTER the CoreML inference logs ("Extracting layers of different
+    symbols" is the last thing it logs before a long quiet stretch).
+  - The benign "Note N is not a valid note" lines oemer prints are per-symbol warnings; it
+    still produces a full score. Driver + screenshots (transient): qa-icarus.mjs in worktree
+    root (deleted after), screenshots persist at /tmp/qa-icarus/ (02-loaded.png, 04-playing.png)
+    and the engine-probe MusicXML at /tmp/qa-icarus/oemer-out/page-1.musicxml. This CLOSES #88.
+
 - 2026-05-31: PR #94 / issue #93 (re-enable controls synchronously on sheet-scan cancel) ->
   **PASS** on prod (https://piano-helper.pages.dev, `main` @ 7121fed, served bundle
   `index-5TCZSbdV.js`; bundle no longer contains `wasAudio`, the dropped branch). Drove live
