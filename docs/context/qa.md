@@ -4,6 +4,52 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-05-31: PR #107 / issue #96 (on mobile, the three upload buttons did nothing because
+  their `<input type=file>` used the HTML `hidden` attr (display:none), which iOS Safari /
+  in-app webviews refuse to forward a label tap to; fix swaps `hidden` for a
+  `.visually-hidden` CSS class (1px, position:absolute, opacity:0) that stays in the
+  hit-testing tree, makes `.file-btn { position:relative }`, and sets `pointer-events:none`
+  on the inner `.btn-icon`/`.btn-label` so a tap on the icon/text passes through to the
+  label) -> **PASS** on prod (https://piano-helper.pages.dev, served bundle
+  `index-y7N2hCyg.js`). Drove live in THREE emulated contexts via Playwright: iOS WebKit
+  (iPhone 13 device descriptor, the engine that actually had the bug), Android Chromium
+  (Pixel 5), and desktop Chromium (1280x800). This is the FIRST live QA that clicks the #96
+  buttons; the prior mobile-toolbar fix (#84) was a wrap/overflow fix, not this hit-testing one.
+  - REQ 1 (inputs present, NOT display:none, visually-hidden geometry, no `hidden` attr) PASS
+    on all three contexts and IDENTICAL across them: each of #file-input / #scan-input /
+    #audio-input has computed `display:block` (NOT none), `position:absolute`, `opacity:0`,
+    `className:"visually-hidden"`, `hasAttribute('hidden')===false`, rect 1x1, and
+    `display!=='none' && visibility!=='hidden'` (in the hit-testing tree). The old `hidden`
+    attr is gone everywhere.
+  - REQ 2 (inner spans/svg pointer-events:none) PASS on all three: inside each `.file-btn`
+    the `.btn-icon` (svg) and `.btn-label` (span) both compute `pointer-events:none`, and the
+    enclosing `label.file-btn` computes `position:relative`. So a tap on the icon/text cannot
+    be swallowed by the child; it falls through to the label.
+  - REQ 3 (tap reaches the input) PASS on all three, all three buttons. Installed a `click`
+    listener on each input (with `preventDefault` so no native picker opens) then dispatched a
+    REAL pointer event at the CENTER COORDS of the inner `.btn-icon` and the inner `.btn-label`
+    (touchscreen.tap on mobile, mouse.click on desktop) -> each input recorded exactly 2 clicks
+    (one per inner-span tap), i.e. the implicit label->input activation fired both times. This
+    proves the tap is no longer swallowed: file-input 2, scan-input 2, audio-input 2 in every
+    context. CRITICAL METHOD NOTE: tap by COORDINATE (page.mouse/touchscreen at the element's
+    bounding-box center), do NOT use `elementHandle.click()` on the inner span/svg: Playwright
+    targets the pointer-events:none node itself and the click hangs/no-ops, which would falsely
+    read as a FAIL. The coordinate tap is what actually exercises the through-to-label hit path.
+  - REQ 4 (desktop unchanged) PASS: at 1280x800 the toolbar buttons render and behave as before,
+    and a programmatic MusicXML load through #file-input (injected the grand-staff fixture via
+    DataTransfer + `change`) succeeded: Play enabled, "8 notes", sheet name "qa96", `#hand-mutes`
+    computed `display:flex` (both hands). Screenshot /tmp/qa-issue96/desktop-loaded.png shows the
+    rendered grand staff (treble C5-F5 / bass C3-G3) with the green cursor + falling notes split
+    into both hands. The change-handler wiring is intact.
+  - REQ 5 (console clean) PASS: ZERO console.error and ZERO pageerror across load + activation
+    taps in all three contexts.
+  - Screenshots persist at /tmp/qa-issue96/: ios-webkit-toolbar.png + android-chromium-toolbar.png
+    (the three buttons rendering normally on phone viewports, the 1px inputs invisible as
+    intended), desktop-loaded.png (grand staff loaded). Fixture: /tmp/qa-issue96/grand.musicxml.
+    GOTCHA: WebKit was NOT installed (only Chromium); had to `npx playwright install webkit`
+    first. For an iOS-specific bug, drive the actual WebKit engine, not just a Chromium UA spoof.
+    This CLOSES #96.
+
 - 2026-05-31: PR #103 / issue #57 (the on-screen keyboard now labels a black key with its
   SHARP accidental name only WHILE that black key is lit/sounding during playback; resting and
   merely-approaching black keys show no name; white-key labels unchanged) -> **PASS** on prod
