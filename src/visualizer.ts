@@ -119,8 +119,8 @@ export class Visualizer {
     // Background gradient depends only on height; cache it so the rAF loop never
     // calls createLinearGradient. Replaces the clearRect-to-transparent fill.
     const bg = this.ctx.createLinearGradient(0, 0, 0, this.height);
-    bg.addColorStop(0, "#0a0712");
-    bg.addColorStop(1, "#120b1f");
+    bg.addColorStop(0, "#0b0a0d"); // warm ebony stage (Nocturne, issue #127)
+    bg.addColorStop(1, "#16130e");
     this.bgGradient = bg;
   }
 
@@ -142,7 +142,7 @@ export class Visualizer {
     const { ctx, width, height } = this;
     // Fill the cached background gradient over the whole canvas; this both clears
     // the previous frame and paints the stage in one pass (no separate clearRect).
-    ctx.fillStyle = this.bgGradient ?? "#0a0712";
+    ctx.fillStyle = this.bgGradient ?? "#0b0a0d";
     ctx.fillRect(0, 0, width, height);
 
     const keyboardTop = this.keyboardTop();
@@ -237,9 +237,9 @@ export class Visualizer {
       if (note.hand === "left" || note.hand === "right") {
         const capH = Math.max(5, Math.min(8, barHeight * 0.18));
         const capFill =
-          note.hand === "right" ? "rgba(255, 255, 255, 0.95)" : "rgba(10, 7, 18, 0.92)";
+          note.hand === "right" ? "rgba(255, 255, 255, 0.95)" : "rgba(11, 10, 13, 0.92)";
         const dividerColor =
-          note.hand === "right" ? "rgba(10, 7, 18, 0.9)" : "rgba(255, 255, 255, 0.9)";
+          note.hand === "right" ? "rgba(11, 10, 13, 0.9)" : "rgba(255, 255, 255, 0.9)";
         ctx.shadowBlur = 0;
         ctx.fillStyle = capFill;
         ctx.fillRect(x + 1, top + 1, w - 2, capH);
@@ -333,13 +333,13 @@ export class Visualizer {
     // Dim resting glow strip along the top edge of the keyboard (one gradient
     // per frame, never per key). Dimmer than before so it does not fight hues.
     const grad = ctx.createLinearGradient(0, top - 30, 0, top);
-    grad.addColorStop(0, "rgba(177,75,255,0)");
-    grad.addColorStop(1, "rgba(177,75,255,0.18)");
+    grad.addColorStop(0, "rgba(216,162,58,0)"); // brass rim-light over the keybed (Nocturne)
+    grad.addColorStop(1, "rgba(216,162,58,0.16)");
     ctx.fillStyle = grad;
     ctx.fillRect(0, top - 30, width, 30);
 
     const kbH = this.keyboardHeight;
-    ctx.fillStyle = "#15101f";
+    ctx.fillStyle = "#17140f"; // warm ebony felt behind the keys
     ctx.fillRect(0, top, width, kbH);
 
     // white keys first, then black keys on top
@@ -347,8 +347,8 @@ export class Visualizer {
       if (key.black) continue;
       ctx.fillStyle = active.has(key.midi)
         ? noteColor(key.midi).activeWhiteKey
-        : "#f2ecf8";
-      ctx.strokeStyle = "#2a2238";
+        : "#f1ead9"; // ivory key
+      ctx.strokeStyle = "#2a251c";
       ctx.lineWidth = 1;
       ctx.fillRect(key.x, top, key.width, kbH);
       ctx.strokeRect(key.x, top, key.width, kbH);
@@ -357,7 +357,7 @@ export class Visualizer {
       if (!key.black) continue;
       ctx.fillStyle = active.has(key.midi)
         ? noteColor(key.midi).activeBlackKey
-        : "#100b1a";
+        : "#0d0b08"; // ebony key
       ctx.fillRect(key.x, top, key.width, kbH * 0.62);
     }
 
@@ -421,7 +421,7 @@ export class Visualizer {
       // edge column (issue #33) does not falsely label the edge key; that key labels only
       // when it has its own approaching note.
       if (!approaching.has(key.midi)) continue;
-      ctx.fillStyle = active.has(key.midi) ? "#1a0f2b" : "#5b4a72";
+      ctx.fillStyle = active.has(key.midi) ? "#1a140d" : "#6b5c44";
       ctx.fillText(midiToLabel(key.midi, this.labelMode), key.x + key.width / 2, baseline);
     }
   }
@@ -457,7 +457,7 @@ export class Visualizer {
       if (!key.black) continue;
       if (!active.has(key.midi)) continue;
       // Light text reads against the lit black-key hue (activeBlackKey fill).
-      ctx.fillStyle = "#f2ecf8";
+      ctx.fillStyle = "#f1ead9";
       ctx.fillText(midiToLabel(key.midi, this.labelMode), key.x + key.width / 2, baseline);
     }
   }

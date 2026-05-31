@@ -3,6 +3,44 @@
 UX, visual design, interaction decisions. Append durable learnings at the top of the
 relevant section, dated.
 
+## Theme: "Nocturne" (issue #127)
+
+- **2026-05-31 - Replaced the generic violet theme (it read as default "vibe-coded" AI
+  styling) with "Nocturne": a grand piano on a darkened concert stage. The instrument IS
+  the palette: ebony body, ivory keys, a single brass/gold accent for lamp-light on the lid
+  and the brass pedals. Almost nobody ships a brass-on-dark UI, so it reads as craft, not
+  default. The dark stage is honest for this app: the falling-notes view is a performance
+  surface, so it should recede (house lights down) and let the colored notes glow.**
+
+  ### Palette (the source of truth is `src/style.css` `:root`)
+  - `--bg #0b0a0d` warm ebony, `--text #efe9dc` warm ivory.
+  - `--accent #d8a23a` brass, `--accent-deep #a9761f`, `--accent-glow rgba(216,162,58,0.55)`.
+  - `--focus-ring #f0c66b`. Muted ivory text at 0.62, faint at 0.40.
+  - All surface tokens (bar/secondary/ghost) re-tinted ivory-on-charcoal; they only tint
+    **brass** on hover/active, never violet.
+
+  ### Decisions that are easy to get wrong
+  - **Brass is a LIGHT accent.** White-on-brass fails contrast (~2.3:1). The one filled-brass
+    surface (the Play hero) uses near-black ink `--on-accent #1a140d` (~7:1, AA). Do not put
+    white text on a brass fill.
+  - **Paper belongs to the sheet pane only.** The Todeo "real paper" analogue is the cream
+    `#f6f1e6` sheet-music pane with brass-brown ink `#6b4f1f`, NOT the app background. The
+    flagship falling-notes stage must stay dark ebony so the note hues pop.
+  - **Wordmark = editorial serif** (`--font-display`, system serifs, no network font) for a
+    concert-program feel; everything else stays system sans.
+  - **Keybed is literal:** ivory white keys `#f1ead9`, ebony black keys `#0d0b08`, warm felt
+    `#17140f` behind, brass rim-light gradient over the top edge.
+
+  ### Pitch-class hue wheel re-anchored 276 -> 40 (`src/piano.ts pitchHue`)
+  C/Do now lands on the brand brass (hue 40) instead of violet (276), removing the last
+  prominent violet. The other 11 pitch classes still span the full wheel (a rainbow). The
+  #67 glyph-contrast machinery self-corrects from the new hues; the two color tests
+  (`piano.test.ts`, `visualizer-color.test.ts`) carry the shifted expected values. After
+  re-anchor, the light-bar (dark-ink) pitch classes are C/E/F; dark-bar (light-ink) are
+  G/A/B.
+
+  ### Verified WCAG AA: ivory-on-ebony ~15.8:1, brass-as-text ~8.9:1, dark-ink-on-brass ~7:1.
+
 ## Scan / transcribe loading overlay (issue #86)
 
 - **2026-05-31 - Build-ready spec: replace the easy-to-miss `#track-status` line ("Scanning

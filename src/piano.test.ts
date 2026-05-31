@@ -706,14 +706,16 @@ describe("keyLabelFits (issue #57: all-or-nothing key-face label fit)", () => {
 });
 
 describe("barGlyphIsDark (issue #67: contrast-aware label ink)", () => {
-  it("uses DARK ink on the light (yellow/green/cyan) hues", () => {
-    for (const midi of [E4, F4, G4, A4]) {
+  it("uses DARK ink on the light (amber/green/cyan) hues", () => {
+    // Brass-anchored wheel (issue #127): C=40 amber, E=160 green, F=190 cyan are light.
+    for (const midi of [C4, E4, F4]) {
       expect(barGlyphIsDark(midi, { active: false, black: false })).toBe(true);
     }
   });
 
-  it("uses LIGHT ink on the dark (violet/blue) hues", () => {
-    for (const midi of [C4, B4]) {
+  it("uses LIGHT ink on the dark (blue/magenta/red) hues", () => {
+    // G=250 blue, A=310 magenta, B=10 red are dark at the white-fill lightness.
+    for (const midi of [G4, A4, B4]) {
       expect(barGlyphIsDark(midi, { active: false, black: false })).toBe(false);
     }
   });

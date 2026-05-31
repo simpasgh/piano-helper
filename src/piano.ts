@@ -540,18 +540,19 @@ export function approachingKeyMidis(
   return midis;
 }
 
-// --- Color (issue #12): pitch-class hue wheel, purple-anchored. ---
+// --- Color (issue #12): pitch-class hue wheel, brass-anchored (Nocturne, issue #127). ---
 
 // Pitch class 0..11 (C..B), handling negative midi defensively.
 export function pitchClass(midi: number): number {
   return ((midi % 12) + 12) % 12;
 }
 
-// Pure, unit-testable hue math: hue = (276 + pc * 30) mod 360 degrees.
-// 276deg is the hue of the brand violet #b14bff, so C/Do anchors on purple.
+// Pure, unit-testable hue math: hue = (40 + pc * 30) mod 360 degrees.
+// 40deg is the hue of the brand brass #d8a23a, so C/Do anchors on the theme accent
+// instead of violet. The other 11 pitch classes still span the full wheel (a rainbow).
 // Depends only on pitch class, so octaves share a hue.
 export function pitchHue(midi: number): number {
-  return (276 + pitchClass(midi) * 30) % 360;
+  return (40 + pitchClass(midi) * 30) % 360;
 }
 
 // Colors a note carries, derived from its pitch class. S/L are fixed per row
@@ -581,7 +582,7 @@ function buildNoteColors(hue: number): NoteColors {
 // Precomputed 12-entry pitch-class -> colors table, built once at module load.
 // The rAF render loop indexes this instead of building hsl strings per note.
 const PITCH_CLASS_COLORS: readonly NoteColors[] = Array.from({ length: 12 }, (_, pc) =>
-  buildNoteColors((276 + pc * 30) % 360),
+  buildNoteColors((40 + pc * 30) % 360),
 );
 
 // Colors for a midi note, looked up from the precomputed table (no per-call
@@ -597,7 +598,7 @@ export function noteColor(midi: number): NoteColors {
 // perceived luminance, and stroke the opposite ink as a thin halo so the name reads across
 // hue boundaries and on half-lit active bars.
 export const GLYPH_LIGHT = "rgba(255, 255, 255, 0.95)";
-export const GLYPH_DARK = "rgba(10, 7, 18, 0.92)";
+export const GLYPH_DARK = "rgba(15, 12, 8, 0.92)";
 // Luminance at/above which the bar is "light" and the glyph flips to dark ink (0..1).
 const GLYPH_DARK_LUM_THRESHOLD = 0.6;
 
@@ -636,7 +637,7 @@ function fillIsLight(h: number, s: number, l: number): boolean {
 // activeFill hsl(h,95%,72%). Precomputed so the render loop reads a boolean.
 const PITCH_CLASS_GLYPH_DARK: readonly { white: boolean; black: boolean; active: boolean }[] =
   Array.from({ length: 12 }, (_, pc) => {
-    const hue = (276 + pc * 30) % 360;
+    const hue = (40 + pc * 30) % 360;
     return {
       white: fillIsLight(hue, 85, 62),
       black: fillIsLight(hue, 70, 50),
