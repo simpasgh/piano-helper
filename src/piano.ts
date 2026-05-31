@@ -102,6 +102,67 @@ export function buildStaffClefMap(
   return clefs;
 }
 
+// A clef declaration as the timeline reads it: which staff, which measure index, what clef.
+export interface ClefDeclaration {
+  staffId: number;
+  measureIndex: number;
+  clef: StaffClefKind;
+}
+
+// Reduces per-measure clef declarations into the clef IN EFFECT for each measure of each
+// staff, carrying the previous clef forward across measures that do not redeclare one.
+// Returns a map keyed by staff id whose value is an array indexed by measure (length
+// `measureCount`); a measure before the staff's first declaration is undefined.
+//
+// This differs from buildStaffClefMap (first-clef-per-staff) on purpose. It is used ONLY
+// for a single-staff instrument, where a mid-piece clef change is a real hand change: an
+// OMR scan of a grand staff sometimes collapses both hands onto ONE staff that starts in
+// treble and switches to bass (issue #87). On such a staff the clef in effect at a note's
+// position is the correct hand signal. A true multi-staff grand staff keeps using
+// buildStaffClefMap, because a transient clef change on the right-hand staff there must NOT
+// move those notes to the left hand (issues #73/#82/#36).
+export function buildStaffClefTimeline(
+  declarations: Iterable<ClefDeclaration>,
+  measureCount: number,
+): Map<number, (StaffClefKind | undefined)[]> {
+  // Bucket declarations per staff so each timeline is built independently.
+  const byStaff = new Map<number, ClefDeclaration[]>();
+  for (const decl of declarations) {
+    const list = byStaff.get(decl.staffId);
+    if (list) list.push(decl);
+    else byStaff.set(decl.staffId, [decl]);
+  }
+
+  const timelines = new Map<number, (StaffClefKind | undefined)[]>();
+  for (const [staffId, decls] of byStaff) {
+    // Index declarations by measure (a later declaration in the same measure wins; in
+    // practice there is at most one clef per staff per measure begin).
+    const atMeasure = new Map<number, StaffClefKind>();
+    for (const { measureIndex, clef } of decls) atMeasure.set(measureIndex, clef);
+
+    const timeline = new Array<StaffClefKind | undefined>(measureCount);
+    let current: StaffClefKind | undefined;
+    for (let m = 0; m < measureCount; m++) {
+      const declared = atMeasure.get(m);
+      if (declared !== undefined) current = declared;
+      timeline[m] = current;
+    }
+    timelines.set(staffId, timeline);
+  }
+  return timelines;
+}
+
+// Resolves a note's hand using the clef IN EFFECT at its measure on a SINGLE-STAFF
+// instrument (issue #87). Single-staff is the only case where carrying clef changes forward
+// is correct: a collapsed grand staff that starts treble and switches to bass has both
+// hands on one staff, so the clef at the note's position is the hand. Falls back to "unknown"
+// when the clef is missing or has no hand convention, since a lone staff cannot be split by
+// position. Multi-staff instruments must use handFromStaff with the first-clef map instead.
+export function handFromClefInEffect(clef: StaffClefKind | undefined): Hand {
+  const byClef = clef ? handFromClef(clef) : null;
+  return byClef ?? "unknown";
+}
+
 // Decides a note's hand from its staff (issue #36 follow-up). The clef is the primary
 // signal and is what makes this work regardless of how the file packages the piano: a
 // grand staff is sometimes ONE instrument with two staves and sometimes TWO separate

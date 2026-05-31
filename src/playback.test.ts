@@ -11,6 +11,7 @@ import {
 } from "./playback";
 import type { VisNote } from "./visualizer";
 import type { Hand } from "./piano";
+import { buildStaffClefTimeline, handFromClefInEffect } from "./piano";
 
 const note = (time: number, midi = 60): VisNote => ({ midi, time, duration: 0.5 });
 const handNote = (hand: Hand, midi = 60): VisNote => ({ midi, time: 0, duration: 0.5, hand });
@@ -38,6 +39,46 @@ describe("hasBothHands", () => {
 
   it("is false with a right-hand note plus only unknowns", () => {
     expect(hasBothHands([handNote("right"), handNote("unknown")])).toBe(false);
+  });
+
+  // Issue #87 acceptance: an OMR-collapsed single staff (treble then bass) must split into
+  // both hands so the per-hand controls appear. This mirrors extractScore's single-staff
+  // path (clef-in-effect per measure) end to end on the pure helpers it composes.
+  it("a single staff that switches treble->bass tags BOTH hands -> hasBothHands true", () => {
+    const timeline = buildStaffClefTimeline(
+      [
+        { staffId: 0, measureIndex: 0, clef: "treble" },
+        { staffId: 0, measureIndex: 9, clef: "bass" },
+      ],
+      12,
+    );
+    const t = timeline.get(0)!;
+    // Notes scattered before and after the switch, all on the one staff.
+    const measureOf = [0, 3, 8, 9, 10, 11];
+    const notes: VisNote[] = measureOf.map((m, i) => ({
+      midi: 60 + i,
+      time: i,
+      duration: 0.5,
+      hand: handFromClefInEffect(t[m]),
+    }));
+    expect(hasBothHands(notes)).toBe(true);
+    expect(notes.filter((n) => n.hand === "right").length).toBeGreaterThan(0);
+    expect(notes.filter((n) => n.hand === "left").length).toBeGreaterThan(0);
+  });
+
+  it("a stable single-staff treble part stays one hand -> hasBothHands false", () => {
+    const timeline = buildStaffClefTimeline(
+      [{ staffId: 0, measureIndex: 0, clef: "treble" }],
+      4,
+    );
+    const t = timeline.get(0)!;
+    const notes: VisNote[] = [0, 1, 2, 3].map((m, i) => ({
+      midi: 60 + i,
+      time: i,
+      duration: 0.5,
+      hand: handFromClefInEffect(t[m]),
+    }));
+    expect(hasBothHands(notes)).toBe(false);
   });
 });
 

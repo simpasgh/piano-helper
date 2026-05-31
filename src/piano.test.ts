@@ -11,6 +11,8 @@ import {
   handFromClef,
   handFromStaff,
   buildStaffClefMap,
+  buildStaffClefTimeline,
+  handFromClefInEffect,
   handFromPitch,
   HAND_SPLIT_MIDI,
   isHandMuted,
@@ -209,6 +211,87 @@ describe("buildStaffClefMap (keys clefs by sheet-wide staff id, not array positi
     ]);
     expect(map.get(0)).toBe("treble");
     expect(map.get(1)).toBe("bass");
+  });
+});
+
+describe("buildStaffClefTimeline (issue #87: clef in effect per measure, single staff)", () => {
+  it("carries a clef forward across measures that do not redeclare it", () => {
+    // One staff declares treble at measure 0, then switches to bass at measure 4.
+    const timeline = buildStaffClefTimeline(
+      [
+        { staffId: 0, measureIndex: 0, clef: "treble" },
+        { staffId: 0, measureIndex: 4, clef: "bass" },
+      ],
+      8,
+    );
+    const t = timeline.get(0)!;
+    expect(t).toEqual([
+      "treble",
+      "treble",
+      "treble",
+      "treble",
+      "bass",
+      "bass",
+      "bass",
+      "bass",
+    ]);
+  });
+
+  it("leaves measures before the first declaration undefined", () => {
+    const timeline = buildStaffClefTimeline(
+      [{ staffId: 0, measureIndex: 2, clef: "treble" }],
+      4,
+    );
+    expect(timeline.get(0)).toEqual([undefined, undefined, "treble", "treble"]);
+  });
+
+  it("builds an independent timeline per staff id", () => {
+    const timeline = buildStaffClefTimeline(
+      [
+        { staffId: 0, measureIndex: 0, clef: "treble" },
+        { staffId: 1, measureIndex: 0, clef: "bass" },
+      ],
+      2,
+    );
+    expect(timeline.get(0)).toEqual(["treble", "treble"]);
+    expect(timeline.get(1)).toEqual(["bass", "bass"]);
+  });
+
+  it("OMR-collapsed staff: a treble->bass switch yields BOTH hands across the timeline", () => {
+    // The icarus.pdf case: one staff, treble through measure 8, bass from measure 8.
+    const timeline = buildStaffClefTimeline(
+      [
+        { staffId: 0, measureIndex: 0, clef: "treble" },
+        { staffId: 0, measureIndex: 8, clef: "bass" },
+      ],
+      12,
+    );
+    const t = timeline.get(0)!;
+    expect(handFromClefInEffect(t[0])).toBe("right");
+    expect(handFromClefInEffect(t[7])).toBe("right");
+    expect(handFromClefInEffect(t[8])).toBe("left");
+    expect(handFromClefInEffect(t[11])).toBe("left");
+  });
+
+  it("stable single-staff part stays one hand (clef-in-effect == first clef)", () => {
+    const timeline = buildStaffClefTimeline(
+      [{ staffId: 0, measureIndex: 0, clef: "treble" }],
+      5,
+    );
+    const t = timeline.get(0)!;
+    for (let m = 0; m < 5; m++) expect(handFromClefInEffect(t[m])).toBe("right");
+  });
+});
+
+describe("handFromClefInEffect (issue #87: hand from the clef in effect, single staff)", () => {
+  it("maps treble to right and bass to left", () => {
+    expect(handFromClefInEffect("treble")).toBe("right");
+    expect(handFromClefInEffect("bass")).toBe("left");
+  });
+
+  it("returns unknown for missing or hand-less clefs (a lone staff can't split by position)", () => {
+    expect(handFromClefInEffect(undefined)).toBe("unknown");
+    expect(handFromClefInEffect("other")).toBe("unknown");
   });
 });
 
