@@ -4,6 +4,58 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-05-31: PR #146 / issue #6 (FIRST slice of the OMR correction UI: a "Correct" toggle in
+  the toolbar next to "Names". When enabled, playback pauses and the user selects a falling note
+  and edits its pitch or deletes it; the EDIT diverges from the OSMD scan above on purpose -- the
+  sheet stays the original scan, only the falling/playback layer changes. DOM: `#correct-btn`
+  (toggle), `#note-edit` cluster, `#note-edit-readout`, `#pitch-up-btn`/`#pitch-down-btn`,
+  `#delete-note-btn`, `#edit-live` aria-live, `#track-status` divergence banner,
+  `#sheet-note-count`. Keys: ArrowUp = first note / ArrowDown = last, then Up/Down move; +/-
+  nudge a semitone; Delete/Backspace deletes; editing only while paused/in Correct mode) ->
+  **PASS** on prod (https://piano-helper.pages.dev, served bundle `index-BXkpHkoe.js`). Drove
+  live in real Chromium (Playwright 1.60.0 via the sibling todeoapp install). FIRST live QA of
+  the correction UI. This CLOSES the #146 gate.
+  - BUNDLE PROOF the feature is live: served JS contains `correct-btn` x1, `note-edit-readout` x1,
+    `pitch-up-btn`/`pitch-down-btn`/`delete-note-btn`/`edit-live`/`track-status` x1 each,
+    `setAttribute("role","application")`, and the exact banner string `Edited. The sheet below
+    still shows the original scan.`
+  - FIXTURE = the shipped `https://piano-helper.pages.dev/demo.musicxml` ("C Major Scale", 16
+    `<note>`, single treble staff). Loaded via `#file-input` (File + DataTransfer + `change`) ->
+    `#sheet-note-count` = "15 notes".
+  - REQ 1 (toggle): `#correct-btn` aria-pressed false -> **true** on click; `#stage` got
+    `tabindex=0` + `role="application"`. Play stayed "Play" (paused).
+  - REQ 2 (select + nudge): focus `#stage`, ArrowUp -> `#note-edit-readout` = "Do",
+    `#note-edit` un-hidden (the Mi/-/+/Delete cluster appears in the toolbar). Pressed "+" x4 ->
+    readout **"Do" -> "Mi"**; `#edit-live` announced "Re# changed to Mi"; `#track-status` =
+    **"Edited. The sheet below still shows the original scan."** Screenshot 03-nudged-up.png shows
+    the edited first note as a GREEN "Mi" falling bar at the keybed LIGHTING the Mi key (active
+    key follows the edit) and the toolbar readout "Mi".
+  - REQ 3 (sheet UNCHANGED = intended divergence): the OSMD sheet's first note still renders/
+    highlights as **"Do"** at the start of the staff while the falling layer shows "Mi". Confirmed
+    by eye in 03/05 screenshots. (The OSMD sheet emits no per-note text nodes -- only "3" measure
+    number + "C Major Scale" title -- so divergence is verified VISUALLY on the green sheet
+    cursor/notehead, not by scanning svg text.)
+  - REQ 4 (delete): with the note selected, Delete -> `#sheet-note-count` **"15 notes" -> "14
+    notes"** (-1); `#edit-live` announced "Deleted Mi".
+  - REQ 5 (Play clears + runs): clicked `#play-btn` -> `#play-label` "Play" -> **"Pause"**,
+    `#time-readout` "0:01 / 0:08", `#note-edit` hidden again (selection cleared), falling notes
+    animate, sheet cursor advances. Screenshot 05-playing.png.
+  - REQ 6 (console): **0 console.error, 0 pageerror** across boot + load + toggle + select +
+    4x nudge + delete + play.
+  - VERDICT: **PASS** on all six. Correct toggle flips aria-pressed + makes the stage focusable
+    (tabindex/role=application); keyboard select + semitone nudge moves the falling bar and the
+    active key to the new pitch with a live aria announcement; the divergence banner shows and the
+    OSMD scan above stays the original; delete decrements the count and announces; Play clears the
+    selection and resumes. Clean console.
+  - GOTCHA / method: the EDIT layer (falling notes + piano keys + `#sheet-note-count`) diverges
+    from the OSMD sheet ON PURPOSE -- do NOT flag the unchanged sheet as a bug; that is the
+    feature. To verify divergence, compare the sheet notehead/cursor (still "Do") against the
+    falling-bar label (now "Mi") by eye, since OSMD draws no per-note text. The edit cluster
+    `#note-edit` is hidden unless in Correct mode WITH a selection, so assert its `.hidden` flips
+    on select and back on Play. Pitch nudge listens to the literal "+"/"-" keys (not NumpadAdd).
+    Artifacts under /tmp/qa146/ (demo.musicxml, drive.mjs, 01-loaded / 02-selected / 03-nudged-up
+    / 04-deleted / 05-playing .png).
+
 - 2026-05-31: PR #144 (suppress the OSMD per-part instrument label via `drawPartNames: false`
   in `src/main.ts` OSMD ctor, main.ts:93. Clarity-OMR emits a UUID as the MusicXML part name,
   so OSMD rendered "Instr. <uuid>" down the left margin of the sheet; this turns the label off
