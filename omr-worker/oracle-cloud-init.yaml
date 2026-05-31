@@ -1,0 +1,102 @@
+#cloud-config
+# Piano Helper OMR worker first-boot setup for an Oracle Always Free ARM VM
+# (VM.Standard.A1.Flex, Ubuntu 22.04 aarch64).
+#
+# This file is passed to `oci compute instance launch` via the launch script
+# (oracle-launch.sh -> --user-data-file). On first boot it:
+#   1. installs poppler-utils (pdftoppm) + python venv tooling + git,
+#   2. clones the repo to /opt/piano-helper,
+#   3. builds the venv and installs requirements (two-step, oemer --no-deps),
+#   4. installs + enables the systemd unit omr-worker.service,
+#   5. adds a light keep-alive cron so Oracle does not reclaim the idle VM.
+#
+# It does NOT write the R2 credentials. Those are a secret, so they are NOT baked
+# into user-data (user-data is readable from the instance metadata service). After
+# the VM lands you SSH in once and create /etc/piano-helper-omr.env. The unit will
+# fail to start until that file exists, then systemd Restart=always picks it up,
+# or you run `systemctl restart omr-worker`. See ORACLE.md.
+#
+# Tunables: OMR_REPO_URL and OMR_REPO_REF below pin what gets cloned. Override by
+# editing this file before launch (the launch script can template REPO_URL/REF in).
+
+write_files:
+  # First-boot provisioning script. Kept as a file so cloud-init logs capture each
+  # step and re-running it by hand is easy if the first boot is interrupted.
+  - path: /opt/omr-bootstrap.sh
+    permissions: "0755"
+    owner: root:root
+    content: |
+      #!/usr/bin/env bash
+      # Idempotent provisioning for the OMR worker. Safe to re-run.
+      set -euo pipefail
+
+      OMR_REPO_URL="${OMR_REPO_URL:-https://github.com/simpasgh/piano-helper.git}"
+      OMR_REPO_REF="${OMR_REPO_REF:-main}"
+      REPO_DIR=/opt/piano-helper
+      WORKER_DIR="$REPO_DIR/omr-worker"
+      VENV="$WORKER_DIR/.venv"
+      RUN_USER=ubuntu
+
+      log() { echo "[omr-bootstrap] $*"; }
+
+      log "Installing system packages (poppler-utils, python venv, git, file)."
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -y
+      # Ubuntu 22.04 ships Python 3.10, which satisfies homr (<3.13) and the
+      # onnxruntime/scikit-learn wheels (>=3.11 is NOT required on 22.04; 3.10
+      # wheels exist). poppler-utils provides pdftoppm for PDF rasterization.
+      apt-get install -y poppler-utils python3 python3-venv python3-pip file git
+
+      log "Fetching the repo ($OMR_REPO_URL @ $OMR_REPO_REF) into $REPO_DIR."
+      if [ -d "$REPO_DIR/.git" ]; then
+        git -C "$REPO_DIR" fetch --depth 1 origin "$OMR_REPO_REF"
+        git -C "$REPO_DIR" checkout -f FETCH_HEAD
+      else
+        rm -rf "$REPO_DIR"
+        git clone --depth 1 --branch "$OMR_REPO_REF" "$OMR_REPO_URL" "$REPO_DIR"
+      fi
+      chown -R "$RUN_USER":"$RUN_USER" "$REPO_DIR"
+
+      log "Building the Python venv and installing requirements (this is slow:"
+      log "oemer/homr pull a large torch/onnx ML stack)."
+      sudo -u "$RUN_USER" python3 -m venv "$VENV"
+      sudo -u "$RUN_USER" "$VENV/bin/pip" install --upgrade pip
+      sudo -u "$RUN_USER" "$VENV/bin/pip" install -r "$WORKER_DIR/requirements.txt"
+      # oemer separately, WITHOUT deps: it pins onnxruntime-gpu (no ARM wheel), so a
+      # normal install fails. CPU onnxruntime from requirements.txt provides the module.
+      sudo -u "$RUN_USER" "$VENV/bin/pip" install --no-deps -r "$WORKER_DIR/requirements-oemer.txt"
+
+      log "Installing the systemd unit."
+      cp "$WORKER_DIR/omr-worker.service" /etc/systemd/system/omr-worker.service
+      systemctl daemon-reload
+      systemctl enable omr-worker.service
+
+      # Start now only if the creds file already exists. On a fresh VM it will not,
+      # so we just enable the unit; you create /etc/piano-helper-omr.env over SSH and
+      # then `systemctl restart omr-worker`. Restart=always also keeps retrying.
+      if [ -f /etc/piano-helper-omr.env ]; then
+        log "Creds file present; starting omr-worker."
+        systemctl restart omr-worker.service || true
+      else
+        log "No /etc/piano-helper-omr.env yet. The unit is ENABLED but not started."
+        log "SSH in, create that file (see ORACLE.md), then: sudo systemctl restart omr-worker"
+      fi
+
+      # Keep-alive: Oracle can reclaim Always Free compute that stays under ~20% CPU
+      # over a 7-day window. OMR is bursty, so add a tiny periodic nudge. This is
+      # intentionally light and exists only to stay above the reclamation floor.
+      log "Installing keep-alive cron for user $RUN_USER."
+      CRON_LINE='*/15 * * * * timeout 20 sh -c '"'"'while :; do :; done'"'"' >/dev/null 2>&1'
+      ( sudo -u "$RUN_USER" crontab -l 2>/dev/null | grep -v 'omr-keepalive' || true; \
+        echo "$CRON_LINE # omr-keepalive" ) | sudo -u "$RUN_USER" crontab -
+
+      log "Bootstrap complete."
+
+runcmd:
+  - [ bash, -lc, "/opt/omr-bootstrap.sh 2>&1 | tee -a /var/log/omr-bootstrap.log" ]
+
+# Notes:
+# - This runs as cloud-init's default 'ubuntu' user context on Canonical images.
+# - The pip install can take 10-20+ minutes on first boot (large ML wheels). Watch
+#   /var/log/omr-bootstrap.log and /var/log/cloud-init-output.log over SSH.
+# - No inbound port is opened: the worker only makes outbound HTTPS to R2.
