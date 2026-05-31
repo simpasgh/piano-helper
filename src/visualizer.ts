@@ -230,8 +230,8 @@ export class Visualizer {
       // edge so the eye reads which hand plays it without overriding the pitch hue (hue still
       // owns the body). Light cap = right hand, dark cap = left hand. A 1px opposite-luminance
       // divider runs under the cap so each cap carries BOTH luminance poles and can never wash
-      // out against the hue beneath it (a white cap still reads on pale yellow, a dark cap on
-      // deep violet). Drawn after the body fill with the glow off, before the contact stroke;
+      // out against the hue beneath it (a white cap still reads on pale amber, a dark cap on
+      // deep blue). Drawn after the body fill with the glow off, before the contact stroke;
       // inherits the bar's globalAlpha so off-range bars (0.35) keep a dimmed cap. "unknown"
       // draws nothing, so single-staff and audio-derived scores render exactly as before.
       if (note.hand === "left" || note.hand === "right") {

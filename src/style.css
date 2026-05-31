@@ -315,8 +315,8 @@ body {
   white-space: nowrap;
 }
 
-/* Tier 1, PRIMARY (issue #46): the SOLE filled-violet hero is Play. One accent per viewport
-   is what gives the bar a real primary instead of "purple everywhere". */
+/* Tier 1, PRIMARY (issue #46): the SOLE filled-brass hero is Play. One accent per viewport
+   is what gives the bar a real primary instead of "accent everywhere". */
 #play-btn {
   background: var(--accent-gradient);
   color: var(--on-accent);
@@ -359,8 +359,8 @@ body {
 }
 
 /* Tier 2, SECONDARY (issue #46): the three score loaders. A quiet raised neutral surface,
-   clearly clickable and more prominent than ghost controls, but NOT filled violet so it never
-   competes with the Play hero. Tints violet on hover so the brand still answers the touch. */
+   clearly clickable and more prominent than ghost controls, but NOT filled brass so it never
+   competes with the Play hero. Tints brass on hover so the brand still answers the touch. */
 .file-btn {
   position: relative;
   background: var(--secondary-bg);
@@ -979,7 +979,7 @@ button:focus-visible,
 #sheet:empty::before {
   content: "Load a MusicXML file to see the score here.";
   display: block;
-  color: #8a7a5c;
+  color: #6f6043; /* warm brown on cream, meets AA (~4.8:1) */
   font-size: 0.9rem;
   padding: 1rem;
 }
