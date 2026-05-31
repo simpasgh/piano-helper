@@ -183,3 +183,62 @@ describe("Heroicons toolbar/transport icons (issue #48)", () => {
     expect(main).not.toMatch(/namesBtn\.textContent\s*=/);
   });
 });
+
+// Scan / transcribe loading overlay (issue #86). Same text-guard pattern: lock the markup
+// hooks main.ts queries, the dialog a11y attributes, the body-extra hook the phone CSS
+// hides, and the overlay-over-stage stacking so a refactor cannot silently regress it.
+describe("scan overlay markup + CSS (issue #86)", () => {
+  it.each(["scan-overlay", "scan-overlay-title", "scan-overlay-cancel"])(
+    "keeps the #%s hook main.ts depends on",
+    (id) => {
+      expect(html).toContain(`id="${id}"`);
+    },
+  );
+
+  it("declares dialog semantics so AT announces a busy modal", () => {
+    expect(html).toMatch(/id="scan-overlay"[\s\S]*?role="dialog"/);
+    expect(html).toMatch(/id="scan-overlay"[\s\S]*?aria-modal="true"/);
+    expect(html).toMatch(/id="scan-overlay"[\s\S]*?aria-labelledby="scan-overlay-title"/);
+    expect(html).toMatch(/id="scan-overlay"[\s\S]*?aria-describedby="scan-overlay-body"/);
+    expect(html).toMatch(/id="scan-overlay"[\s\S]*?aria-busy="true"/);
+  });
+
+  it("starts hidden and sits inside #app after the stage canvas", () => {
+    const stageIdx = html.indexOf('id="stage"');
+    const overlayIdx = html.indexOf('id="scan-overlay"');
+    expect(stageIdx).toBeGreaterThan(-1);
+    expect(overlayIdx).toBeGreaterThan(stageIdx);
+    expect(html).toMatch(/id="scan-overlay"[\s\S]*?hidden/);
+  });
+
+  it("wraps the droppable second sentence so the phone layout can hide it", () => {
+    expect(html).toContain('class="scan-overlay-body-extra"');
+    expect(css).toMatch(/\.scan-overlay-body-extra\s*\{[\s\S]*?display:\s*none/);
+  });
+
+  it("covers the stage but not the toolbar (overlay below, topbar above)", () => {
+    // The overlay is absolutely positioned at z-index 5; the topbar must stack above it.
+    expect(css).toMatch(/\.scan-overlay\s*\{[\s\S]*?position:\s*absolute/);
+    expect(css).toMatch(/\.scan-overlay\s*\{[\s\S]*?z-index:\s*5/);
+    expect(css).toMatch(/\.topbar\s*\{[\s\S]*?z-index:\s*6/);
+  });
+
+  it("respects reduced motion (no spin, a gentle pulse instead)", () => {
+    expect(css).toContain("prefers-reduced-motion: reduce");
+    expect(css).toContain("scan-pulse");
+  });
+
+  it("wires Cancel and the cancelled-sentinel swallow, never alerting on a cancel", () => {
+    expect(main).toContain("cancelScanOverlay");
+    expect(main).toContain("isCancelledRequested");
+    expect(main).toContain("isCancelled(err)");
+  });
+
+  it("keeps the overlay copy free of em and en dashes", () => {
+    const overlay = html.slice(
+      html.indexOf('id="scan-overlay"'),
+      html.indexOf('id="rotate-hint"'),
+    );
+    expect(overlay).not.toMatch(/[–—]/);
+  });
+});

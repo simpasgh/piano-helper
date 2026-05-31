@@ -3,7 +3,8 @@ import * as Tone from "tone";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { Visualizer } from "./visualizer";
 import { extractScore, type ScoreData } from "./score";
-import { submitOmr, pollOmrResult } from "./omr";
+import { submitOmr, pollOmrResult, isCancelled } from "./omr";
+import { scanOverlayTitle, type ScanOverlayKind } from "./scan-overlay";
 import { chooseVideoFormat, buildExportFilename } from "./recorder";
 import {
   hasBothHands,
@@ -69,6 +70,13 @@ const sheetNameInput = document.getElementById("sheet-name-input") as HTMLInputE
 const sheetNoteCount = document.getElementById("sheet-note-count") as HTMLSpanElement;
 const trackStatus = document.getElementById("track-status") as HTMLSpanElement;
 const soundStatus = document.getElementById("sound-status") as HTMLSpanElement;
+const scanOverlay = document.getElementById("scan-overlay") as HTMLDivElement;
+const scanOverlayTitleEl = document.getElementById(
+  "scan-overlay-title",
+) as HTMLHeadingElement;
+const scanOverlayCancel = document.getElementById(
+  "scan-overlay-cancel",
+) as HTMLButtonElement;
 
 const visualizer = new Visualizer(canvas);
 const osmd = new OpenSheetMusicDisplay("sheet", {
@@ -542,15 +550,86 @@ function setBusyUI(active: boolean): void {
   }
 }
 
+// Scan-overlay state. `cancelRequested` is the client-side abandon flag the OMR poll
+// loop checks (the job keeps running server-side, we just stop waiting). `overlayKind`
+// records what is running so a programmatic cancel knows it was the audio path (whose
+// transcription cannot be polled-aborted, so cancelling just abandons the UI wait).
+let cancelRequested = false;
+let overlayKind: ScanOverlayKind | null = null;
+let lastFocusedBeforeOverlay: HTMLElement | null = null;
+// Bumped each time a job starts so a cancelled-then-restarted audio job's late finally
+// cannot tear down the newer job's overlay (the audio transcription cannot be aborted).
+let jobGeneration = 0;
+
+// Show the blocking overlay over the stage for a ~1-minute opaque job. Saves the
+// previously-focused element and moves focus to Cancel; the busy state already greyed
+// the toolbar, so this is the primary feedback.
+function showScanOverlay(kind: ScanOverlayKind): void {
+  overlayKind = kind;
+  cancelRequested = false;
+  scanOverlayTitleEl.textContent = scanOverlayTitle(kind);
+  lastFocusedBeforeOverlay =
+    document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  scanOverlay.hidden = false;
+  scanOverlayCancel.focus();
+}
+
+// Re-hide the overlay and restore focus to whatever had it before the overlay opened.
+function hideScanOverlay(): void {
+  if (scanOverlay.hidden) return;
+  scanOverlay.hidden = true;
+  overlayKind = null;
+  const toRestore = lastFocusedBeforeOverlay;
+  lastFocusedBeforeOverlay = null;
+  if (toRestore && document.contains(toRestore)) {
+    toRestore.focus();
+  }
+}
+
+// Cancel = client-side abandon. Sets the poll-loop flag (the scan path rejects with the
+// CANCELLED sentinel its catch swallows), closes the overlay, re-enables the controls,
+// and restores the prior slot. For the audio path there is nothing to poll-abort, so we
+// just tear down the UI here; the in-flight transcription is ignored on completion.
+function cancelScanOverlay(): void {
+  if (scanOverlay.hidden) return;
+  cancelRequested = true;
+  const wasAudio = overlayKind === "audio";
+  hideScanOverlay();
+  if (wasAudio) {
+    setBusyUI(false);
+    restoreSheetName();
+  }
+}
+
+scanOverlayCancel.addEventListener("click", () => cancelScanOverlay());
+
+// Minimal focus trap: Cancel is the only control, so Tab / Shift+Tab keep focus on it,
+// and Escape behaves like Cancel (abandon + close). Scoped to the overlay node so it
+// only fires while the overlay is open.
+scanOverlay.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    cancelScanOverlay();
+  } else if (e.key === "Tab") {
+    e.preventDefault();
+    scanOverlayCancel.focus();
+  }
+});
+
 async function scanSheet(file: File): Promise<void> {
+  ++jobGeneration;
   setBusyUI(true);
+  showScanOverlay("scan");
   showStatus("Scanning sheet... (this can take a minute)");
   try {
     const jobId = await submitOmr(file);
-    const xml = await pollOmrResult(jobId);
+    const xml = await pollOmrResult(jobId, {
+      isCancelledRequested: () => cancelRequested,
+    });
     await loadScoreXml(xml, file.name);
   } finally {
     setBusyUI(false);
+    hideScanOverlay();
   }
 }
 
@@ -559,6 +638,11 @@ scanInput.addEventListener("change", () => {
   const file = scanInput.files?.[0];
   if (!file) return;
   scanSheet(file).catch((err) => {
+    // A cancel is a deliberate abandon, not a failure: just restore the slot quietly.
+    if (isCancelled(err)) {
+      restoreSheetName();
+      return;
+    }
     console.error("Scan failed:", err);
     showStatus("Scan failed.");
     alert(`Scan failed: ${err.message}`);
@@ -568,12 +652,22 @@ scanInput.addEventListener("change", () => {
 });
 
 async function transcribeAudio(file: File): Promise<void> {
+  const generation = ++jobGeneration;
   setBusyUI(true);
+  showScanOverlay("audio");
   showStatus("Transcribing audio... (this can take a minute)");
   try {
     await loadAudioFile(file);
+    // If the user cancelled while transcription was still running, drop the result so
+    // the abandoned job does not suddenly load a score after the overlay closed.
+    if (cancelRequested) return;
   } finally {
-    setBusyUI(false);
+    // Only tear down if this is still the active job: a cancel may have started a newer
+    // one, and this stale transcription must not close the new overlay.
+    if (generation === jobGeneration) {
+      setBusyUI(false);
+      hideScanOverlay();
+    }
   }
 }
 
@@ -582,6 +676,10 @@ audioInput.addEventListener("change", () => {
   const file = audioInput.files?.[0];
   if (!file) return;
   transcribeAudio(file).catch((err) => {
+    if (cancelRequested) {
+      restoreSheetName();
+      return;
+    }
     console.error("Transcription failed:", err);
     showStatus("Transcription failed.");
     alert(`Could not transcribe audio: ${err.message}`);

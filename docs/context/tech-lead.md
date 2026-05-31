@@ -30,6 +30,41 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-31 - Scan/transcribe loading overlay SHIPPED (#86): a blocking stage overlay + a client-side Cancel that abandons the wait, never aborts the server job.**
+  Replaced the too-quiet `#track-status` line with a full-stage overlay per the Designer spec (design.md top
+  section). One `#scan-overlay` node in `index.html` AFTER `#stage` (role=dialog, aria-modal, aria-busy,
+  labelledby/describedby), default `hidden`. Pieces and gotchas:
+  - **Overlay covers the stage, NOT the toolbar.** The spec markup is one node inside `#app` with
+    `position:absolute; inset:0; z-index:5`. `#app` got `position:relative` (the containing block). With
+    `inset:0` it would also cover the toolbar, so `.topbar` got `position:relative; z-index:6` to stack
+    ABOVE the overlay; its near-opaque `--bar-surface` (0.92) keeps it clearly visible while the overlay
+    blurs/dims only the sheet+stage region below it. This is the spec-faithful way to get "toolbar visible,
+    stage covered" without extra wrapper DOM.
+  - **Cancel = client-side abandon (the OMR job runs server-side and cannot truly abort).** `pollOmrResult`
+    (`src/omr.ts`) gained an injectable `isCancelledRequested?: () => boolean` checked before each request
+    AND before each sleep; when true it rejects with `new Error(OMR_CANCELLED)`. New exports `OMR_CANCELLED`
+    + `isCancelled(err)` make the sentinel distinguishable from a real failure. `scanSheet`'s catch calls
+    `isCancelled(err)` and, if true, just `restoreSheetName()` and returns: NO alert, NO "Scan failed"
+    status. The `finally` always runs `setBusyUI(false)` + `hideScanOverlay()`.
+  - **Audio path has no abortable poll**, so Cancel for the audio kind tears down the UI immediately
+    (`cancelScanOverlay` sets the flag, hides the overlay, `setBusyUI(false)`, `restoreSheetName`) and the
+    in-flight `loadAudioFile` result is dropped on completion via a `cancelRequested` guard. A
+    `jobGeneration` counter guards `transcribeAudio`'s finally so a cancelled-then-restarted job's late
+    finally cannot close the NEWER overlay (the transcription itself keeps running in the background).
+  - **A11y:** focus moves to Cancel on open, the prior `document.activeElement` is saved and restored on
+    close. Minimal focus trap on the overlay node: Tab/Shift+Tab `preventDefault` + refocus Cancel (the only
+    control); Escape routes through `cancelScanOverlay`. The global Space/arrow handler already bails on
+    `busy`, so it does not fight the overlay. Reduced-motion `@media` swaps the spin/fade for a gentle
+    opacity pulse.
+  - **Pure helper + tests:** `src/scan-overlay.ts` `scanOverlayTitle(kind)` (kind->heading) is the only
+    testable logic extracted (DOM show/hide stays in main.ts); 3 unit tests incl. a no-dash guard. `omr.test.ts`
+    gained 3 cancel tests (cancel-before-first-poll bails with zero fetches, cancel-mid-poll bails before the
+    sleep, and `isCancelled` separates the sentinel from real "Scan failed"/"Could not recognize" errors).
+    `toolbar.test.ts` gained an #86 markup/CSS guard block (ids, dialog attrs, overlay-after-stage,
+    body-extra hide, z-index 5 vs topbar 6, reduced-motion, Cancel/sentinel wiring in main.ts, no-dash).
+    Suite 258 green, `npm run build` green. Live in-browser pass (real OMR/audio job + Cancel + Escape +
+    focus restore + reduced-motion) is the post-merge QA gate.
+
 - **2026-05-31 - #87 fix-forward (#90): readClefDeclarations dropped EVERY clef on a real collapsed single-staff parse, so the controls still stayed hidden in prod. Two OSMD-extraction gotchas + the first real-parse test.**
   The #87 timeline helpers were correct, but `readClefDeclarations` (the OSMD extraction that feeds them)
   collected ZERO declarations for a single-staff treble->bass score, so `buildStaffClefTimeline` was empty

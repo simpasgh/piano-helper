@@ -1,5 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
-import { submitOmr, pollOmrResult, isFailureSentinel } from "./omr";
+import {
+  submitOmr,
+  pollOmrResult,
+  isFailureSentinel,
+  isCancelled,
+  OMR_CANCELLED,
+} from "./omr";
 
 function jsonResponse(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), {
@@ -114,6 +120,64 @@ describe("pollOmrResult", () => {
       pollOmrResult("job-1", { fetchFn, sleep, now: () => 0 }),
     ).rejects.toThrow("OMR is not configured.");
     expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("rejects with the cancelled sentinel when cancel is requested before the first poll", async () => {
+    const fetchFn = vi.fn(async () =>
+      jsonResponse({ status: "pending" }, 404),
+    ) as unknown as typeof fetch;
+    const sleep = vi.fn(async () => {});
+
+    await expect(
+      pollOmrResult("job-1", {
+        fetchFn,
+        sleep,
+        now: () => 0,
+        isCancelledRequested: () => true,
+      }),
+    ).rejects.toThrow(OMR_CANCELLED);
+    // It bailed before issuing any request, so the abandon is immediate.
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("rejects with the cancelled sentinel when cancel is requested mid-poll", async () => {
+    let cancelled = false;
+    const fetchFn = vi.fn(async () => {
+      // Request the cancel after the first pending response comes back.
+      cancelled = true;
+      return jsonResponse({ status: "pending" }, 404);
+    }) as unknown as typeof fetch;
+    const sleep = vi.fn(async () => {});
+
+    await expect(
+      pollOmrResult("job-1", {
+        fetchFn,
+        sleep,
+        intervalMs: 10,
+        timeoutMs: 100000,
+        now: () => 0,
+        isCancelledRequested: () => cancelled,
+      }),
+    ).rejects.toThrow(OMR_CANCELLED);
+    // Polled once, then saw the cancel before sleeping and bailed without waiting.
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("isCancelled distinguishes the cancelled sentinel from a real failure", async () => {
+    // The sentinel error is recognized...
+    const cancelErr = await pollOmrResult("job-1", {
+      fetchFn: (async () => jsonResponse({}, 404)) as unknown as typeof fetch,
+      sleep: async () => {},
+      now: () => 0,
+      isCancelledRequested: () => true,
+    }).catch((e) => e);
+    expect(isCancelled(cancelErr)).toBe(true);
+
+    // ...but a genuine failure is NOT, so the caller will surface it.
+    expect(isCancelled(new Error("Scan failed. Please try again."))).toBe(false);
+    expect(isCancelled(new Error("Could not recognize any notes"))).toBe(false);
+    expect(isCancelled("not an error")).toBe(false);
   });
 
   it("throws on timeout while still pending", async () => {
