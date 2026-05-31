@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   DEFAULT_SHEET_NAME,
   MAX_SHEET_NAME_LENGTH,
+  OSMD_PLACEHOLDER_TITLE,
   normalizeSheetName,
   deriveDefaultSheetName,
   resolveEditedSheetName,
@@ -52,6 +53,28 @@ describe("deriveDefaultSheetName", () => {
 
   it("normalizes a messy title before using it", () => {
     expect(deriveDefaultSheetName(null, "  Étude   No. 3 \n")).toBe("Étude No. 3");
+  });
+
+  it("skips OSMD's 'Untitled Score' placeholder and uses the stripped file name (#64)", () => {
+    expect(deriveDefaultSheetName("moonlight-sonata.musicxml", OSMD_PLACEHOLDER_TITLE)).toBe(
+      "moonlight-sonata",
+    );
+    expect(deriveDefaultSheetName("moonlight-sonata.xml", "Untitled Score")).toBe(
+      "moonlight-sonata",
+    );
+    expect(deriveDefaultSheetName("moonlight-sonata.mxl", "Untitled Score")).toBe(
+      "moonlight-sonata",
+    );
+  });
+
+  it("matches the placeholder case- and whitespace-insensitively (#64)", () => {
+    expect(deriveDefaultSheetName("prelude.musicxml", "  untitled score  ")).toBe("prelude");
+    expect(deriveDefaultSheetName("prelude.musicxml", "UNTITLED SCORE")).toBe("prelude");
+  });
+
+  it("falls through the placeholder to DEFAULT_SHEET_NAME when there is no file name (#64)", () => {
+    expect(deriveDefaultSheetName(null, OSMD_PLACEHOLDER_TITLE)).toBe(DEFAULT_SHEET_NAME);
+    expect(deriveDefaultSheetName("", "Untitled Score")).toBe(DEFAULT_SHEET_NAME);
   });
 });
 

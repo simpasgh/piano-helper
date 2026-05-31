@@ -30,6 +30,20 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-31 - #64: `deriveDefaultSheetName` now rejects OSMD's "Untitled Score" placeholder so the file-name fallback runs.**
+  When a MusicXML score has no embedded `<work-title>`/`<movement-title>`, OSMD reports the title as the
+  non-empty placeholder string `Untitled Score`. The #44 logic treated any non-empty title as real, so
+  loading `moonlight-sonata.musicxml` showed "Untitled Score" instead of "moonlight-sonata". Fix in
+  `src/sheet-name.ts`: new exported `OSMD_PLACEHOLDER_TITLE = "Untitled Score"` and a private
+  `isPlaceholderTitle` that compares the trimmed, lowercased candidate to it; the title branch now requires
+  `fromTitle && !isPlaceholderTitle(fromTitle)`, so a placeholder falls through to the extension-stripped
+  file name (already handles `.musicxml`/`.xml`/`.mxl` via the existing `\.[A-Za-z0-9]{1,8}$` strip) and
+  finally `DEFAULT_SHEET_NAME`. A real embedded title still wins; an empty title still falls through; no
+  file name still ends at "Untitled sheet". Tests: +6 in `src/sheet-name.test.ts` (placeholder -> stripped
+  name for all three extensions, case/whitespace variants, placeholder + no file name -> default). Suite
+  291 green, build green. NOTE: `npm test` first failed with `jsdom` ERR_MODULE_NOT_FOUND; a plain
+  `npm install` in the worktree fixed it (the #90 jsdom devDep was not yet installed here).
+
 - **2026-05-31 - #66 fix: `labelableFallingNotes` is now chord-aware (run boundary is a pitch SET per lane, not a single last-midi).**
   The #42 helper tracked one `lastMidiByLane: Map<lane, number>`, so polyphony broke two ways: a repeated
   identical chord (`[C,E]@0` then `[C,E]@1`) was not deduped (returned all-true), and the label of a note

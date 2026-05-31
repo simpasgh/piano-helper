@@ -12,6 +12,12 @@ export const MAX_SHEET_NAME_LENGTH = 80;
 // empty. Mirrors the original #track-name placeholder text.
 export const DEFAULT_SHEET_NAME = "Untitled sheet";
 
+// OSMD reports this exact placeholder as the title when a MusicXML score has no embedded
+// work-title/movement-title (issue #64). It is non-empty, so we must explicitly reject it,
+// otherwise the file-name fallback never runs and the user sees "Untitled Score" instead of
+// the file name. Compared lowercased and trimmed so case/whitespace variants are caught too.
+export const OSMD_PLACEHOLDER_TITLE = "Untitled Score";
+
 // Collapse internal whitespace runs to single spaces and trim the ends. A name pasted with
 // newlines/tabs becomes one clean line.
 function collapseWhitespace(value: string): string {
@@ -33,15 +39,22 @@ export function normalizeSheetName(raw: string | null | undefined): string {
   return collapseWhitespace(raw).slice(0, MAX_SHEET_NAME_LENGTH).trim();
 }
 
+// True when a candidate title is OSMD's "Untitled Score" placeholder (case- and
+// whitespace-insensitive). Such a title is not a real title, so it must not win.
+function isPlaceholderTitle(value: string): boolean {
+  return value.trim().toLowerCase() === OSMD_PLACEHOLDER_TITLE.toLowerCase();
+}
+
 // Pick the default name for a freshly loaded piece. Prefers the MusicXML title when the
-// source provides one, else the file name with its extension stripped, else DEFAULT_SHEET_NAME.
-// Each candidate is normalized; a blank candidate falls through to the next.
+// source provides a real one (not OSMD's "Untitled Score" placeholder), else the file name
+// with its extension stripped, else DEFAULT_SHEET_NAME. Each candidate is normalized; a blank
+// or placeholder candidate falls through to the next.
 export function deriveDefaultSheetName(
   fileName: string | null | undefined,
   musicXmlTitle: string | null | undefined,
 ): string {
   const fromTitle = normalizeSheetName(musicXmlTitle);
-  if (fromTitle) return fromTitle;
+  if (fromTitle && !isPlaceholderTitle(fromTitle)) return fromTitle;
 
   const fromFile = normalizeSheetName(stripExtension(fileName ?? ""));
   if (fromFile) return fromFile;
