@@ -4,6 +4,43 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-05-31: PR #144 (suppress the OSMD per-part instrument label via `drawPartNames: false`
+  in `src/main.ts` OSMD ctor, main.ts:93. Clarity-OMR emits a UUID as the MusicXML part name,
+  so OSMD rendered "Instr. <uuid>" down the left margin of the sheet; this turns the label off
+  entirely while leaving the work title intact) -> **PASS** on prod
+  (https://piano-helper.pages.dev, served bundle `index-Dj-jjgt8.js`). Drove live in real
+  Chromium (Playwright 1.59.1 via the sibling todeoapp install). FIRST live QA of the
+  part-name suppression.
+  - BUNDLE PROOF the fix is live: served JS contains `drawPartNames:!1` (false) exactly ONCE,
+    `drawPartNames:!0` (true) ZERO times. Pre-fix the OSMD default (true) would have drawn the
+    label; the ctor now passes it false.
+  - FIXTURE = the shipped single-staff demo `https://piano-helper.pages.dev/demo.musicxml`
+    ("C Major Scale", 2487 bytes, ONE `<part>`, `<part-name>Piano</part-name>`,
+    `<work-title>C Major Scale</work-title>`). The "Piano" part-name is what OSMD would render
+    as "Instr. Piano" pre-fix. Loaded via `#file-input` (File + DataTransfer + `change`).
+  - THE HEADLINE (measured on the rendered SVG, not inferred): scanned all `<svg text>` nodes
+    in `#sheet`. Only TWO text nodes exist: "3" (the measure-3 number) and "C Major Scale" (the
+    title). `hasInstr === false`, `hasPiano === false`, `hasTitle === true`. So NO "Instr." /
+    part-name label is anywhere in the rendered sheet, and the title still renders. 72 path
+    glyphs (clef + noteheads + stems) render normally.
+  - SCREENSHOTS confirm by eye: `/tmp/qa144/01-loaded.png` shows the treble clef + 4/4 +
+    C-major-scale noteheads starting flush at the LEFT margin (no "Instr. Piano" gutter text),
+    with "C Major Scale" centered above. `/tmp/qa144/02-playing.png` shows the green sheet
+    cursor on "Fa", transport "0:01 / 0:08", Play->Pause, falling solfege bars descending.
+  - REGRESSION (no neighbor broken): "15 notes", `#hand-mutes` visible (Right/Left + Balance
+    L100 R100), Play enabled. Pressed Play -> Pause, time advanced 0:01/0:08, cursor tracks.
+    Paused + seeked the slider (input+change to 40%) -> time readout updated, bars re-laid. All
+    intact. CONSOLE: **0 console.error, 0 pageerror** across boot + load + play + seek.
+  - VERDICT: **PASS.** The "Instr." part-name label is gone from the left margin on prod, the
+    title still renders, notes/clef render normally, playback + cursor sync + seek all work,
+    clean console. Confirms the local real-browser check of the identical bundle hash. This
+    CLOSES the #144 gate. Artifacts under /tmp/qa144/ (demo.musicxml, drive.mjs, 01-loaded /
+    02-playing / 03-seeked .png).
+  - GOTCHA: this demo is single-staff with a HUMAN part-name ("Piano"), so it proves the label
+    is suppressed for ANY part name, not just a UUID. To specifically reproduce the original
+    "Instr. <uuid>" symptom you would need a Clarity-OMR output (UUID part name); not required
+    to verify the fix, since `drawPartNames:false` suppresses ALL part names unconditionally.
+
 - 2026-05-31: issue #135 / PR #142 (swap the OMR engine to Clarity-OMR as PRIMARY because it is
   the only free engine that recovers TIES/held notes on our material; oemer stays as fallback.
   Worker `run_clarity` runs the PDF directly in its OWN venv via subprocess, then UNCONDITIONAL
