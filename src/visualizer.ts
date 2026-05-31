@@ -33,6 +33,21 @@ export interface VisNote {
   spelling?: NoteSpelling;
 }
 
+// Whether a single falling bar should carry the brighter "active" fill (issue #131).
+// Keyed on THIS note's own time window, not the pitch, so two same-pitch notes in
+// sequence never light up together: only the instance currently sounding (its bar has
+// reached the keybed, since delta <= 0 inside the window) is active. The window is
+// half-open on the release edge ([time, time+duration)) so a legato same-pitch repeat
+// (note2.time === note1.time + note1.duration) hands the active fill straight to the
+// onset note instead of both lighting for the seam frame. Pure + canvas-free so it is
+// unit-testable; the keyboard-key highlight reuses this same window via activeMidis.
+export function fallingBarActive(
+  note: { time: number; duration: number },
+  currentTime: number,
+): boolean {
+  return currentTime >= note.time && currentTime < note.time + note.duration;
+}
+
 const MAX_KEYBOARD_HEIGHT = 140;
 const MIN_KEYBOARD_HEIGHT = 96;
 // Seconds of notes visible above the keyboard. Shared with the keyboard-label window
@@ -131,9 +146,7 @@ export class Visualizer {
   private activeMidis(currentTime: number): Set<number> {
     const active = new Set<number>();
     for (const n of this.notes) {
-      if (currentTime >= n.time && currentTime <= n.time + n.duration) {
-        active.add(n.midi);
-      }
+      if (fallingBarActive(n, currentTime)) active.add(n.midi);
     }
     return active;
   }
@@ -153,7 +166,7 @@ export class Visualizer {
     // that matter right now instead of every key.
     const approaching = approachingKeyMidis(this.notes, currentTime, LOOK_AHEAD);
 
-    this.drawFallingNotes(currentTime, keyboardTop, pps, active);
+    this.drawFallingNotes(currentTime, keyboardTop, pps);
     this.drawKeyboard(keyboardTop, active, approaching);
   }
 
@@ -161,7 +174,6 @@ export class Visualizer {
     currentTime: number,
     keyboardTop: number,
     pps: number,
-    active: Set<number>,
   ): void {
     const { ctx } = this;
     // Geometry of bars worth labeling, collected during the fill pass and drawn
@@ -206,7 +218,10 @@ export class Visualizer {
       // Per-pitch-class colors come from a precomputed table (no per-bar string
       // building). Active bars get a brighter fill and a wider glow.
       const colors = noteColor(note.midi);
-      const isActive = active.has(note.midi);
+      // Active fill is per-note, gated on this bar's own time window (issue #131), not the
+      // per-pitch `active` set, so a same-pitch bar still in flight stays inactive until it
+      // arrives. `active` (pitch-keyed) is still passed through for the keyboard-key lights.
+      const isActive = fallingBarActive(note, currentTime);
       // Ghost a bar whose hand is currently muted (issue #54) so the mute is visible on
       // screen, not audio-only. Composes with the off-window dim; "unknown" never mutes.
       const muted = isHandMuted(note.hand, this.mutedHands);
