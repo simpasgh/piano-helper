@@ -4,6 +4,57 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-05-31: issue #127 / PR #128 (replace the generic violet/purple theme with the
+  piano-inspired "Nocturne" palette: ebony chrome `#0b0a0d`, ivory text `#efe9dc`, a single
+  brass accent `#d8a23a`; brass serif wordmark; filled-brass Play pill with near-black ink
+  `#1a140d`; cream "real paper" sheet pane `#f6f1e6` with brass-brown labels; ebony stage with
+  literal ivory/ebony keybed + brass rim-light; pitch-class hue wheel re-anchored 276->40 so
+  C/Do = brass, the other 11 classes still a full rainbow) -> **PASS** on prod
+  (https://piano-helper.pages.dev, served bundle `index-BcCIU90s.js` + CSS `index-Be_3MmMh.css`).
+  Drove live in real Chromium (Playwright 1.59.1) with a 2-measure grand-staff fixture
+  (`/tmp/qa-nocturne/grand.musicxml`, `<staves>2</staves>`, RH C5-C6 / LH C3/G3/E3). FIRST live
+  QA of the Nocturne theme.
+  - BUNDLE PROOF the theme is live (not a stale deploy): served CSS contains the new tokens
+    (`#0b0a0d` x2, `#d8a23a` x3, `#f6f1e6` x10, `#1a140d`, `#efe9dc`) and **ZERO** violet/purple
+    hexes or the word `violet`; served JS has the hue anchor `40+t*30` (brass) and NO `276` (the
+    old violet anchor), plus stage `#0b0a0d` and brass rim `rgba(216,162,58...)`.
+  - REQ 1 (theme live on chrome, NO violet): computed `body` bg = `rgb(11,10,13)` (ebony), text
+    = `rgb(239,233,220)` (ivory); CSS vars `--accent:#d8a23a / --bg:#0b0a0d / --text:#efe9dc /
+    --on-accent:#1a140d`. Wordmark "Piano Helper" is the serif stack (Iowan Old Style ... serif)
+    in brass `rgb(216,162,58)`. Play button is a brass gradient pill
+    (`linear-gradient(135deg,rgb(169,118,31),rgb(216,162,58))`) with near-black ink
+    `rgb(26,20,13)`. A full-DOM computed-color scan for violet/purple (b>90, b>=r, r>g+25,
+    b>g+25 on color/bg/border) returned **0 hits**. Screenshot `01-boot-chrome.png` shows ebony
+    topbar, brass serif wordmark, brass Play pill, cream sheet area, dark stage + ivory/ebony
+    keybed with a brass glow strip along the top edge.
+  - REQ 2 (load + PLAY a grand staff): loaded the fixture via `#file-input`, "12 notes",
+    "Nocturne QA", Play enabled, `#hand-mutes` computed `display:flex` (Right/Left + Balance
+    "L100 R100"). Pressed Play: `#play-label` -> "Pause", transport advanced to "0:02 / 0:04".
+    Stage hook on `CanvasRenderingContext2D.fillStyle` captured **rainbow falling-bar fills**
+    spanning 7 distinct hue buckets {0,30,90,150,180,240,300} incl. the brass anchor
+    `hsl(40,...)` for Do, with stage bg `rgba(11,10,13,...)` (ebony) and ivory `rgba(255,255,255,..)`
+    /ebony `rgba(11,10,13,..)` key faces. Screenshot `03-playing.png`: brass "Do" bar, teal "Mi",
+    purple "Sol" (a non-C pitch class, intended rainbow, NOT chrome violet) falling over the dark
+    stage, keys lit, cream sheet pane with a rendered grand staff (G+F clefs, brace, 4/4), brass-
+    brown solfege labels, green sync cursor. Pause then mid-seek worked: label back to "Play",
+    slider moved, bars re-laid-out at the new position (`04-seeked.png`).
+  - REQ 3 (contrast/legibility): brass Play ink is near-black `#1a140d` on brass (~7:1, the
+    intended white-on-brass-fails-AA fix), readable. Ivory `#efe9dc` text on ebony `#0b0a0d` is
+    high-contrast. Sheet labels read brass-brown `rgb(107,79,31)` on the `#f6f1e6` cream paper
+    (the `.sheet-label` spans are transparent-bg text, color confirmed), legible; on the colored
+    falling bars the bar names sit in light pill chips (visible in 03/04). All readable.
+  - REGRESSION: `#hand-mutes` visible for the grand staff (display:flex, Right/Left + Balance),
+    solfege labels render on sheet + bars, falling notes + cursor sync intact, transport
+    play/pause/seek all work. CONSOLE: **0 console.error, 0 pageerror** across boot + load +
+    play + seek.
+  - VERDICT: **PASS.** Nocturne is fully live on prod: ebony chrome, brass serif wordmark, brass
+    Play hero, cream sheet, ivory/ebony keybed with brass rim-light, C/Do = brass with a full
+    rainbow elsewhere, and ZERO violet remnants in chrome/sheet/keybed. No regressions, clean
+    console. NOTE: purple/blue falling bars are intended non-C pitch-class hues (the rainbow),
+    not theme violet; do not mistake a note color for a chrome remnant. Artifacts under
+    /tmp/qa-nocturne/ (grand.musicxml + 01-boot-chrome / 02-loaded / 03-playing / 04-seeked .png);
+    driver qa-nocturne-drive.mjs was transient (removed). This CLOSES the #127/#128 QA gate.
+
 - 2026-05-31: issue #123 / PR #124 (merge tied/held notes into ONE sustained falling note in
   `src/score.ts`: a MusicXML tie is several `<note>` segments sharing one curve; pre-fix
   `extractScore` emitted one falling bar per segment so a held note restruck once per measure.
