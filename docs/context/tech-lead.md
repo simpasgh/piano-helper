@@ -30,6 +30,82 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-31 - #109 review fix (BLOCKING): the new all-pages vertical stitch was an unbounded-bitmap OOM vector; added page-count + total-area caps and armed Pillow's bomb guard.**
+  Pre-merge review of `fix/omr-raster-preprocessing`. The rest of the diff was clean
+  (all subprocess calls are list-form, no `shell=True`; only the UUID-validated jobId
+  reaches keys/paths and pdftoppm reads a local temp file, never a shell string; the
+  `(image_path, is_pdf)` tuple refactor reaches all call sites incl. the homr fallback;
+  `--without-deskew` is gated to the PDF path only via `without_deskew=is_pdf`; page
+  ordering is correct because pdftoppm zero-pads to a UNIFORM width within one run so
+  `sorted()` == numeric; the R2 transport contract is byte-identical). The one real
+  defect: `stitch_pages_vertical` allocated `Image.new("RGB", widest x sum_of_heights)`
+  with NO bound. The upload Function caps inputs at 10 MB (`src/omr-server.ts
+  MAX_UPLOAD_BYTES`), but a SPARSE vector PDF compresses so well that 10 MB holds
+  hundreds of near-empty A4 pages; at 400 DPI each page is ~15.5 MP, so a crafted
+  ~200-page PDF stitches to a multi-GP / multi-GB RGB bitmap on a box that ALSO runs the
+  oemer PyTorch/onnx stack. The OS OOM-killer is not catchable by `poll_once`, so that
+  kills the always-on poller (a single-upload DoS). Also `Image.new` is NOT subject to
+  Pillow's decompression-bomb check (that only runs on decode), so Pillow gave zero
+  protection here.
+  - **Fix (worker.py):** new `MAX_STITCH_PAGES = 60` and `MAX_STITCH_PIXELS = 1_000_000_000`
+    (~1 GP). `stitch_pages_vertical` rejects >60 pages BEFORE opening any image, and
+    rejects total area > 1 GP AFTER measuring but BEFORE `Image.new` (so the giant canvas
+    is never allocated); both raise `RuntimeError`, which `poll_once` already turns into a
+    clean failure sentinel instead of a crash. The area check raises inside the `try`, so
+    the `finally` still closes every opened page handle (no leak on the reject path). Also
+    set `Image.MAX_IMAGE_PIXELS = MAX_STITCH_PIXELS` so a single crafted page can't
+    bomb-decode on `Image.open` (the prior code never armed it). 1 GP is ~64x a real A4
+    page, so legitimate multi-page scores are unaffected.
+  - **Tests:** +3 pytest (too-many-pages rejects before any open, oversized-total-area
+    rejects with a lowered cap, both `RuntimeError`) and +1 vitest source-guard locking
+    the two caps, both enforcement sites, and the armed `MAX_IMAGE_PIXELS`. pytest 6 -> 9
+    (Pillow IS installed in this worktree, all 9 pass), JS suite 302 -> 303, build green.
+  - **Gotcha for the area test:** setting `Image.MAX_IMAGE_PIXELS` to the worker constant
+    means a too-low monkeypatched cap also trips Pillow's bomb guard (fires at 2x cap) on
+    `Image.open` BEFORE the area check. Pick a cap above a single page's pixels but below
+    the multi-page total (cap=2000 for two 40x40 pages) to isolate the area `RuntimeError`.
+
+- **2026-05-31 - #109: OMR worker rasterization tuned for clean vector PDFs (DPI 300 -> 400, all pages stitched, oemer deskew off on PDF path).**
+  Concrete first child of spike #88. oemer has NO DPI/quality CLI knob (only `-o`,
+  `--use-tf`, `--save-cache`, `-d/--without-deskew`), so the raster we hand it in
+  `omr-worker/worker.py rasterize_if_pdf` is the only preprocessing lever we own.
+  - **DPI 300 -> 400** via new `PDF_RASTER_DPI = 400` constant fed to `pdftoppm -r`.
+    Conservative vs 600 for the Oracle Always Free ARM VM memory/time budget. Measured
+    before/after on the icarus.pdf fixture (1-page A4 vector): 300 DPI rendered
+    2480x3509 (8.7 MP), 400 DPI rendered 3306x4678 (15.5 MP), a 1.78x pixel-density
+    gain for the ML engine. Did NOT run the full oemer engine here (heavy ML stack /
+    onnxruntime not installed in the worktree); verified the rasterization step only.
+  - **All pages, stitched.** Dropped the `-f 1 -l 1` flags so `pdftoppm` renders every
+    page; new pure `stitch_pages_vertical(page_paths, dest)` stacks them top-to-bottom
+    into one tall PNG (oemer reads ONE image). Chose vertical stitch over "pick best
+    page" because it preserves ALL music and the engine scans staves top-to-bottom
+    anyway. Single page short-circuits to a plain RGB copy (no compositing). Canvas
+    width = widest page, narrower pages left-aligned on white. Uses Pillow, already an
+    oemer runtime dep (no new dependency); imported LAZILY inside the function so the
+    module stays importable for tests on a host without Pillow.
+  - **Deskew off on the PDF path only.** `rasterize_if_pdf` now returns
+    `(image_path, is_pdf)`; `process_job` passes `without_deskew=is_pdf` to `run_oemer`,
+    which appends `--without-deskew` for the clean (already-orthogonal) vector raster.
+    Scanned PNG/JPEG inputs keep deskew on. The argv build is the pure, testable
+    `oemer_command(image_path, out_dir, without_deskew)`.
+  - **R2 transport contract untouched:** result key, content-type, FAILURE_SENTINEL,
+    poll loop all unchanged. `run_homr` fallback still gets the stitched image.
+  - **Tests + CI gap:** repo CI (`.github/workflows/ci.yml`) is Node-only (typecheck +
+    vitest + build); there is NO pytest gate. Added `omr-worker/test_worker.py` (7 pytest
+    cases: DPI > 300 and <= 600, deskew gating both ways, single-page copy, multi-page
+    vertical stack with pixel-offset + white-gutter asserts, document page order, empty
+    rejection) for a local run (boto3 stubbed at import so it runs without the S3 deps;
+    Pillow via `importorskip`). Since pytest is not in CI, also added
+    `src/omr-worker.test.ts`: a vitest SOURCE-GUARD that reads `worker.py` as text and
+    locks the #109 wiring (DPI constant > 300 and <= 600 passed to pdftoppm, old
+    `-f 1 -l 1` gone, `stitch_pages_vertical` called on pages, `without_deskew=is_pdf`,
+    R2 contract strings, no em/en dash). This is the same text-guard pattern as
+    `toolbar.test.ts` and is what keeps a regression catchable in the green CI. JS suite
+    296 -> 302, `npm run build` green. NOTE: `npm test` first hit the known `jsdom`
+    ERR_MODULE_NOT_FOUND; a plain `npm install` fixed it.
+  - **NEEDS LIVE QA:** CI does not run the OMR engine. QA must scan icarus.pdf on `main`
+    and confirm the score still loads (and ideally that LH chord recovery improved).
+
 - **2026-05-31 - #96: mobile file pickers never opened because the file inputs used `hidden` (display:none).**
   The three source buttons in `index.html` are `<label class="file-btn">` wrapping an icon, a label span,
   and a hidden `<input type="file">`. iOS Safari and in-app webviews refuse to forward a label tap to a
