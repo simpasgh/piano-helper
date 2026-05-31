@@ -187,6 +187,14 @@ body {
   height: 18px;
 }
 
+/* The icon and text inside a file button must not swallow taps: some mobile
+   browsers fire the implicit label -> input activation only when the tap lands
+   on the label itself, not a child element. */
+.file-btn .btn-icon,
+.file-btn .btn-label {
+  pointer-events: none;
+}
+
 /* The Names pill is compact, so its eye icon is a touch smaller and tighter. */
 .toggle .btn-icon {
   width: 16px;
@@ -340,6 +348,7 @@ body {
    clearly clickable and more prominent than ghost controls, but NOT filled violet so it never
    competes with the Play hero. Tints violet on hover so the brand still answers the touch. */
 .file-btn {
+  position: relative;
   background: var(--secondary-bg);
   color: var(--text);
   border: 1px solid var(--secondary-border);
@@ -365,6 +374,24 @@ body {
 .file-btn:active {
   background: var(--secondary-bg-active);
   transform: translateY(1px);
+}
+
+/* Hide the native file input without display:none. Several mobile browsers
+   (iOS Safari, in-app webviews) refuse to forward a label tap to a
+   display:none input, so the picker never opens. Keeping a 1px input in the
+   layout/hit-testing tree preserves the label -> input activation everywhere. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+  opacity: 0;
 }
 
 /* Tier 3, GHOST: transparent fill + subtle border. Export, Names, step buttons. */

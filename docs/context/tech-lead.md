@@ -30,6 +30,26 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-31 - #96: mobile file pickers never opened because the file inputs used `hidden` (display:none).**
+  The three source buttons in `index.html` are `<label class="file-btn">` wrapping an icon, a label span,
+  and a hidden `<input type="file">`. iOS Safari and in-app webviews refuse to forward a label tap to a
+  `display:none` input, so the native picker never fired on phones (desktop was fine). Fix is markup + CSS only:
+  - Replaced `hidden` with `class="visually-hidden"` on `#file-input`, `#scan-input`, `#audio-input` (accept
+    values untouched). New `.visually-hidden` rule in `src/style.css` (1px absolute, clip, opacity 0) keeps the
+    input in the layout/hit-testing tree so the implicit label -> input activation survives. Do NOT revert to
+    `display:none` here.
+  - Anchored it with `.file-btn { position: relative; }` so the 1px input does not affect layout.
+  - Added `.file-btn .btn-icon, .file-btn .btn-label { pointer-events: none; }` so a tap on the icon/text still
+    counts as a tap on the label (some mobile browsers only activate on the label element itself).
+  - `src/main.ts` only listens to `change` and reads `.files`/`.value`/`.disabled`; nothing depended on the
+    `hidden` attribute, so handlers are unchanged. No pure logic to unit-test (markup/CSS); `npm test` (296) and
+    `npm run build` both green.
+  - **NEEDS LIVE MOBILE QA:** CI cannot tap a native picker. QA must confirm on a real phone (iOS Safari first)
+    that all three buttons open the picker and a loaded file flows through, and that desktop is visually/behaviorally
+    unchanged.
+  - NOTE: `npm test` again hit the known `jsdom` ERR_MODULE_NOT_FOUND; a plain `npm install` fixed it without
+    touching `package-lock.json`.
+
 - **2026-05-31 - #57: a lit (active) black key now shows its accidental name; resting/approaching black keys stay blank.**
   Issue: `drawKeyLabels` in `src/visualizer.ts` skipped black keys entirely (`if (key.black) continue;`), so a
   beginner who saw a falling "C#"/"Do#" got no cue on the physical black key. Fix is purely additive and does
