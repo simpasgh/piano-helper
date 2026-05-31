@@ -30,6 +30,34 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-31 - #93 scan-cancel left a prior score's controls stuck disabled until the in-flight /api/omr settled.**
+  Follow-up to #86. `cancelScanOverlay` only called `setBusyUI(false)` + `restoreSheetName()` in its
+  `if (wasAudio)` branch, so the SCAN path's Play/Export/seek/step stayed disabled (and the toolbar kept
+  reading "Scanning sheet...") until `scanSheet`'s `finally` ran, which only happens after `submitOmr`'s
+  fetch resolves and `pollOmrResult` next reads `isCancelledRequested()` (the flag is only checked at the
+  TOP of the poll loop, i.e. after the in-flight request round-trips). With a slow OMR backend that window
+  equals the full submit+poll latency. The audio path was already correct because it tore down synchronously.
+  Fix in `src/main.ts`:
+  - `cancelScanOverlay` now calls `setBusyUI(false)` + `restoreSheetName()` UNCONDITIONALLY (dropped the
+    `wasAudio` special-casing). `setBusyUI(false)`'s not-busy branch re-enables via
+    `controlsEnabledForScore(!!score)` (the #86 helper) and `restoreSheetName()` clears the status. Removed
+    the now-write-only `overlayKind` module var (TS6133) and its assignments in show/hideScanOverlay;
+    `ScanOverlayKind` stays only as `showScanOverlay`'s param type.
+  - `scanSheet` now captures `const generation = ++jobGeneration` at the top and gates its `finally` on
+    `generation === jobGeneration` (mirrors `transcribeAudio`), so a late settle of an abandoned scan can't
+    stomp a newer job's overlay/controls. Idempotency note: when no restart happened the SAME job's gen-gated
+    finally re-runs setBusyUI(false)/hideScanOverlay/(restoreSheetName via the catch) after cancel already
+    did them; all three are idempotent (restoreSheetName is a no-op without a score and just sets hidden
+    flags + re-renders), so the repeat is harmless. The in-flight OMR poll still rejects later with
+    OMR_CANCELLED, swallowed by the existing `isCancelled(err)` catch.
+  - Tests: extended `src/cancel-controls.test.ts` with a #93 describe block (scan-cancel re-enables a
+    still-loaded score's controls synchronously; stays disabled with no score) using the same shared
+    `controlsEnabledForScore` predicate model (booting all of main.ts under jsdom is impractical, same as
+    #86). Source guards in `src/toolbar.test.ts` lock the wiring: cancelScanOverlay contains
+    setBusyUI(false)+restoreSheetName() and NO `wasAudio`, and scanSheet captures `const generation =
+    ++jobGeneration` + gates its finally on `generation === jobGeneration`. Suite 272 green, build green.
+    Live scan-cancel-with-prior-score + cancel-then-restart in a real browser is the post-merge QA gate.
+
 - **2026-05-31 - #86 cancel-path bug fixes: a cancelled audio job no longer loads its score, and Cancel re-enables a still-loaded score's controls.**
   Code review of the #86 overlay found two blocking defects in the cancel path; both fixed in
   `src/main.ts` with pure-helper-backed regression tests.

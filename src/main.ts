@@ -576,11 +576,8 @@ function setBusyUI(active: boolean): void {
 }
 
 // Scan-overlay state. `cancelRequested` is the client-side abandon flag the OMR poll
-// loop checks (the job keeps running server-side, we just stop waiting). `overlayKind`
-// records what is running so a programmatic cancel knows it was the audio path (whose
-// transcription cannot be polled-aborted, so cancelling just abandons the UI wait).
+// loop checks (the job keeps running server-side, we just stop waiting).
 let cancelRequested = false;
-let overlayKind: ScanOverlayKind | null = null;
 let lastFocusedBeforeOverlay: HTMLElement | null = null;
 // Bumped each time a job starts so a cancelled-then-restarted audio job's late finally
 // cannot tear down the newer job's overlay (the audio transcription cannot be aborted).
@@ -590,7 +587,6 @@ let jobGeneration = 0;
 // previously-focused element and moves focus to Cancel; the busy state already greyed
 // the toolbar, so this is the primary feedback.
 function showScanOverlay(kind: ScanOverlayKind): void {
-  overlayKind = kind;
   cancelRequested = false;
   scanOverlayTitleEl.textContent = scanOverlayTitle(kind);
   lastFocusedBeforeOverlay =
@@ -603,7 +599,6 @@ function showScanOverlay(kind: ScanOverlayKind): void {
 function hideScanOverlay(): void {
   if (scanOverlay.hidden) return;
   scanOverlay.hidden = true;
-  overlayKind = null;
   const toRestore = lastFocusedBeforeOverlay;
   lastFocusedBeforeOverlay = null;
   if (toRestore && document.contains(toRestore)) {
@@ -612,18 +607,18 @@ function hideScanOverlay(): void {
 }
 
 // Cancel = client-side abandon. Sets the poll-loop flag (the scan path rejects with the
-// CANCELLED sentinel its catch swallows), closes the overlay, re-enables the controls,
-// and restores the prior slot. For the audio path there is nothing to poll-abort, so we
-// just tear down the UI here; the in-flight transcription is ignored on completion.
+// CANCELLED sentinel its catch swallows), closes the overlay, re-enables the controls, and
+// restores the prior slot. Both kinds tear down the UI synchronously here: the scan path's
+// in-flight /api/omr round-trip can take seconds to settle, and waiting for its finally to
+// re-enable controls (issue #93) left a prior score's Play/Export/seek/step stuck disabled
+// with no overlay. The in-flight job is ignored on completion (scan via the CANCELLED
+// sentinel its catch swallows, audio via the generation guard in its finally).
 function cancelScanOverlay(): void {
   if (scanOverlay.hidden) return;
   cancelRequested = true;
-  const wasAudio = overlayKind === "audio";
   hideScanOverlay();
-  if (wasAudio) {
-    setBusyUI(false);
-    restoreSheetName();
-  }
+  setBusyUI(false);
+  restoreSheetName();
 }
 
 scanOverlayCancel.addEventListener("click", () => cancelScanOverlay());
@@ -642,7 +637,7 @@ scanOverlay.addEventListener("keydown", (e) => {
 });
 
 async function scanSheet(file: File): Promise<void> {
-  ++jobGeneration;
+  const generation = ++jobGeneration;
   setBusyUI(true);
   showScanOverlay("scan");
   showStatus("Scanning sheet... (this can take a minute)");
@@ -653,8 +648,15 @@ async function scanSheet(file: File): Promise<void> {
     });
     await loadScoreXml(xml, file.name);
   } finally {
-    setBusyUI(false);
-    hideScanOverlay();
+    // Only tear down if this is still the active job. A cancel re-enables the controls and
+    // hides the overlay synchronously and may have started a newer job; a late settle of this
+    // abandoned scan must not stomp the newer job's overlay/controls (issue #93). When this is
+    // still the active job the repeat is harmless: setBusyUI(false), hideScanOverlay, and
+    // restoreSheetName are all idempotent.
+    if (generation === jobGeneration) {
+      setBusyUI(false);
+      hideScanOverlay();
+    }
   }
 }
 

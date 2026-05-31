@@ -76,3 +76,61 @@ describe("cancel re-enables controls based on a loaded score (issue #86)", () =>
     expect(els.seek.disabled).toBe(true);
   });
 });
+
+// Regression for issue #93: on the SCAN path, Cancel/Escape must re-enable a still-loaded
+// score's controls SYNCHRONOUSLY, not after the in-flight /api/omr round-trip settles.
+// Before the fix, cancelScanOverlay only called setBusyUI(false) in its `wasAudio` branch,
+// so the scan path's controls stayed disabled until scanSheet's finally ran (after submitOmr
+// resolved and pollOmrResult next saw the cancel flag). The audio path already re-enabled
+// synchronously. This models cancelScanOverlay's behavior (now identical for both kinds)
+// against real elements: it tears down the UI immediately and leaves the in-flight job to
+// settle later.
+describe("scan-path Cancel re-enables controls synchronously (issue #93)", () => {
+  let els: ReturnType<typeof makeControls>;
+
+  // Mirror of cancelScanOverlay's control restore (kind-agnostic after the #93 fix): the
+  // synchronous setBusyUI(false) + restore. We only assert the disabled-flag outcome here,
+  // which is what the bug violated for the scan kind.
+  function cancelScan(scoreLoaded: boolean) {
+    applyNotBusy(els, scoreLoaded);
+  }
+
+  beforeEach(() => {
+    els = makeControls();
+  });
+
+  it("re-enables a still-loaded score's controls immediately on scan cancel", () => {
+    // Busy: a scan job in flight (setBusyUI(true) disabled everything).
+    els.playBtn.disabled = true;
+    els.exportBtn.disabled = true;
+    els.prevBtn.disabled = true;
+    els.nextBtn.disabled = true;
+    els.seek.disabled = true;
+
+    // Cancel/Escape on the scan overlay, with the prior score still loaded.
+    cancelScan(true);
+
+    // No awaiting the OMR promise: controls are usable right away.
+    expect(els.playBtn.disabled).toBe(false);
+    expect(els.exportBtn.disabled).toBe(false);
+    expect(els.prevBtn.disabled).toBe(false);
+    expect(els.nextBtn.disabled).toBe(false);
+    expect(els.seek.disabled).toBe(false);
+  });
+
+  it("keeps controls disabled on scan cancel when no score is loaded", () => {
+    els.playBtn.disabled = true;
+    els.exportBtn.disabled = true;
+    els.prevBtn.disabled = true;
+    els.nextBtn.disabled = true;
+    els.seek.disabled = true;
+
+    cancelScan(false);
+
+    expect(els.playBtn.disabled).toBe(true);
+    expect(els.exportBtn.disabled).toBe(true);
+    expect(els.prevBtn.disabled).toBe(true);
+    expect(els.nextBtn.disabled).toBe(true);
+    expect(els.seek.disabled).toBe(true);
+  });
+});

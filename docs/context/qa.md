@@ -4,6 +4,52 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-05-31: issue #86 (scan/transcribe loading overlay, `#scan-overlay`) -> **FAIL** on prod
+  (https://piano-helper.pages.dev, `main`, bundle `index-tvPITG1-.js`). Bug filed as **#93**.
+  Drove live in real Chromium (Playwright). Most of the overlay is correct; one path leaves
+  the app in a broken-but-no-overlay state.
+  - OVERLAY itself PASSES on BOTH paths: scan shows the spinner + "Scanning your sheet" heading
+    + body copy + Cancel + the "scan keeps running on our side" note, over a dimmed stage with
+    the toolbar fully visible above it (`z-index:5`, `position:absolute`, rect 1280x800 top=0).
+    Audio shows "Transcribing your audio". `role=dialog` + `aria-modal=true` + `aria-busy=true`
+    present; focus moves to `#scan-overlay-cancel` on open and back to `<body>` on close. Cancel
+    AND Escape both hide the overlay synchronously with NO "Scan failed"/alert. Console clean
+    except the expected `/api/omr/result` 404 (OMR backend down, #88).
+  - FAIL = STEP4 controls-after-cancel regression, but ONLY on the **scan** path (the audio
+    path re-enables fine). After Cancel/Escape on a scan, the overlay hides instantly but
+    Play/Export/seek/prev/next stay STUCK DISABLED for the full in-flight `/api/omr` round-trip
+    (measured `disabled=true` at +30/200/500/1000/2000ms; re-enabled only between +2000-4000ms
+    when `submitOmr`'s fetch settled). With a slow-but-healthy backend this window = the whole
+    submit+poll latency: the user sees a usable-looking score with dead transport and the
+    toolbar still reading "Scanning sheet...". Screenshot proof: /tmp/qa-issue86/BUG-stuck-controls.png
+    (overlay gone, Play/step/Export greyed, status still "Scanning sheet...", "QA86 Score" on
+    screen). Root cause: `cancelScanOverlay()` (main.ts ~618-627) only calls `setBusyUI(false)`
+    in the `if (wasAudio)` branch; the scan path's re-enable lives in `scanSheet`'s `finally`,
+    which waits for `submitOmr` + the next poll-loop `isCancelledRequested()` check (omr.ts ~86,
+    only read at the TOP of the loop, after the in-flight fetch settles). The #86 review "fix"
+    (controlsEnabledForScore in setBusyUI(false), main.ts ~567-574) is correct but the scan
+    cancel never calls it synchronously. Fix: have `cancelScanOverlay()` call setBusyUI(false) +
+    restoreSheetName() for the scan kind too (idempotent with the late finally; also consider a
+    generation guard on scanSheet's finally like transcribeAudio already has).
+  - GOTCHA that masked this on the first pass: whether "Play STILL works after cancel" passes is
+    a RACE. If the post-cancel Play click lands after the ~2-4s window (fast/404 backend) it
+    works; inside the window it is dead. Do NOT sample control state once after a fixed delay;
+    POLL `el.disabled` every ~60ms for several seconds after Cancel and assert it is enabled
+    IMMEDIATELY (the bug is the window, not the eventual recovery).
+  - GOTCHA (audio overlay never appears with a tiny/garbage WAV): a short or invalid WAV fails
+    `loadAudioFile` fast, so `transcribeAudio`'s finally hides the overlay before a ~500ms probe;
+    you catch only the title text ("Transcribing your audio") on a hidden node. Use a longer,
+    genuinely tonal clip (e.g. ~2s @16kHz, fundamental + harmonics + decay) and POLL every ~60ms
+    to catch the overlay visible mid-transcription. Caught it visible at +4ms that way.
+  - GOTCHA (Playwright evaluate arg passing): `page.evaluate(fn, arg)` passes exactly ONE arg.
+    A multi-param inject helper must take a single tuple and destructure (`function inject([id,
+    name, type, bytes]) {...}`), else `document.getElementById(id)` is null (id===the whole
+    array). Inject a `File` via `DataTransfer` into `#file-input` (MusicXML), `#scan-input`
+    (PDF/image), `#audio-input` (audio) + dispatch `change`. A fake PNG (`89 50 4e 47 ...`) is
+    enough to trigger the scan overlay since the backend 404s anyway.
+  - Drivers (transient, in worktree root where node resolves local playwright): qa-issue86.mjs,
+    qa-issue86-timing.mjs, qa-issue86-audio.mjs. Screenshots at /tmp/qa-issue86/.
+
 - 2026-05-31: PR #91 / issue #90 fix-forward (collect clefs from real single-staff OSMD
   parses so collapsed treble->bass scans split into hands) -> **PASS** on prod
   (https://piano-helper.pages.dev, main @ 10a60e9, served bundle `index-S08hI_BF.js`, which
