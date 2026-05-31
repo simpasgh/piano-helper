@@ -1,0 +1,43 @@
+# Clarity-OMR (github.com/clquwu/Clarity-OMR, GPL-3.0) is the PRIMARY engine for PDF
+# uploads (it is the only free engine that recovers TIES on our material, issue #135).
+# It runs in its OWN separate venv, invoked by worker.py as a subprocess exactly like
+# oemer, so its torch / ultralytics-YOLO / transformers stack never collides with oemer's
+# onnxruntime / opencv / numpy band in the existing venv. worker.py does NOT import it.
+#
+# This file is deliberately NOT a pip pin list. Clarity ships its own pinned dependency
+# set in its repo's requirements.txt, and re-pinning torch + YOLO + transformers ourselves
+# would only drift from upstream. So the install is: clone the repo, make a py3.11 venv,
+# and pip install the repo's OWN requirements.txt. Do NOT add any of these deps to
+# omr-worker/requirements.txt: the two engines must stay isolated.
+#
+# Install (see README.md "Clarity-OMR (primary engine for PDFs)" for the full runbook):
+#
+#   # 1. Clone the engine somewhere stable, OUTSIDE this repo's venv.
+#   git clone https://github.com/clquwu/Clarity-OMR.git ~/clarity-omr
+#
+#   # 2. A dedicated py3.11 venv (system python 3.9 is too old). On macOS use the homebrew
+#   #    python3.11 explicitly; on Linux ARM use the distro's python3.11.
+#   /opt/homebrew/bin/python3.11 -m venv ~/clarity-omr/.venv      # macOS
+#   #   python3.11 -m venv ~/clarity-omr/.venv                     # Linux ARM
+#   ~/clarity-omr/.venv/bin/pip install --upgrade pip
+#
+#   # 3. Install Clarity's OWN pinned deps (this is the ~1.5 GB torch-CPU stack).
+#   ~/clarity-omr/.venv/bin/pip install -r ~/clarity-omr/requirements.txt
+#
+# Footprint: ~1.5 GB venv (mostly torch CPU) + a ~336 MB ONE-TIME HuggingFace model
+# download on first run (yolo.pt + model.safetensors + a timm backbone). ~15s CPU/page.
+# Pure Python, CPU-only, runs on Apple Silicon / Linux ARM. GPL-3.0.
+#
+# Rate limit: the ONLY rate limit anywhere in the pipeline is HuggingFace's unauthenticated
+# model-download THROTTLE on that one-time fetch. It is NOT a per-request or per-scan cost,
+# so we never hit a usage cap and stay inside the free / no-paid-service rule. Mitigate the
+# first-fetch throttle by caching the model on the worker host (it persists in the HF cache
+# dir, e.g. ~/.cache/huggingface, after the first run) and optionally by setting a free
+# HF_TOKEN env var for the initial download only.
+#
+# Wiring: worker.py reads two env vars to locate this venv. If either is unset or the
+# script is missing, run_clarity returns None and the worker silently falls back to oemer,
+# so worker.py is safe to deploy BEFORE Clarity is installed.
+#   CLARITY_OMR_DIR = the cloned Clarity-OMR repo dir (must contain omr.py)
+#   CLARITY_PYTHON  = that repo's venv python interpreter
+#                     (e.g. ~/clarity-omr/.venv/bin/python)
