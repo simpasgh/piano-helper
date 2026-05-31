@@ -3,6 +3,21 @@
 UX, visual design, interaction decisions. Append durable learnings at the top of the
 relevant section, dated.
 
+## Falling-bar active highlight (issue #131)
+
+- **2026-05-31 - The brighter "active" fill is per-bar, gated on that bar's own time
+  window (`fallingBarActive`), NOT pitch-keyed. Two stacked same-pitch bars (e.g. two "La")
+  must never both light: only the one whose window contains currentTime (it has reached the
+  keybed) reads as the contact moment; the in-flight twin stays calm in its base hue. The
+  keyboard KEY light stays pitch-keyed on purpose (a physical key is one object), and the
+  label ink (`barGlyphIsDark` active flag) is correctly tied to per-bar active so the
+  brighter active fill always gets matching-contrast glyphs. Distinct-pitch chords and
+  single notes are unaffected (each has its own window). The window is half-open on the
+  release edge (`[time, time+duration)`): a legato same-pitch repeat where note2.time ==
+  note1.time + note1.duration hands the active fill straight to the arriving onset note
+  instead of lighting both for the seam frame. `activeMidis` (keyboard key light) reuses
+  the same `fallingBarActive` window, so bar and key never drift on the boundary rule.**
+
 ## Theme: "Nocturne" (issue #127)
 
 - **2026-05-31 - Replaced the generic violet theme (it read as default "vibe-coded" AI
