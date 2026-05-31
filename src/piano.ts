@@ -396,6 +396,20 @@ export function fitBarLabel(
   return { show: true, fontSize: size };
 }
 
+// All-or-nothing fit check for a key-face label (issue #57). The label face is drawn at a
+// fixed font, so the question is purely "does the widest label plus a gutter on each side
+// fit the key width". Returns true only when it fits, mirroring the white-key row decision
+// (uniform > ragged: if the widest label does not fit, none are drawn). Pure and DOM-free;
+// the caller measures the widest label width at the chosen font and passes it in.
+export function keyLabelFits(
+  widestLabelWidth: number,
+  keyWidth: number,
+  gutter: number,
+): boolean {
+  if (keyWidth <= 0 || widestLabelWidth <= 0) return false;
+  return widestLabelWidth + gutter <= keyWidth;
+}
+
 // --- Unified note-name labeling (issues #42, #43): one consistent model for both the
 // falling-note names and the keyboard key names, shared across hands. ---
 
