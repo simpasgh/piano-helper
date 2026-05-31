@@ -19,6 +19,37 @@ performance on an animated piano, with the score highlighted in sync. Make the f
 
 ## Decisions
 
+### 2026-05-31 - Issue #6 correction UI: DEFER from autonomous sweep, split into slices
+
+- **Recommendation: do NOT one-shot #6 in an unattended backlog burn.** The full ask (select a
+  note, change pitch/duration, add/delete, re-sync sheet + falling + audio, persist) is a
+  multi-PR feature for this codebase. The pipeline is strictly one-way and read-only today:
+  `MusicXML -> osmd.load -> extractScore -> ScoreData.notes -> visualizer + Tone.Part`. There is
+  no note identity (`VisNote` has no id), no canvas hit-testing, no selection model, and no
+  persistence layer at all.
+- **The hard part is OSMD, not audio.** Rebuilding playback after an edit is cheap (`loadNotes`
+  already rebuilds the `Tone.Part` from `score.notes`). Making an edit survive on the printed
+  sheet means mutating the OSMD model + re-render, or re-serializing MusicXML and reloading, while
+  keeping the highlight cursor and `stepTimes` correct. That is research-shaped, not a weekend
+  feature.
+- **Thin first slice that dodges OSMD (proposed #6a):** click a falling BAR to select it, then
+  nudge its pitch +/- a semitone (arrow keys / two buttons) plus DELETE a spurious note. Implement
+  against the in-memory `score.notes` array only: add an id to `VisNote`, add canvas hit-testing
+  (the visualizer already computes every bar's geometry), mutate `midi` / splice, then reuse
+  `visualizer.setNotes` + the existing Part rebuild. Audio and falling view re-sync for free.
+  Leave the OSMD sheet out of v1: the edited bar visibly diverges from the printed sheet, which is
+  honest and avoids the MusicXML round-trip. Wrong pitch is the most common OMR error a beginner
+  can both spot and fix; delete is trivial. OUT of v1: duration edit, add-note, write-back to the
+  sheet, persistence.
+- **Why defer the one-shot:** even the thin slice adds the app's first editing interaction and
+  first mutable selection model, and forces a product call the agent can't make: when an edit makes
+  the falling view disagree with the SYNCED sheet (our differentiator), what does the user see?
+  That needs a designer/PM spike first.
+- **Split:** spike (selection affordance canvas vs sheet, sheet-divergence behavior) -> #6a (pitch
+  nudge + delete, falling-view only) -> #6b duration -> #6c add note -> #6d sheet write-back +
+  persist. Each follow-up is weekend-sized once the spike sets the interaction model. Keep #6
+  priority:med.
+
 ### 2026-05-30 - Issue #37 per-hand control: two mute toggles, not sliders
 
 - **Decision: ship two per-hand MUTE toggles, "Right hand" and "Left hand", both default ON
