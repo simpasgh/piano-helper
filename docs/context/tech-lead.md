@@ -30,6 +30,30 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-31 - #113 REVERTED. Chord-completion fabricated wrong notes; metric went up, fidelity went down.**
+  Shipped #113 cleared every gate (CI green, review APPROVE-WITH-NITS, QA triad count rose) and was still
+  WRONG on the user's own score. icarus.pdf has NATURAL LH block triads almost every bar; the rendered output
+  showed spurious sharps (diesis). Root cause: `complete_lh_chords` learns ONE "dominant" LH chord SHAPE oemer
+  detected somewhere in the piece and stamps that interval pattern onto every lone LH note. On icarus the
+  dominant detected shape was a D-major-type triad, so the pass fabricated `Fa#` across measures whose real
+  harmony is a natural triad. The triad COUNT (the QA acceptance metric) rose precisely because we were inventing
+  triads, not recovering them.
+  - **Lesson: a count metric (number of triads/notes) is a bad proxy for musical correctness.** Adding
+    confidently-wrong notes is worse than missing notes for a learning tool: a student trusts what they see and
+    practices a wrong accidental. Never let an OMR post-pass INVENT pitch content the engine did not detect.
+    Any future LH-recovery work must derive pitches from the actual score (higher recall: DPI sweep #112,
+    a stronger engine #88, or a human-in-the-loop correction UI #6/#105), never by pattern-stamping a guessed
+    harmony.
+  - **What the revert removed:** the whole `complete_lh_chords` post-pass + helpers, the `xml.etree`/`Counter`
+    imports, the `body = complete_lh_chords(body)` call in `process_job`, its Python tests, and the JS
+    source-guard block. worker.py is back to its #109 state (PDF_RASTER_DPI=400, vertical stitch,
+    `--without-deskew`); the R2 transport contract is untouched.
+  - **Still-open genuine gaps (NOT caused by #113, do not chase with fabrication):** oemer reads arpeggios as
+    rests and drops some notes. These are recall limits of the engine at this DPI. The honest levers are the DPI
+    sweep (#109 data hinted lower DPI may recover recall: 300 DPI gave 128 notes vs 400 DPI's 109 on icarus -
+    measure this properly), a better engine (#88), or the correction UI (#6/#105). Measure fidelity by eye
+    against the source PDF, not by note count.
+
 - **2026-05-31 - #113 PRE-MERGE REVIEW: APPROVE-WITH-NITS. No blockers; the DOCTYPE drop and the ElementTree billion-laughs vector were both assessed and are acceptable here.**
   Separate skeptical review of `fix/omr-lh-chord-completion` (code-review + security-review since the pass parses
   engine-derived-from-untrusted-upload XML inside the always-on poller). Verdict APPROVE-WITH-NITS.

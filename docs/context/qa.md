@@ -4,6 +4,21 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-05-31: #113 REVERTED after the user reviewed the live output. **The #113 PASS below was a
+  false pass: every acceptance metric was green but the score was musically WRONG.** The user's
+  icarus.pdf has natural LH triads; the shipped output rendered spurious sharps (diesis) because
+  the post-pass stamped one guessed "dominant" triad shape (a D-major type, hence the Fa#) onto
+  every lone LH note. The triad COUNT rose because we were inventing triads, not recovering them.
+  - **QA lesson: a count metric (triads, total notes) does NOT prove musical correctness, and an
+    all-green table can hide a worse score.** For OMR output, the acceptance check must be a visual
+    diff against the SOURCE PDF (do the accidentals, the rests, and the note content match the
+    original?), not just "did the note count go up." Going forward, eyeball the rendered output
+    against the original PDF for every OMR change before recording PASS; a higher count with wrong
+    pitches is a FAIL.
+  - The genuine recall gaps the user also flagged (arpeggio read as a rest, missing notes) are
+    oemer recall limits, not regressions from #113, and remain open (see tech-lead.md: DPI sweep
+    #112, engine #88, correction UI #6/#105). Do not "fix" them by fabricating notes.
+
 - 2026-05-31: issue #113 / PR #114 (additive LH chord-completion post-pass in
   `omr-worker/worker.py`: `complete_lh_chords` learns the dominant LH triad SHAPE oemer DID
   detect, then completes lone staff-2 notes at a matching duration to that shape, keeping the
