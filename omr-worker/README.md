@@ -34,6 +34,9 @@ free allocation) with Ubuntu 22.04. Then on the VM:
 
 ```bash
 # 1. System packages: pdftoppm (PDF rasterizer) + python tooling.
+# Use Python 3.11 or 3.12: homr caps Python <3.13, and onnxruntime/scikit-learn wheels
+# need >=3.11, so a distro that defaults to 3.13 will fail the pip install. On Ubuntu 22.04
+# python3 is 3.10; if your image ships 3.13, install python3.11 explicitly and build the venv with it.
 sudo apt-get update
 sudo apt-get install -y poppler-utils python3 python3-venv python3-pip file git
 
@@ -47,6 +50,9 @@ cd /opt/piano-helper/omr-worker
 python3 -m venv .venv
 ./.venv/bin/pip install --upgrade pip
 ./.venv/bin/pip install -r requirements.txt
+# oemer is installed separately and WITHOUT its deps: it pins onnxruntime-gpu (no ARM/macOS
+# wheel), so a normal install fails. --no-deps uses the CPU onnxruntime from the step above.
+./.venv/bin/pip install --no-deps -r requirements-oemer.txt
 ```
 
 ## Configure R2 credentials
@@ -99,12 +105,14 @@ brew install poppler python@3.11
 # 2. Standalone runtime dir (kept out of any git worktree so the service is stable).
 RT=~/piano-helper-omr
 mkdir -p "$RT"
-cp omr-worker/worker.py omr-worker/requirements.txt "$RT/"
+cp omr-worker/worker.py omr-worker/requirements.txt omr-worker/requirements-oemer.txt "$RT/"
 
 # 3. venv + deps (oemer pulls a large ML stack; first oemer run also downloads its model).
 /opt/homebrew/opt/python@3.11/bin/python3.11 -m venv "$RT/.venv"
 "$RT/.venv/bin/pip" install --upgrade pip
 "$RT/.venv/bin/pip" install -r "$RT/requirements.txt"
+# oemer separately, without its deps (it pins onnxruntime-gpu, no ARM/macOS wheel).
+"$RT/.venv/bin/pip" install --no-deps -r "$RT/requirements-oemer.txt"
 
 # 4. Credentials file (chmod 600), same four R2 values as the VM env file above.
 cat > "$RT/omr.env" <<'ENV'
