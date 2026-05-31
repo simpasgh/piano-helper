@@ -30,6 +30,43 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-31 - #131 PRE-MERGE REVIEW: PASS. `fix/active-highlight-same-pitch` makes the brighter falling-bar "active" fill per-NOTE, fixing a same-pitch double-light. No blocking findings.**
+  The bug: `drawFallingNotes` set `isActive = active.has(note.midi)` where `active` is the pitch-keyed
+  `activeMidis` set, so EVERY bar of a given pitch lit at once (two stacked "La" both bright, even the
+  in-flight twin). Fix introduces a pure `fallingBarActive(note, currentTime) = currentTime >= note.time
+  && currentTime < note.time + note.duration` (half-open) and uses it as the per-bar gate; `activeMidis`
+  was refactored to reuse the same helper. Why it is correct and safe:
+  - **Per-note gate is right and flows everywhere it should.** `isActive` now drives the bright fill, the
+    contact glow (`inContact = isActive && !muted && bottom >= keyboardTop - 10`), AND the glyph ink
+    (`barGlyphIsDark(note.midi, { active: isActive && !muted, black })`). All three were already keyed off
+    the single `isActive` local, so swapping its source from the pitch-set to the per-note window fixes the
+    fill, glow, and contrast-matched ink in one shot with no extra wiring. `barGlyphIsDark`'s signature is
+    unchanged (`{active, black}`), so the call shape is identical.
+  - **Half-open upper bound is the load-bearing detail, not a cosmetic tweak.** The old code used `<=`
+    (inclusive) in `activeMidis`. With a legato same-pitch repeat where `note2.time === note1.time +
+    note1.duration`, an inclusive end would light BOTH the releasing twin and the arriving onset for the
+    seam frame. The half-open `[time, time+duration)` hands the highlight cleanly to the onset note. The
+    test `hands active to the onset note at a legato same-pitch seam` pins exactly this (first goes dark,
+    second lights, at t == seam).
+  - **`activeMidis` refactor is behavior-preserving EXCEPT the intended boundary tightening.** It changed
+    `<= n.time + n.duration` to the helper's `<`. This is deliberate and documented (design.md): the
+    keyboard key light and the bar must not drift on the release rule, so the key now also goes dark exactly
+    at `time+duration`. A key being lit for one extra frame at the precise release instant is not a
+    user-visible regression, and unifying the rule is the correct call. The keyboard-key light stays
+    pitch-keyed by design (a physical key is one object); only the bar fill became per-note. That divergence
+    (key pitch-keyed vs bar per-note on repeated pitches) is intentional and recorded in design.md.
+  - **Separate boundary in `approachingKeyMidis` (piano.ts:535) is correctly left ALONE.** It keeps its own
+    inclusive `<= n.time + n.duration + LABEL_TIME_EPSILON` because it gates which keys to LABEL (a look-ahead
+    concern), not which bar is sounding. The half-open change is scoped to `fallingBarActive` only.
+  - **Sync invariant untouched.** No change to `score.ts`, timestamps, `stepTimes`, scheduling, or the render
+    clock. `fallingBarActive` is a pure read of `note.time`/`note.duration` against the same `currentTime` the
+    whole render loop uses, so falling notes and sheet cursor still share one timestamp source.
+  - **Test adequacy: GOOD.** New `src/visualizer.test.ts` (4 cases) covers the half-open window edges
+    (onset inclusive, release exclusive), the legato seam handoff, the sequential same-pitch no-double-light
+    (the actual #131 regression), and genuine overlapping/chord windows lighting independently. Pure helper,
+    so unit tests are the right level; the canvas wiring is exercised by the existing render path. 312/312
+    tests + build green. No security review warranted (no network/auth/file/dep change; pure rendering math).
+
 - **2026-05-31 - OMR TIE SPIKE, olimpic/Zeus (Sheet Music Transformer) trial: CORROBORATES Clarity. Zeus ALSO recovers ties on icarus and independently flags the SAME held LH low whole notes near the end - but it is far less practical to run than Clarity. Net: two independent ML engines agree the real tie is machine-detectable; Clarity remains the practical pick.**
   Trialed `ufal/olimpic-icdar24` Zeus model (`zeus-olimpic-1.0-2024-02-12.model`, CC BY-SA) on icarus. Results (delinearized LMX -> MusicXML, summed over the 3 systems): **144 notes / 4 `<tied>` (3 start, 1 stop), ALL 4 ties in the correct system** (the m17-26 grand staff that actually carries the ties). The tied notes: a RH A4->C4 whole tie (INVALID - a tie must be same-pitch, so a misrecognition) and **LH G2 + E3 whole notes marked tie=start near the end** = the held LH low tie the spike targeted. So Zeus, like Clarity (which flagged C2+G2 in the same spot), detects the LH held tie START but leaves it UNPAIRED (no stop) - the identical dangling-start failure mode. Two independent models landing on the same LH low notes is strong evidence the tie is genuinely recoverable; the open problem is start/stop pairing on the final measure, not detection.
   - **Why Zeus is NOT the practical pick despite working:** it only recognizes ONE staff-system at a time (no page/PDF entrypoint), so the trial required: hand-slicing icarus into 3 grand-staff system crops (reused Clarity's YOLO bbox geometry to do it), fabricating a dummy dataset pickle with placeholder gold `.lmx`/`.musicxml` per system (its predict CLI is built for benchmarking against gold, `create_pickle.py` even asserts single-line LMX), and working around a bug in its `delinearize` CLI (`os.path.splitext(filename) + ".musicxml"` concatenates a tuple - use the `-` stdin path instead). It is TensorFlow (Keras-2 era), CC BY-SA, ~27 MB model. Contrast Clarity: one command, reads the PDF directly, auto-detects systems via YOLO, ~15s CPU. For integration into `worker.py`, Clarity is the realistic candidate; Zeus is a research baseline that confirms the result but would need a custom system-segmentation + tiling harness to use.
