@@ -65,3 +65,70 @@ describe("OMR worker rasterization preprocessing (issue #109)", () => {
     expect(worker).not.toMatch(/[–—]/);
   });
 });
+
+describe("OMR worker Clarity-OMR tie engine (issue #135)", () => {
+  it("wires Clarity as an env-gated CPU subprocess engine", () => {
+    // The engine is located by two env vars; if either is unset run_clarity returns None
+    // so the flow falls back to oemer (no crash).
+    expect(worker).toContain('CLARITY_OMR_DIR_ENV = "CLARITY_OMR_DIR"');
+    expect(worker).toContain('CLARITY_PYTHON_ENV = "CLARITY_PYTHON"');
+    expect(worker).toContain("def clarity_command(");
+    expect(worker).toContain("def run_clarity(");
+  });
+
+  it("builds the Clarity argv with --device cpu --fast and a work dir", () => {
+    // Pure command builder (mirrors oemer_command) so the contract is unit-testable.
+    expect(worker).toMatch(/"--device",\s*\n?\s*"cpu",/);
+    expect(worker).toContain('"--fast",');
+    expect(worker).toMatch(/"--work-dir",/);
+    expect(worker).toMatch(/"-o",/);
+  });
+
+  it("returns None from run_clarity when the env is unset or paths are missing", () => {
+    expect(worker).toMatch(/if not omr_dir or not python:\s*\n\s*return None/);
+    expect(worker).toContain("os.path.isfile(omr_script)");
+  });
+
+  it("runs Clarity first for PDF uploads, then falls back to oemer then homr", () => {
+    // Order: Clarity (PDF-only) -> oemer -> homr. Clarity is skipped for PNG/JPEG.
+    expect(worker).toContain("is_pdf_input");
+    expect(worker).toMatch(/if is_pdf_input:\s*\n\s*result_path = run_clarity\(input_path, workdir\)/);
+    // oemer/homr stay the fallback, in that order. Scope the ordering to the process_job
+    // flow (the function bodies define run_oemer/run_homr earlier in the file).
+    const flow = worker.slice(worker.indexOf("def process_job("));
+    const clarity = flow.indexOf("run_clarity(input_path");
+    const oemer = flow.indexOf("run_oemer(image_path");
+    const homr = flow.indexOf("run_homr(image_path");
+    expect(clarity).toBeGreaterThan(-1);
+    expect(clarity).toBeLessThan(oemer);
+    expect(oemer).toBeLessThan(homr);
+  });
+
+  it("preserves the original PDF path for Clarity (sniff before rasterize)", () => {
+    // rasterize_if_pdf renames input.bin, so the PDF type is sniffed BEFORE rasterizing
+    // and Clarity is handed the original PDF (not the stitched raster).
+    expect(worker).toMatch(/is_pdf_input = sniff_mime\(input_path\) == "application\/pdf"/);
+  });
+
+  it("applies both MusicXML post-transforms before put_object", () => {
+    expect(worker).toContain("def merge_to_grand_staff(");
+    expect(worker).toContain("def normalize_ties(");
+    // Both run on the engine body, grand-staff merge first then tie normalization, and the
+    // call site precedes the put_object that writes the result.
+    const merge = worker.indexOf("body = merge_to_grand_staff(body)");
+    const ties = worker.indexOf("body = normalize_ties(body)");
+    const put = worker.indexOf("client.put_object(");
+    expect(merge).toBeGreaterThan(-1);
+    expect(merge).toBeLessThan(ties);
+    expect(ties).toBeLessThan(put);
+  });
+
+  it("makes the post-transforms safe no-ops that never raise into process_job", () => {
+    // The #113 robustness rule: any failure returns the ORIGINAL bytes, no sentinel.
+    expect(worker).toContain("merge_to_grand_staff skipped");
+    expect(worker).toContain("normalize_ties skipped");
+    // grand-staff merge is a no-op unless there are exactly 2 parts (oemer has 1).
+    expect(worker).toContain("if len(parts) != 2:");
+    expect(worker).toContain("return xml_bytes");
+  });
+});

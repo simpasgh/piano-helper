@@ -1,8 +1,15 @@
 # OMR worker (Oracle Always Free ARM VM)
 
 This is the compute backend for Piano Helper's Optical Music Recognition. It is an
-always-on Python worker that polls Cloudflare R2 for uploaded sheet music, runs
-`oemer` (with `homr` as a fallback), and writes the resulting MusicXML back to R2.
+always-on Python worker that polls Cloudflare R2 for uploaded sheet music, runs the OMR
+engines, and writes the resulting MusicXML back to R2.
+
+Engine order (issue #135): for **PDF** uploads the worker tries **Clarity-OMR first**
+(the only free engine that recovers ties), then falls back to `oemer`, then `homr`, then a
+failure sentinel. **Non-PDF** uploads (PNG/JPEG) skip Clarity and go straight to `oemer`.
+Clarity is OPTIONAL at deploy time: if it is not installed the worker transparently uses
+`oemer`, so you can ship a worker.py change before installing Clarity. See the
+"Clarity-OMR (primary engine for PDFs)" section below.
 
 It replaces the old GitHub Actions runner. Using Actions as the app's runtime compute
 backend violates GitHub's Actions usage policy and risks account suspension, so OMR
@@ -55,6 +62,66 @@ python3 -m venv .venv
 ./.venv/bin/pip install --no-deps -r requirements-oemer.txt
 ```
 
+## Clarity-OMR (primary engine for PDFs)
+
+Clarity-OMR (github.com/clquwu/Clarity-OMR, GPL-3.0) is the PRIMARY engine for PDF uploads.
+It is the only free engine that recovers TIES (held notes) on our material (issue #135).
+It is pure Python, CPU-only, and runs on Apple Silicon and Linux ARM.
+
+Clarity MUST live in its OWN separate venv. Its torch / ultralytics-YOLO / transformers
+stack cannot co-install with oemer's onnxruntime / opencv / numpy band, so worker.py
+invokes it as a subprocess (exactly like oemer) and never imports it. The worker locates
+the engine through two env vars (set below). If either is unset, or the script is missing,
+the worker silently falls back to oemer, so this whole step is OPTIONAL and can be done
+after the worker is already running. See `requirements-clarity.txt` for why we do not
+re-pin Clarity's deps ourselves.
+
+```bash
+# 1. Clone the engine somewhere stable, OUTSIDE this repo's venv. ~ on the live Mac, or
+#    /opt/clarity-omr on the Oracle ARM VM.
+git clone https://github.com/clquwu/Clarity-OMR.git ~/clarity-omr
+
+# 2. A dedicated py3.11 venv. System python 3.9 is too old.
+#    macOS: use the homebrew python3.11 explicitly.
+/opt/homebrew/bin/python3.11 -m venv ~/clarity-omr/.venv
+#    Linux ARM: python3.11 -m venv ~/clarity-omr/.venv
+~/clarity-omr/.venv/bin/pip install --upgrade pip
+
+# 3. Install Clarity's OWN pinned deps (the ~1.5 GB torch-CPU stack).
+~/clarity-omr/.venv/bin/pip install -r ~/clarity-omr/requirements.txt
+```
+
+Footprint: ~1.5 GB venv (mostly torch CPU) + a ~336 MB ONE-TIME HuggingFace model download
+on the first run (yolo.pt + model.safetensors + a timm backbone). ~15s CPU per page.
+
+Model caching and the only rate limit in the pipeline: the ONLY rate limit anywhere is
+HuggingFace's unauthenticated model-download THROTTLE on that one-time fetch. It is NOT a
+per-request or per-scan cost, so we never hit a usage cap and stay inside the free /
+no-paid-service rule. The downloaded model persists in the HF cache dir (e.g.
+`~/.cache/huggingface`) after the first run, so subsequent scans never re-download. To
+smooth the very first fetch you may optionally set a FREE `HF_TOKEN` env var for that
+initial download; it is not required once the model is cached. A simple way to warm the
+cache is to run Clarity once by hand on any small PDF after install.
+
+Wire the worker to Clarity with two env vars. Add them alongside the R2 creds in the same
+env file (Linux `/etc/piano-helper-omr.env`, macOS `~/piano-helper-omr/omr.env`):
+
+```
+CLARITY_OMR_DIR=/home/ubuntu/clarity-omr            # the cloned repo (must contain omr.py)
+CLARITY_PYTHON=/home/ubuntu/clarity-omr/.venv/bin/python   # that venv's interpreter
+# Optional, ONLY needed to smooth the one-time HF model download:
+# HF_TOKEN=<free huggingface token>
+```
+
+On the live Mac the values are under `~`, for example
+`CLARITY_OMR_DIR=/Users/<you>/clarity-omr` and
+`CLARITY_PYTHON=/Users/<you>/clarity-omr/.venv/bin/python`. The launchd `run.sh` already
+sources `omr.env`, so the two vars reach the worker process once they are in that file.
+After editing the env file, restart the worker so it picks the vars up:
+`launchctl kickstart -k gui/$(id -u)/com.pianohelper.omr` (same redeploy + kickstart
+gotcha as any worker.py change). On the systemd VM, `EnvironmentFile` already loads the
+same env file, so `sudo systemctl restart omr-worker.service` is enough.
+
 ## Configure R2 credentials
 
 Mint an R2 S3 API token in the Cloudflare dashboard (R2 -> Manage R2 API Tokens ->
@@ -73,6 +140,11 @@ R2_SECRET_ACCESS_KEY=<secret-access-key>
 R2_BUCKET=piano-helper-omr
 # Optional, default 5:
 # OMR_POLL_SECONDS=5
+# Optional Clarity-OMR (primary PDF engine). Omit to fall back to oemer. See the
+# "Clarity-OMR (primary engine for PDFs)" section above.
+# CLARITY_OMR_DIR=/opt/clarity-omr
+# CLARITY_PYTHON=/opt/clarity-omr/.venv/bin/python
+# HF_TOKEN=<free token, only smooths the one-time model download>
 ENV
 sudo chmod 600 /etc/piano-helper-omr.env
 ```
@@ -81,6 +153,12 @@ sudo chmod 600 /etc/piano-helper-omr.env
 
 The unit file assumes the repo at `/opt/piano-helper`, the venv at
 `omr-worker/.venv`, and user `ubuntu`. Edit `omr-worker.service` if yours differ.
+
+The unit's `EnvironmentFile=/etc/piano-helper-omr.env` already passes through the optional
+`CLARITY_OMR_DIR`, `CLARITY_PYTHON`, and `HF_TOKEN` vars when present, so no edit to the
+unit is needed to enable Clarity: just add the vars to that env file and restart the
+service. Clarity's venv is the separate `~/clarity-omr/.venv` from the section above, NOT
+`omr-worker/.venv`.
 
 ```bash
 sudo cp /opt/piano-helper/omr-worker/omr-worker.service /etc/systemd/system/
@@ -121,6 +199,11 @@ R2_ACCESS_KEY_ID=<access-key-id>
 R2_SECRET_ACCESS_KEY=<secret-access-key>
 R2_BUCKET=piano-helper-omr
 # OMR_POLL_SECONDS=5
+# Optional Clarity-OMR (primary PDF engine). Omit to fall back to oemer. See the
+# "Clarity-OMR (primary engine for PDFs)" section above. On the Mac these point under ~.
+# CLARITY_OMR_DIR=/Users/<you>/clarity-omr
+# CLARITY_PYTHON=/Users/<you>/clarity-omr/.venv/bin/python
+# HF_TOKEN=<free token, only smooths the one-time model download>
 ENV
 chmod 600 "$RT/omr.env"
 ```
