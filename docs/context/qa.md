@@ -4,6 +4,67 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-05-31: #113 REVERT CONFIRMATION SCAN (PR #116 merged to main, reverted worker.py
+  redeployed to the LOCAL Mac OMR worker, launchd `com.pianohelper.omr` restarted 13:17:13)
+  -> **PASS: the fabricated sharps are GONE.** Real end-to-end live scan of the user's own
+  `/Users/simonepasculli/Documents/MuseScore4/Scores/icarus.pdf` through the same HTTP flow
+  the app uses, against the now-reverted live worker. This is the acceptance check the #113
+  false-pass taught us to do: a VISUAL diff against the source PDF (accidentals), not a count.
+  - WORKER STATE (revert is live): `grep -c complete_lh_chords ~/piano-helper-omr/worker.py`
+    == **0** (post-pass removed); #109 levers intact (`PDF_RASTER_DPI` x4, `--without-deskew`
+    x3, `stitch_pages_vertical` x2). Worker log for this run starts at line 1742.
+  - HTTP FLOW: `POST /api/omr` multipart `file` (application/pdf) -> 202
+    `{"jobId":"9cd144fa-2c8c-4a45-8933-7db3dfc1b240"}` at 13:18:27. Polled
+    `/api/omr/result?jobId=...` every 10s -> 404 `{"status":"pending"}` (20 bytes) throughout,
+    then **200 + 35861 bytes of real MusicXML** at 13:22:13. `<work-title>Stitched</work-title>`,
+    "Transcribed by Oemer", NOT the omr-status="failed" sentinel (`grep 'name="omr-status"'`
+    and `grep failed` both 0). WALL CLOCK upload 13:18:27 -> result 13:22:13 = **~226s
+    (~3m46s)**, faster than #109/#113's ~6 min (less core contention this run). The 35861-byte
+    size is IDENTICAL to #109's run and well below #113's inflated 40187 bytes.
+  - ENGINE: **oemer won** (NOT homr). Worker log slice (from line 1742): `detected mime
+    'application/pdf'` (13:18:31) -> `rasterized 1 page(s) at 400 DPI` -> oemer argv ended
+    `--without-deskew` on `stitched.png` -> line 1836 `9cd144fa... recognized via engine
+    output .../oemer-out/stitched.musicxml` + line 1837 `done ...; upload deleted` (13:22:11).
+    Mid-run process probe: oemer pid in state R, ~448% CPU, climbing CPU time (genuinely
+    computing, not hung). Only benign per-symbol `Note N is not a valid note` warnings + the
+    CoreML `GetCapability` info lines. No traceback/OOM/homr fallback.
+  - THE KEY CHECK (musical fidelity vs the SOURCE PDF, the #113 lesson): rendered the source
+    with `pdftoppm -png -r 150 icarus.pdf` and confirmed the original is C-major (EMPTY key
+    sig) with **whole-note natural block triads in the bass-clef LH, ZERO accidental symbols**
+    anywhere in either staff for the whole piece. The reverted OUTPUT matches exactly: every
+    one of the 109 `<alter>` elements is `<alter>0</alter>` (natural), **ZERO `<alter>1</alter>`
+    (sharps) in the LH staff 2 (and zero anywhere), ZERO `<accidental>` symbol elements, no
+    negative alters either.** The #113 fabrication (a guessed D-major-type triad shape stamped
+    on lone LH notes, which produced the spurious Fa# the user saw) is **fully removed**.
+  - FIDELITY TABLE (this reverted run vs #109 baseline vs the inflated #113 fabrication):
+
+    | metric | #109 baseline | #113 (fabricated) | now (reverted) | result |
+    | --- | --- | --- | --- | --- |
+    | parts | 1 | 1 | 1 | match #109 |
+    | staves | 2 (G@1/F@2) | 2 | 2 (G@1/F@2) | match #109 |
+    | measures | 27 | 27 | 27 | match #109 |
+    | total pitched notes | 109 | 139 | **109** | match #109 |
+    | RH notes (staff 1) | 66 | 66 | **66** | match #109 |
+    | LH notes (staff 2) | 43 | 73 | **43** | match #109 |
+    | LH chords (>=2) | 12 | 26 | **12** | match #109 |
+    | LH triads (>=3) | 4 | 19 | **4** | match #109 |
+    | LH sharps (`<alter>1`) | 0 | (the fabrication) | **0** | match #109 |
+
+    LH group histogram now {1:15, 2:8, 3:4} (15 lone notes, 8 dyads, 4 triads). Output is back
+    to the #109 numbers to the note, NOT the inflated #113 numbers.
+  - VERDICT: **PASS on "are the fabricated sharps gone" — YES.** The LH accidental count is
+    back to the natural #109 level (zero sharps), and total/RH/LH/chord/triad counts are
+    identical to #109, proving the post-pass is gone and nothing else changed. The revert did
+    its one job: removed the FABRICATION.
+  - HONEST SCOPE (NOT fixed by this revert, still open, by design): the genuine oemer RECALL
+    gaps the user also flagged (arpeggios read as rests, missing notes) are engine limits, not
+    #113 regressions, and remain. The LH still recovers a triad in only 4 of 27 measures where
+    the source has a triad almost every bar (43 LH notes vs the source's ~fuller LH). That is
+    the #109-level oemer ceiling; closing it needs a different engine/ensemble or a CORRECT
+    post-pass (#88/#112/#6/#105), not fabricating notes. The revert restores correctness, not
+    completeness. Source render /tmp/icarus-qa-orig-1.png; analysis script + result.xml under
+    /tmp/qa-icarus-revert/ (transient).
+
 - 2026-05-31: #113 REVERTED after the user reviewed the live output. **The #113 PASS below was a
   false pass: every acceptance metric was green but the score was musically WRONG.** The user's
   icarus.pdf has natural LH triads; the shipped output rendered spurious sharps (diesis) because
