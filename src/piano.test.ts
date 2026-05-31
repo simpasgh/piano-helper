@@ -18,6 +18,7 @@ import {
   isHandMuted,
   noteBarWidth,
   fitBarLabel,
+  keyLabelFits,
   barGlyphIsDark,
   labelableFallingNotes,
   approachingKeyMidis,
@@ -678,6 +679,29 @@ describe("fitBarLabel overflow (issue #67: narrow desktop bars keep their name)"
         }
       }
     }
+  });
+});
+
+describe("keyLabelFits (issue #57: all-or-nothing key-face label fit)", () => {
+  it("fits when the widest label plus a gutter on each side is within the key width", () => {
+    expect(keyLabelFits(10, 14, 2)).toBe(true); // 10 + 2 = 12 <= 14
+  });
+
+  it("just fits at the exact boundary", () => {
+    expect(keyLabelFits(12, 14, 2)).toBe(true); // 12 + 2 = 14 <= 14
+  });
+
+  it("does not fit when the label plus gutter exceeds the key width", () => {
+    expect(keyLabelFits(13, 14, 2)).toBe(false); // 13 + 2 = 15 > 14
+  });
+
+  it("is false for a non-positive key width", () => {
+    expect(keyLabelFits(5, 0, 2)).toBe(false);
+    expect(keyLabelFits(5, -3, 2)).toBe(false);
+  });
+
+  it("is false for a non-positive label width (nothing to draw)", () => {
+    expect(keyLabelFits(0, 14, 2)).toBe(false);
   });
 });
 

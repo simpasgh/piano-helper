@@ -5,6 +5,7 @@ import {
   fitBarLabel,
   isBlackKey,
   isHandMuted,
+  keyLabelFits,
   labelableFallingNotes,
   midiToLabel,
   midiToBarLabel,
@@ -363,11 +364,10 @@ export class Visualizer {
     this.drawKeyLabels(top, active, approaching);
   }
 
-  // White-key pitch-class labels (no octave). Only labels keys with an approaching or
-  // sounding note (issue #43), so the keyboard shows the names that matter right now, not
-  // every key. Never shrinks below 11px, and the width check is all-or-nothing: if the
-  // widest possible label plus a small gutter would not fit a white key, draw no key-face
-  // labels this pass (uniform > ragged).
+  // Key-face pitch-class labels (no octave). Shares the labelMode + legibility-floor
+  // guards, then draws two independent passes: the white-key row (approaching/sounding
+  // keys, issue #43) and the black-key cue (sounding keys only, issue #57). Each pass is
+  // all-or-nothing on its own key width so neither row goes ragged.
   private drawKeyLabels(
     top: number,
     active: Set<number>,
@@ -377,16 +377,30 @@ export class Visualizer {
     // Below the legibility floor the keybed is too short to seat readable glyphs, so
     // skip key-face labels entirely on small screens (the falling-bar names remain).
     if (this.keyboardHeight < KEY_LABEL_MIN_HEIGHT) return;
-    // Nothing approaching -> no key labels at all (issue #43).
+
+    const { ctx } = this;
+    ctx.textAlign = "center";
+    ctx.shadowBlur = 0;
+
+    this.drawWhiteKeyLabels(top, active, approaching);
+    this.drawBlackKeyLabels(top, active);
+  }
+
+  // White-key path. Unchanged behavior: nothing approaching -> no labels (issue #43), all
+  // labels share one 11px font, and the row is all-or-nothing against the white-key width.
+  private drawWhiteKeyLabels(
+    top: number,
+    active: Set<number>,
+    approaching: Set<number>,
+  ): void {
+    // Nothing approaching -> no white key labels at all (issue #43).
     if (approaching.size === 0) return;
     const { ctx } = this;
     const whiteWidth = this.keys.find((k) => !k.black)?.width ?? 0;
     if (whiteWidth <= 0) return;
 
     ctx.font = "600 11px system-ui";
-    ctx.textAlign = "center";
     ctx.textBaseline = "bottom";
-    ctx.shadowBlur = 0;
 
     const GUTTER = 4; // px of breathing room each side so glyphs do not touch key edges
     // Measure the widest label across the whole mode (not just approaching keys) so the
@@ -397,7 +411,7 @@ export class Visualizer {
       if (key.black) continue;
       widest = Math.max(widest, ctx.measureText(midiToLabel(key.midi, this.labelMode)).width);
     }
-    if (widest + GUTTER > whiteWidth) return; // too narrow at 11px, skip the whole row
+    if (!keyLabelFits(widest, whiteWidth, GUTTER)) return; // too narrow at 11px, skip row
 
     const baseline = top + this.keyboardHeight - 10;
     for (const key of this.keys) {
@@ -408,6 +422,42 @@ export class Visualizer {
       // when it has its own approaching note.
       if (!approaching.has(key.midi)) continue;
       ctx.fillStyle = active.has(key.midi) ? "#1a0f2b" : "#5b4a72";
+      ctx.fillText(midiToLabel(key.midi, this.labelMode), key.x + key.width / 2, baseline);
+    }
+  }
+
+  // Black-key path (issue #57): purely additive name cue. A black key is only labeled
+  // while it is sounding/pressed (in `active`), so the resting keyboard stays clean and a
+  // beginner who sees a falling "C#"/"Do#" gets a name on the physical black key the moment
+  // it lights up. Black faces are narrow, so this uses a smaller 9px font and the same
+  // all-or-nothing width fit as the white row: if the widest black-key label would not fit
+  // the black-key width at 9px, no black-key labels are drawn this pass (uniform > ragged).
+  private drawBlackKeyLabels(top: number, active: Set<number>): void {
+    const { ctx } = this;
+    const blackWidth = this.keys.find((k) => k.black)?.width ?? 0;
+    if (blackWidth <= 0) return;
+    if (active.size === 0) return;
+
+    ctx.font = "600 9px system-ui";
+    ctx.textBaseline = "bottom";
+
+    const GUTTER = 2; // tighter than the white row; the black face has little room
+    // Widest black-key label across the whole mode keeps the fit decision stable as the
+    // active set changes (solfege "Do#"/"Reb" is wider than the 2-char letter spelling).
+    let widest = 0;
+    for (const key of this.keys) {
+      if (!key.black) continue;
+      widest = Math.max(widest, ctx.measureText(midiToLabel(key.midi, this.labelMode)).width);
+    }
+    if (!keyLabelFits(widest, blackWidth, GUTTER)) return; // too narrow at 9px, skip
+
+    // Seat the name near the bottom of the black-key face (height is kbH * 0.62).
+    const baseline = top + this.keyboardHeight * 0.62 - 4;
+    for (const key of this.keys) {
+      if (!key.black) continue;
+      if (!active.has(key.midi)) continue;
+      // Light text reads against the lit black-key hue (activeBlackKey fill).
+      ctx.fillStyle = "#f2ecf8";
       ctx.fillText(midiToLabel(key.midi, this.labelMode), key.x + key.width / 2, baseline);
     }
   }

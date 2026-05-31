@@ -30,6 +30,35 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-31 - #57: a lit (active) black key now shows its accidental name; resting/approaching black keys stay blank.**
+  Issue: `drawKeyLabels` in `src/visualizer.ts` skipped black keys entirely (`if (key.black) continue;`), so a
+  beginner who saw a falling "C#"/"Do#" got no cue on the physical black key. Fix is purely additive and does
+  NOT touch white-key labels, the 11px legibility floor, or small-screen behavior.
+  - **Split the render:** `drawKeyLabels` now keeps only the shared guards (`labelMode !== "off"`,
+    `keyboardHeight >= KEY_LABEL_MIN_HEIGHT`) then calls two private passes: `drawWhiteKeyLabels` (unchanged
+    behavior, including the `approaching.size === 0` early-out and the all-or-nothing white-width fit at 11px)
+    and `drawBlackKeyLabels`. Moving the `approaching.size === 0` return INTO the white pass is the key point:
+    a pressed black key must show its name even when nothing is in the look-ahead set, so the black pass gates
+    on `active`, not `approaching`.
+  - **Black pass:** labels a black key iff it is in `active` (sounding/pressed). Uses a smaller 9px font (white
+    is 11px) because the black face is narrow, a 2px gutter (white uses 4px), and the same all-or-nothing width
+    fit against the black-key width: if the widest black-key label for the mode would not fit at 9px, no
+    black-key labels draw this pass (uniform > ragged). Solfege ("Do#","Reb") is wider than the 2-char letter
+    spelling, so the widest is measured across the whole mode like the white row. Name is centered, seated near
+    the bottom of the black face (`top + keyboardHeight * 0.62 - 4`), drawn in light "#f2ecf8" to read against
+    the lit `noteColor(midi).activeBlackKey` fill. Spelling is `midiToLabel(key.midi, labelMode)` (sharp
+    spelling, consistent with the rest of the keyboard; spelling is intentionally NOT threaded here).
+  - **Pure logic extracted + tested:** new `keyLabelFits(widestLabelWidth, keyWidth, gutter)` in `src/piano.ts`
+    (the all-or-nothing fit predicate, DOM-free). Both the white and black passes call it; the white path's old
+    inline `widest + GUTTER > whiteWidth` check is now `!keyLabelFits(...)` (behavior identical). +5 tests in
+    `src/piano.test.ts` (fits, exact boundary, overflow, non-positive key width, zero label width). Suite
+    291 -> 296, build green.
+  - **NEEDS LIVE QA:** this is canvas drawing, so CI cannot see it. QA must confirm in a browser that a pressed
+    black key shows its name, the name is legible/centered/contrasts the lit hue, resting black keys stay blank,
+    and white-key labels are visually unchanged.
+  - NOTE: `npm test` again hit the known `jsdom` ERR_MODULE_NOT_FOUND; a plain `npm install` in the worktree
+    fixed it without touching `package-lock.json`.
+
 - **2026-05-31 - #64: `deriveDefaultSheetName` now rejects OSMD's "Untitled Score" placeholder so the file-name fallback runs.**
   When a MusicXML score has no embedded `<work-title>`/`<movement-title>`, OSMD reports the title as the
   non-empty placeholder string `Untitled Score`. The #44 logic treated any non-empty title as real, so
