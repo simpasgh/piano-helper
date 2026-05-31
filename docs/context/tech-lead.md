@@ -30,6 +30,45 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-31 - #131 PRE-MERGE REVIEW: PASS. `fix/active-highlight-same-pitch` makes the brighter falling-bar "active" fill per-NOTE, fixing a same-pitch double-light. No blocking findings.**
+  The bug: `drawFallingNotes` set `isActive = active.has(note.midi)` where `active` is the pitch-keyed
+  `activeMidis` set, so EVERY bar of a given pitch lit at once (two stacked "La" both bright, even the
+  in-flight twin). Fix introduces a pure `fallingBarActive(note, currentTime) = currentTime >= note.time
+  && currentTime < note.time + note.duration` (half-open) and uses it as the per-bar gate; `activeMidis`
+  was refactored to reuse the same helper. Why it is correct and safe:
+  - **Per-note gate is right and flows everywhere it should.** `isActive` now drives the bright fill, the
+    contact glow (`inContact = isActive && !muted && bottom >= keyboardTop - 10`), AND the glyph ink
+    (`barGlyphIsDark(note.midi, { active: isActive && !muted, black })`). All three were already keyed off
+    the single `isActive` local, so swapping its source from the pitch-set to the per-note window fixes the
+    fill, glow, and contrast-matched ink in one shot with no extra wiring. `barGlyphIsDark`'s signature is
+    unchanged (`{active, black}`), so the call shape is identical.
+  - **Half-open upper bound is the load-bearing detail, not a cosmetic tweak.** The old code used `<=`
+    (inclusive) in `activeMidis`. With a legato same-pitch repeat where `note2.time === note1.time +
+    note1.duration`, an inclusive end would light BOTH the releasing twin and the arriving onset for the
+    seam frame. The half-open `[time, time+duration)` hands the highlight cleanly to the onset note. The
+    test `hands active to the onset note at a legato same-pitch seam` pins exactly this (first goes dark,
+    second lights, at t == seam).
+  - **`activeMidis` refactor is behavior-preserving EXCEPT the intended boundary tightening.** It changed
+    `<= n.time + n.duration` to the helper's `<`. This is deliberate and documented (design.md): the
+    keyboard key light and the bar must not drift on the release rule, so the key now also goes dark exactly
+    at `time+duration`. A key being lit for one extra frame at the precise release instant is not a
+    user-visible regression, and unifying the rule is the correct call. The keyboard-key light stays
+    pitch-keyed by design (a physical key is one object); only the bar fill became per-note. That divergence
+    (key pitch-keyed vs bar per-note on repeated pitches) is intentional and recorded in design.md.
+  - **Separate boundary in `approachingKeyMidis` (piano.ts:535) is correctly left ALONE.** It keeps its own
+    inclusive `<= n.time + n.duration + LABEL_TIME_EPSILON` because it gates which keys to LABEL (a look-ahead
+    concern), not which bar is sounding. The half-open change is scoped to `fallingBarActive` only.
+  - **Sync invariant untouched.** No change to `score.ts`, timestamps, `stepTimes`, scheduling, or the render
+    clock. `fallingBarActive` is a pure read of `note.time`/`note.duration` against the same `currentTime` the
+    whole render loop uses, so falling notes and sheet cursor still share one timestamp source.
+  - **Test adequacy: GOOD.** New `src/visualizer.test.ts` (4 cases) covers the half-open window edges
+    (onset inclusive, release exclusive), the legato seam handoff, the sequential same-pitch no-double-light
+    (the actual #131 regression), and genuine overlapping/chord windows lighting independently. Pure helper,
+    so unit tests are the right level; the canvas wiring is exercised by the existing render path. 312/312
+    tests + build green. No security review warranted (no network/auth/file/dep change; pure rendering math).
+    NIT (non-blocking): the test's `note(0,1)` comments say `[0,1]`/`[2,3]` (closed) where the window is
+    half-open `[0,1)`; the assertions are correct, only the bracket notation in two comments is loose. Cosmetic.
+
 - **2026-05-31 - #127 PRE-MERGE REVIEW: APPROVE-WITH-NITS (non-blocking). `feat/nocturne-theme` (commit 6d14f1f) remaps the violet `:root` tokens + canvas literals to a brass/ebony/ivory palette and re-anchors `pitchHue` 276 -> 40. No blocking findings.**
   Pure visual/color change (no network/auth/file/dep), so no security review. 308/308 tests + build green. Verified the three review asks:
   - **(1) No leftover violet LITERALS anywhere in src/index.html.** Grepped the full tree (not just changed files) for every violet hex used by the old theme (`#b14bff`, `#7a2fd6`, `#d9a6ff`, `#f2ecf8`, `#f7f2ff`, `#f6f2fb`, `#100b1a`, `#15101f`, `#2a2238`, `#1a0f2b`, `#5b4a72`, `#0a0712`, `#120b1f`) and the rgba forms (`177,75,255` / `232,224,245` / `10,7,18` / `20,12,32`): ZERO hits in non-test source. index.html has no inline color literals at all. The grep DID surface 5 stale "violet"/"purple" WORDS in comments (`visualizer.ts:234` "deep violet" describing a hand-cap example, `piano.ts:552` "instead of violet" which is correct/intentional, `style.css:4` correct, and `style.css:318/362/363` "filled-violet"/"Tints violet on hover" now describe brass). These are cosmetic comment drift, NOT leftover styling. Non-blocking nit; flagged to author.
