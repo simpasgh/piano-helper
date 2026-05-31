@@ -281,6 +281,45 @@ describe("buildStaffClefTimeline (issue #87: clef in effect per measure, single 
     const t = timeline.get(0)!;
     for (let m = 0; m < 5; m++) expect(handFromClefInEffect(t[m])).toBe("right");
   });
+
+  it("a `first`-source clef wins over a `last`-source clef carried to the same measure (issue #90)", () => {
+    // The bass clef change lived in measure 0's LastInstructionsStaffEntries, so it is
+    // attributed to measure 1; measure 1 then ALSO declares treble at its head. The measure
+    // opens with the clef printed at its head (treble), regardless of declaration order.
+    const declsLastFirst = buildStaffClefTimeline(
+      [
+        { staffId: 0, measureIndex: 0, clef: "treble", source: "first" },
+        { staffId: 0, measureIndex: 1, clef: "bass", source: "last" },
+        { staffId: 0, measureIndex: 1, clef: "treble", source: "first" },
+      ],
+      2,
+    );
+    expect(declsLastFirst.get(0)).toEqual(["treble", "treble"]);
+
+    // Order-independence: same declarations, `first` listed before the carried `last`.
+    const declsFirstLast = buildStaffClefTimeline(
+      [
+        { staffId: 0, measureIndex: 0, clef: "treble", source: "first" },
+        { staffId: 0, measureIndex: 1, clef: "treble", source: "first" },
+        { staffId: 0, measureIndex: 1, clef: "bass", source: "last" },
+      ],
+      2,
+    );
+    expect(declsFirstLast.get(0)).toEqual(["treble", "treble"]);
+  });
+
+  it("a carried `last` clef applies when no `first` clef contests its measure (issue #90)", () => {
+    // The real collapsed-scan shape: treble at measure 0, bass carried from measure 0's tail
+    // into measure 1 with nothing redeclared at measure 1's head.
+    const timeline = buildStaffClefTimeline(
+      [
+        { staffId: 0, measureIndex: 0, clef: "treble", source: "first" },
+        { staffId: 0, measureIndex: 1, clef: "bass", source: "last" },
+      ],
+      2,
+    );
+    expect(timeline.get(0)).toEqual(["treble", "bass"]);
+  });
 });
 
 describe("handFromClefInEffect (issue #87: hand from the clef in effect, single staff)", () => {

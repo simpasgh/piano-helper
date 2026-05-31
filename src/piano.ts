@@ -103,10 +103,16 @@ export function buildStaffClefMap(
 }
 
 // A clef declaration as the timeline reads it: which staff, which measure index, what clef.
+// `source` records where OSMD carried the clef so the timeline can break ties when two
+// declarations land on the same measure (issue #90): a clef declared at the START of a
+// measure ("first") is the clef that measure actually opens with, so it must win over a
+// clef that a PRECEDING measure declared at its end ("last") and that we attribute forward
+// to this measure. Older callers that omit `source` are treated as "first".
 export interface ClefDeclaration {
   staffId: number;
   measureIndex: number;
   clef: StaffClefKind;
+  source?: "first" | "last";
 }
 
 // Reduces per-measure clef declarations into the clef IN EFFECT for each measure of each
@@ -135,10 +141,20 @@ export function buildStaffClefTimeline(
 
   const timelines = new Map<number, (StaffClefKind | undefined)[]>();
   for (const [staffId, decls] of byStaff) {
-    // Index declarations by measure (a later declaration in the same measure wins; in
-    // practice there is at most one clef per staff per measure begin).
+    // Index declarations by measure. When two declarations target the same measure, the one
+    // declared at that measure's START ("first") wins over one carried forward from a
+    // preceding measure's end ("last"): a measure opens with the clef printed at its head,
+    // not with whatever the prior measure switched to at its tail (issue #90). A missing
+    // `source` counts as "first" so synthetic/hand-built declarations keep last-write-wins.
     const atMeasure = new Map<number, StaffClefKind>();
-    for (const { measureIndex, clef } of decls) atMeasure.set(measureIndex, clef);
+    const sourceAt = new Map<number, "first" | "last">();
+    for (const { measureIndex, clef, source } of decls) {
+      const incoming = source ?? "first";
+      const existing = sourceAt.get(measureIndex);
+      if (existing === "first" && incoming === "last") continue; // first already wins
+      atMeasure.set(measureIndex, clef);
+      sourceAt.set(measureIndex, incoming);
+    }
 
     const timeline = new Array<StaffClefKind | undefined>(measureCount);
     let current: StaffClefKind | undefined;

@@ -4,6 +4,18 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-05-31: #90 (the #87 fix did NOT work against a real OSMD parse: per-hand controls
+  stayed hidden for a collapsed single-staff treble->bass scan). Root cause was in
+  `readClefDeclarations` extraction, not the hand-tagging helpers: (1) OSMD 1.9.9 leaves
+  `ParentStaff === undefined` on the clef instruction entries of a SINGLE-STAFF instrument, so
+  the `staffId == null` guard dropped every clef; (2) a mid-piece clef change lives in
+  `LastInstructionsStaffEntries` of the PRECEDING measure, but the code only read the First
+  bucket. Tech-lead fixed both + added the FIRST real-OSMD-parse regression test
+  (`src/score.test.ts`, jsdom, parse-only via `osmd.load()`; full `extractScore`/render cannot
+  run in jsdom because VexFlow needs a real Canvas2D). When re-verifying live: load a one-part,
+  no-`<staves>`, treble-then-bass MusicXML and confirm `#hand-mutes` becomes visible with 4
+  right + 4 left notes. The icarus.pdf OMR path is still blocked on the OMR backend (#88).
+
 - 2026-05-30: PR #80 (Bug 3 / issue #70 follow-up: audio-derived scores now tag each note by
   pitch (MIDI >= 60 = right, below = left) instead of "unknown", so `hasBothHands` can be true
   and the per-hand mute toggles + Balance slider become reachable for two-handed audio clips)
