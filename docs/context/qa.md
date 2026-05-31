@@ -4,6 +4,51 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-05-31: PR #94 / issue #93 (re-enable controls synchronously on sheet-scan cancel) ->
+  **PASS** on prod (https://piano-helper.pages.dev, `main` @ 7121fed, served bundle
+  `index-5TCZSbdV.js`; bundle no longer contains `wasAudio`, the dropped branch). Drove live
+  in real Chromium (Playwright), re-ran the EXACT #93 repro. This CLOSES #93 and the #86 work.
+  - CORE FIX VERIFIED (was the FAIL): load a normal score, start a scan (inject a fake PNG into
+    `#scan-input`; OMR 404s per #88, fine), click Cancel -> at the EARLIEST probe (+27ms) the
+    overlay is hidden AND Play/Export/seek/prev/next are ALL `disabled=false`, and they stay
+    enabled across a dense 2.5s poll (88 samples, 0 bad). Same for Escape (89 samples, 0 bad).
+    Pre-fix these were stuck `disabled=true` for the whole ~2-4s in-flight `/api/omr` window.
+    The re-enable is now synchronous, exactly matching the audio path. Screenshots:
+    /tmp/qa-issue93/03-after-click-cancel.png and 09-status-after-cancel.png (overlay gone,
+    "QA93 Score"/"N notes" in the slot, Play purple/enabled).
+  - STATUS clears too: `cancelScanOverlay()` -> `restoreSheetName()` HIDES `#track-status`
+    (sets `.hidden=true`) and shows `#sheet-name` + `#sheet-note-count`. At +30ms the user-
+    VISIBLE status is null and the slot reads the sheet name + count again, so "Scanning
+    sheet..." is no longer on screen synchronously.
+  - GOTCHA (cost me a re-probe): do NOT assert on `#track-status`.textContent to prove the
+    "Scanning sheet..." message is gone. `restoreSheetName` only sets `.hidden=true`; it does
+    NOT clear the textContent, so a raw `.textContent` read still returns the stale string even
+    though the user sees nothing. Gate on visibility: `el.hidden === true` (and/or rect 0x0)
+    for `#track-status` AND `#sheet-name` becoming visible with the score name. The first driver
+    pass logged status="Scanning sheet..." at every timepoint and looked like a FAIL until I
+    checked `.hidden` (it was true throughout post-cancel).
+  - STEP 5 (Play after cancel) PASS: clicked Play immediately after cancel; `#play-label`
+    flipped to "Pause" and the transport ran (headless audio clock advanced on prod). The
+    restored score is fully usable right away, not after a delay.
+  - STEP 6 (cancel-then-restart) PASS: load, scan, Cancel, then immediately inject a second
+    scan -> the second overlay shows correctly and STAYED UP for a full 6s watch (0 early
+    closes) while the first (abandoned) scan's `/api/omr` settled in the background; controls
+    stayed correctly greyed UNDER the second overlay (busy state intact). The `scanSheet`
+    generation guard (`if (generation === jobGeneration)` in its finally, main.ts ~656) means
+    a late settle of the abandoned scan does not stomp the newer job. Screenshot:
+    /tmp/qa-issue93/07-second-overlay-after-6s.png (the 2nd "Scanning your sheet" overlay up).
+  - STEP 7 (audio-path regression) PASS: synthesized a ~2s tonal WAV, injected into
+    `#audio-input`, caught the transcribe overlay, cancelled -> 0 bad samples over 1.5s
+    (overlay hidden + all controls enabled at +30ms). Audio path still cancels cleanly.
+  - CONSOLE: only the expected `/api/omr` 404s (OMR backend down, #88), 0 pageerrors. Not a
+    failure per #88.
+  - METHOD that proved synchronous: poll `el.disabled` + `overlay.hidden` every 25ms for ~2.5s
+    starting the tick AFTER the cancel click, then report the nearest sample to +30/100/200/
+    500/1000/2000ms. "0 bad samples of 88" is the clean proof the window is gone (vs the #86
+    pass where +30..2000ms were all `disabled=true`). Drivers were transient (qa-issue93.mjs,
+    qa-issue93-status.mjs in worktree root, deleted after); screenshots persist at
+    /tmp/qa-issue93/.
+
 - 2026-05-31: issue #86 (scan/transcribe loading overlay, `#scan-overlay`) -> **FAIL** on prod
   (https://piano-helper.pages.dev, `main`, bundle `index-tvPITG1-.js`). Bug filed as **#93**.
   Drove live in real Chromium (Playwright). Most of the overlay is correct; one path leaves
