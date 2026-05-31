@@ -19,6 +19,31 @@ performance on an animated piano, with the score highlighted in sync. Make the f
 
 ## Decisions
 
+### 2026-05-31 - OMR fidelity: first #88 child is image preprocessing, defer note heuristics
+
+- **Context:** user re-scanned their clean 1-page vector PDF icarus.pdf (the #88 fixture).
+  Result "better than before but still not accurate." Observed gaps: (1) left-hand bass
+  triads collapse to single/2-note; (2) right-hand rhythm drift mm. 9-15; (3) octave/pitch
+  slips; (4) lost tempo/dynamic/title (cosmetic).
+- **Scoped ONE shippable ticket: worker-side image preprocessing only** (raise pdftoppm DPI
+  300 -> 400-600, run oemer `--without-deskew` on the vector-PDF path, optional gated
+  grayscale/binarization). Labels: type:fix, area:omr, priority:high. First concrete child
+  of spike #88.
+- **Key technical fact:** oemer has NO DPI/quality flag (CLI is just `-o`, `--use-tf`,
+  `--save-cache`, `-d/--without-deskew`). The raster we hand it is the ONLY preprocessing
+  lever we own. So the highest-leverage free move is upstream, in `rasterize_if_pdf`. oemer
+  auto-deskews by default; for an already-straight vector PDF that can warp it, hence
+  `--without-deskew` on the PDF path only (keep deskew for photo/PNG inputs).
+- **Deferred deliberately:** chord-completion and rhythm-correction post-processing on the
+  MusicXML (gaps 1+2). That is note-level inference, high-risk (can fabricate wrong notes),
+  belongs in a separate #88 spike. Better input pixels should recover SOME dropped tones for
+  free, so we ship the safe pixel win first and measure. Metadata recovery (gap 4) stays out
+  as cosmetic: src/sheet-name.ts fallback already handles the missing title gracefully.
+- **Rationale:** smallest slice that moves fidelity, zero new note-invention risk, stays on
+  free tooling (Pillow/OpenCV/poppler on the Oracle VM), R2 transport contract untouched.
+  Acceptance is measurable: before/after note-head counts per measure on icarus.pdf, plus
+  wall-clock time cap.
+
 ### 2026-05-31 - Issue #6 correction UI: DEFER from autonomous sweep, split into slices
 
 - **Recommendation: do NOT one-shot #6 in an unattended backlog burn.** The full ask (select a
