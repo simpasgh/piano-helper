@@ -30,6 +30,72 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-31 - #86 cancel-path bug fixes: a cancelled audio job no longer loads its score, and Cancel re-enables a still-loaded score's controls.**
+  Code review of the #86 overlay found two blocking defects in the cancel path; both fixed in
+  `src/main.ts` with pure-helper-backed regression tests.
+  - **BLOCKING 1 (cancelled/superseded audio job still loaded its score):** `loadAudioFile` calls
+    `loadNotes` INTERNALLY, so the old `if (cancelRequested) return` in `transcribeAudio` ran only
+    AFTER the load had already happened. Worse, `showScanOverlay` resets `cancelRequested=false` when
+    a new job starts, so a cancel-then-restart let job A's late result load under job B's overlay.
+    Fix: `loadAudioFile(file, shouldApply: () => boolean)` checks the guard immediately before
+    `loadNotes` (and before each progress narration). `transcribeAudio` captures its `generation` and
+    passes `() => shouldApplyResult(generation, jobGeneration, cancelRequested)`. New pure
+    `shouldApplyResult(generation, currentGeneration, cancelled)` in `src/scan-overlay.ts` returns
+    `generation === currentGeneration && !cancelled`. The GENERATION check (not just cancelRequested,
+    which gets reset per job) is what drops job A under job B. The existing generation-guarded
+    `finally` already prevented a stale teardown; this adds the matching load guard.
+  - **BLOCKING 2 (cancel left a prior score's Play/Export/seek/step disabled):** `setBusyUI(active)`
+    disabled play/export/transport on `active=true` but its not-busy branch never re-enabled them;
+    only a successful `loadNotes` did, which never runs on the cancel/abandon path. Fix: the not-busy
+    branch now sets `enabled = controlsEnabledForScore(!!score)` (new pure helper in `src/playback.ts`,
+    currently just `scoreLoaded`) and writes `playBtn/exportBtn.disabled = !enabled` +
+    `setTransportControlsEnabled(enabled)`. `exportVideo`'s finally dropped its now-redundant manual
+    re-enable lines (setBusyUI(false) handles it), so there is one source of truth.
+  - **Tests:** `shouldApplyResult` 4 cases (normal applies; same-gen+cancelled drops; restart bumps
+    gen so job A drops; superseded+cancelled drops) and `controlsEnabledForScore` 2 cases in the pure
+    suites. A new jsdom `src/cancel-controls.test.ts` asserts the real disabled-flag behavior on actual
+    elements (booting all of main.ts under jsdom pulls in Tone/OSMD/canvas/sampler/rAF, so it mirrors
+    setBusyUI's not-busy branch against the shared predicate). Source guards in `src/toolbar.test.ts`
+    lock the actual main.ts wiring for both fixes (the `shouldApply` param, the `!shouldApply() return`,
+    the `shouldApplyResult(generation, jobGeneration, cancelRequested)` call, and the setBusyUI else
+    branch driving `controlsEnabledForScore(!!score)`). Suite 268 green, `npm run build` green. Live
+    cancel-with-prior-score + cancel-then-restart in a real browser is the post-merge QA gate.
+
+- **2026-05-31 - Scan/transcribe loading overlay SHIPPED (#86): a blocking stage overlay + a client-side Cancel that abandons the wait, never aborts the server job.**
+  Replaced the too-quiet `#track-status` line with a full-stage overlay per the Designer spec (design.md top
+  section). One `#scan-overlay` node in `index.html` AFTER `#stage` (role=dialog, aria-modal, aria-busy,
+  labelledby/describedby), default `hidden`. Pieces and gotchas:
+  - **Overlay covers the stage, NOT the toolbar.** The spec markup is one node inside `#app` with
+    `position:absolute; inset:0; z-index:5`. `#app` got `position:relative` (the containing block). With
+    `inset:0` it would also cover the toolbar, so `.topbar` got `position:relative; z-index:6` to stack
+    ABOVE the overlay; its near-opaque `--bar-surface` (0.92) keeps it clearly visible while the overlay
+    blurs/dims only the sheet+stage region below it. This is the spec-faithful way to get "toolbar visible,
+    stage covered" without extra wrapper DOM.
+  - **Cancel = client-side abandon (the OMR job runs server-side and cannot truly abort).** `pollOmrResult`
+    (`src/omr.ts`) gained an injectable `isCancelledRequested?: () => boolean` checked before each request
+    AND before each sleep; when true it rejects with `new Error(OMR_CANCELLED)`. New exports `OMR_CANCELLED`
+    + `isCancelled(err)` make the sentinel distinguishable from a real failure. `scanSheet`'s catch calls
+    `isCancelled(err)` and, if true, just `restoreSheetName()` and returns: NO alert, NO "Scan failed"
+    status. The `finally` always runs `setBusyUI(false)` + `hideScanOverlay()`.
+  - **Audio path has no abortable poll**, so Cancel for the audio kind tears down the UI immediately
+    (`cancelScanOverlay` sets the flag, hides the overlay, `setBusyUI(false)`, `restoreSheetName`) and the
+    in-flight `loadAudioFile` result is dropped on completion via a `cancelRequested` guard. A
+    `jobGeneration` counter guards `transcribeAudio`'s finally so a cancelled-then-restarted job's late
+    finally cannot close the NEWER overlay (the transcription itself keeps running in the background).
+  - **A11y:** focus moves to Cancel on open, the prior `document.activeElement` is saved and restored on
+    close. Minimal focus trap on the overlay node: Tab/Shift+Tab `preventDefault` + refocus Cancel (the only
+    control); Escape routes through `cancelScanOverlay`. The global Space/arrow handler already bails on
+    `busy`, so it does not fight the overlay. Reduced-motion `@media` swaps the spin/fade for a gentle
+    opacity pulse.
+  - **Pure helper + tests:** `src/scan-overlay.ts` `scanOverlayTitle(kind)` (kind->heading) is the only
+    testable logic extracted (DOM show/hide stays in main.ts); 3 unit tests incl. a no-dash guard. `omr.test.ts`
+    gained 3 cancel tests (cancel-before-first-poll bails with zero fetches, cancel-mid-poll bails before the
+    sleep, and `isCancelled` separates the sentinel from real "Scan failed"/"Could not recognize" errors).
+    `toolbar.test.ts` gained an #86 markup/CSS guard block (ids, dialog attrs, overlay-after-stage,
+    body-extra hide, z-index 5 vs topbar 6, reduced-motion, Cancel/sentinel wiring in main.ts, no-dash).
+    Suite 258 green, `npm run build` green. Live in-browser pass (real OMR/audio job + Cancel + Escape +
+    focus restore + reduced-motion) is the post-merge QA gate.
+
 - **2026-05-31 - #87 fix-forward (#90): readClefDeclarations dropped EVERY clef on a real collapsed single-staff parse, so the controls still stayed hidden in prod. Two OSMD-extraction gotchas + the first real-parse test.**
   The #87 timeline helpers were correct, but `readClefDeclarations` (the OSMD extraction that feeds them)
   collected ZERO declarations for a single-staff treble->bass score, so `buildStaffClefTimeline` was empty

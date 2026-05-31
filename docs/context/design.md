@@ -3,6 +3,203 @@
 UX, visual design, interaction decisions. Append durable learnings at the top of the
 relevant section, dated.
 
+## Scan / transcribe loading overlay (issue #86)
+
+- **2026-05-31 - Build-ready spec: replace the easy-to-miss `#track-status` line ("Scanning
+  sheet... (this can take a minute)") with a full-stage blocking overlay for the ~1-minute OMR
+  scan AND audio transcription. The status line is too quiet for a minute-long wait tucked next
+  to the tempo control; a centered overlay over the stage gives the wait the weight it deserves
+  and stops the user from poking dead controls while the job runs.**
+
+  ### Decision 1 - blocking overlay, NOT inline progress
+
+  **Chosen: a blocking overlay that covers the stage (sheet + keyboard area), not the toolbar.**
+  Justification for a ~1-minute indeterminate op: (a) nothing in the app is usable until the
+  score arrives (the canvas is empty, transport is disabled by `setBusyUI`), so there is no
+  reason to keep the stage interactive behind a thin inline bar; (b) a centered overlay is
+  impossible to miss, which is the whole complaint; (c) it gives room for a clear "this takes
+  about a minute" expectation so the user does not think the app froze. An inline bar repeats the
+  current too-subtle pattern. The overlay sits OVER the stage only and leaves the toolbar visible
+  (the toolbar is already greyed by `setBusyUI` disabling its controls), so the brand/context
+  stays on screen and the overlay reads as "the work area is busy".
+
+  ### Decision 2 - exact content (no em dashes, ASCII only)
+
+  - **Heading:** scan -> "Scanning your sheet"; audio -> "Transcribing your audio".
+  - **Body copy:** "This usually takes about a minute. Hang tight while we read the notes."
+    (one line; the second clause is dropped on the narrow phone layout, see responsive).
+  - **Indicator:** an indeterminate **ring spinner** (not a bar). A determinate bar would lie
+    (we have no real progress from the server poll). A 44px ring, 3px stroke, violet
+    (`--accent`) arc on a faint track, rotating. Reduced-motion swaps to a static pulsing dot
+    (see a11y). Place the spinner ABOVE the heading.
+  - **Cancel affordance:** YES, a ghost "Cancel" button. The OMR job runs server-side and we
+    cannot abort the remote work, so Cancel is a CLIENT-SIDE ABANDON: it sets a flag the poll
+    loop checks (`pollOmrResult` rejects with a sentinel "cancelled" the `scanSheet`/
+    `transcribeAudio` finally-block treats as a non-error), closes the overlay, runs
+    `setBusyUI(false)`, and restores the prior slot via `restoreSheetName()` (or the boot
+    placeholder if no score was loaded). It does NOT alert. Copy under the button, faint:
+    "The scan keeps running on our side, this just stops waiting." Tech Lead owns the poll-loop
+    abort wiring; design only requires the button + that it dismisses the overlay and re-enables
+    controls.
+
+  ### Decision 3 - markup + CSS (matches the dark/violet theme, uses existing tokens)
+
+  Add ONE overlay node inside `#app` (sibling of `#sheet`/`#stage`, after `#stage` so it stacks
+  above), default `hidden`:
+
+  ```html
+  <div id="scan-overlay" class="scan-overlay" role="dialog" aria-modal="true"
+       aria-labelledby="scan-overlay-title" aria-describedby="scan-overlay-body"
+       aria-busy="true" hidden>
+    <div class="scan-overlay-card">
+      <div class="scan-spinner" aria-hidden="true"></div>
+      <h2 id="scan-overlay-title" class="scan-overlay-title">Scanning your sheet</h2>
+      <p id="scan-overlay-body" class="scan-overlay-body">
+        This usually takes about a minute. Hang tight while we read the notes.
+      </p>
+      <button id="scan-overlay-cancel" class="scan-overlay-cancel" type="button">Cancel</button>
+      <p class="scan-overlay-note">The scan keeps running on our side, this just stops waiting.</p>
+    </div>
+  </div>
+  ```
+
+  JS: a `showScanOverlay(kind: "scan" | "audio")` sets the title ("Scanning your sheet" /
+  "Transcribing your audio") and clears `hidden`; `hideScanOverlay()` restores `hidden`.
+  `scanSheet`/`transcribeAudio` call show on start and hide in `finally`. Keep `showStatus` too as
+  a quiet fallback for the toolbar slot (harmless), but the overlay is the primary feedback.
+
+  ```css
+  /* Scan / transcribe loading overlay (issue #86). Covers the stage area, not the toolbar. */
+  .scan-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 5; /* above #sheet (z-index unset) and #stage; below nothing that matters */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1.5rem;
+    background: rgba(10, 7, 18, 0.72); /* --bg at 0.72 so the stage dims through it */
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    animation: scan-overlay-in 0.18s ease both;
+  }
+  .scan-overlay[hidden] { display: none; }
+
+  .scan-overlay-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 0.9rem;
+    max-width: 22rem;
+    padding: 2rem 2.25rem;
+    border-radius: 16px;
+    background: var(--bar-surface);
+    border: 1px solid var(--bar-border);
+    box-shadow:
+      0 1px 0 rgba(255, 255, 255, 0.04) inset,
+      0 18px 50px rgba(0, 0, 0, 0.55),
+      0 0 40px rgba(177, 75, 255, 0.12); /* faint violet bloom ties it to the brand */
+  }
+
+  .scan-spinner {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    border: 3px solid rgba(232, 224, 245, 0.14); /* faint track */
+    border-top-color: var(--accent);            /* the rotating violet arc */
+    animation: scan-spin 0.85s linear infinite;
+  }
+
+  .scan-overlay-title {
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: var(--text);
+    letter-spacing: 0.01em;
+  }
+  .scan-overlay-body {
+    font-size: 0.9rem;
+    line-height: 1.4;
+    color: var(--text-muted);
+  }
+
+  .scan-overlay-cancel {
+    margin-top: 0.25rem;
+    background: var(--ghost-bg);
+    color: var(--text);
+    border: 1px solid var(--ghost-border);
+    border-radius: 8px;
+    padding: 0.5rem 1.4rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  }
+  .scan-overlay-cancel:hover {
+    background: var(--ghost-bg-hover);
+    border-color: var(--ghost-border-hover);
+    color: #fff;
+  }
+  .scan-overlay-cancel:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+  .scan-overlay-note {
+    font-size: 0.72rem;
+    color: var(--text-faint);
+    max-width: 18rem;
+  }
+
+  @keyframes scan-spin { to { transform: rotate(360deg); } }
+  @keyframes scan-overlay-in { from { opacity: 0; } to { opacity: 1; } }
+  ```
+
+  ### Decision 4 - accessibility
+
+  - **Dialog semantics:** `role="dialog" aria-modal="true"`, labelled by the title, described by
+    the body, `aria-busy="true"` so AT announces a busy modal on open.
+  - **Move focus IN on open:** focus `#scan-overlay-cancel` (the only actionable control) when the
+    overlay shows. **Restore focus on close** to the element that had it before (the Scan / From
+    audio file-button label); Tech Lead saves `document.activeElement` before `showScanOverlay`
+    and refocuses it in `hideScanOverlay`.
+  - **Focus trap:** only one focusable element (Cancel), so trap is trivial: keep Tab/Shift+Tab on
+    the Cancel button (handle keydown, `preventDefault` when it would leave). Escape triggers the
+    same path as Cancel (abandon + close).
+  - **Reduced motion:** wrap the spinner spin and the overlay fade in
+    `@media (prefers-reduced-motion: reduce)` to disable them. The spinner instead pulses opacity
+    gently (a 1.4s ease-in-out `scan-pulse` between 0.4 and 1 opacity) so there is still a
+    "working" signal without rotation; the overlay appears with no fade.
+    ```css
+    @media (prefers-reduced-motion: reduce) {
+      .scan-overlay { animation: none; }
+      .scan-spinner {
+        animation: scan-pulse 1.4s ease-in-out infinite;
+        border-top-color: var(--accent);
+      }
+    }
+    @keyframes scan-pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+    ```
+
+  ### Decision 5 - same overlay for audio transcription? YES
+
+  Use the SAME overlay for "Transcribing audio...". It is the identical UX (a ~1-minute opaque
+  job with no real progress) and the weak-feedback complaint applies equally. Only the title and
+  the implicit kind differ; one component, a `kind` arg flips the heading. Do not build two.
+
+  ### Decision 6 - responsive / mobile
+
+  - The overlay is `position: absolute; inset: 0` over the stage, so it tracks the stage at every
+    breakpoint with no extra rules; the toolbar (which wraps per #84/#85) stays above it
+    untouched.
+  - At `<=720px`: shrink the card padding to `1.5rem 1.25rem`, cap `max-width` to
+    `calc(100vw - 2rem)`, and drop the second body sentence ("Hang tight while we read the
+    notes.") to keep the card short on a phone in landscape where the stage is short. Implement by
+    putting the second sentence in a `<span class="scan-overlay-body-extra">` and
+    `display: none` it at `<=720px`, OR just shorten the body string on small screens in JS. CSS
+    span-hide is simpler and stateless; prefer it.
+  - Cancel keeps the #33/#84 44px tap target on phones (its `padding` already yields ~40px; add
+    `min-height: 44px` inside the 720px block to be safe).
+
 ## Glow only the contact note, not every in-flight bar (issues #27, #38)
 
 - **2026-05-30 - Build-ready spec: kill the bright glow halo on EVERY falling bar; reserve

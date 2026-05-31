@@ -18,6 +18,17 @@ export function isFailureSentinel(xml: string): boolean {
   return FAILURE_SENTINEL_RE.test(xml);
 }
 
+// Sentinel thrown by pollOmrResult when the caller abandons the wait (the #86 Cancel
+// button / Escape key). The OMR job keeps running server-side and cannot truly abort,
+// so this is a CLIENT-SIDE abandon: the poll loop stops and rejects with this error.
+// It is NOT a real failure, so the scan caller checks isCancelled() and swallows it
+// (no alert, no "Scan failed" status), distinguishing it from a genuine error.
+export const OMR_CANCELLED = "OMR_CANCELLED";
+
+export function isCancelled(err: unknown): boolean {
+  return err instanceof Error && err.message === OMR_CANCELLED;
+}
+
 export async function submitOmr(file: File, fetchFn: FetchFn = fetch): Promise<string> {
   const form = new FormData();
   form.append("file", file);
@@ -41,6 +52,10 @@ export interface PollOptions {
   timeoutMs?: number;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
+  // Returns true once the user has abandoned the wait (Cancel / Escape). Checked
+  // before each request and before each sleep so a cancel takes effect promptly;
+  // when it returns true the loop rejects with OMR_CANCELLED.
+  isCancelledRequested?: () => boolean;
 }
 
 const defaultSleep = (ms: number): Promise<void> =>
@@ -61,12 +76,16 @@ export async function pollOmrResult(
     timeoutMs = 900000, // 15 minutes
     sleep = defaultSleep,
     now = () => Date.now(),
+    isCancelledRequested = () => false,
   } = options;
 
   const start = now();
   const url = `/api/omr/result?jobId=${encodeURIComponent(jobId)}`;
 
   for (;;) {
+    if (isCancelledRequested()) {
+      throw new Error(OMR_CANCELLED);
+    }
     const res = await fetchFn(url, { method: "GET" });
 
     if (res.status === 200) {
@@ -92,6 +111,9 @@ export async function pollOmrResult(
     // 404 (pending) or a transient 5xx: keep waiting until timeout.
     if (now() - start >= timeoutMs) {
       throw new Error("Scan timed out. Please try again.");
+    }
+    if (isCancelledRequested()) {
+      throw new Error(OMR_CANCELLED);
     }
     await sleep(intervalMs);
   }

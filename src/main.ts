@@ -3,7 +3,12 @@ import * as Tone from "tone";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { Visualizer } from "./visualizer";
 import { extractScore, type ScoreData } from "./score";
-import { submitOmr, pollOmrResult } from "./omr";
+import { submitOmr, pollOmrResult, isCancelled } from "./omr";
+import {
+  scanOverlayTitle,
+  shouldApplyResult,
+  type ScanOverlayKind,
+} from "./scan-overlay";
 import { chooseVideoFormat, buildExportFilename } from "./recorder";
 import {
   hasBothHands,
@@ -13,6 +18,7 @@ import {
   scoreTimeToSeek,
   seekToScoreTime,
   formatClock,
+  controlsEnabledForScore,
 } from "./playback";
 import { buildSalamanderSampleMap, SALAMANDER_BASE_URL } from "./sampler";
 import { renderSheetLabels } from "./sheet-overlay";
@@ -69,6 +75,13 @@ const sheetNameInput = document.getElementById("sheet-name-input") as HTMLInputE
 const sheetNoteCount = document.getElementById("sheet-note-count") as HTMLSpanElement;
 const trackStatus = document.getElementById("track-status") as HTMLSpanElement;
 const soundStatus = document.getElementById("sound-status") as HTMLSpanElement;
+const scanOverlay = document.getElementById("scan-overlay") as HTMLDivElement;
+const scanOverlayTitleEl = document.getElementById(
+  "scan-overlay-title",
+) as HTMLHeadingElement;
+const scanOverlayCancel = document.getElementById(
+  "scan-overlay-cancel",
+) as HTMLButtonElement;
 
 const visualizer = new Visualizer(canvas);
 const osmd = new OpenSheetMusicDisplay("sheet", {
@@ -283,7 +296,14 @@ async function loadScoreXml(xml: string, name: string): Promise<void> {
 // Transcribe an uploaded audio file (issue #19) into falling notes. There is no sheet
 // view for audio yet, so we clear any previously rendered sheet and its overlay and run
 // the player in cursor-less mode.
-async function loadAudioFile(file: File): Promise<void> {
+//
+// `shouldApply` is checked immediately before the score is loaded (issue #86 cancel fix).
+// The transcription cannot be aborted server-side, so a cancelled or superseded job keeps
+// running and resolves late; without this guard the abandoned result would still call
+// loadNotes and appear on screen (and a cancel-then-restart would load job A's score under
+// job B's overlay). When the guard is false we skip loadNotes entirely, so the prior state
+// (or the newer job) is left untouched.
+async function loadAudioFile(file: File, shouldApply: () => boolean): Promise<void> {
   // The cursor only exists once a sheet has been loaded; it is undefined on a fresh page.
   osmd.cursor?.hide();
   try {
@@ -297,8 +317,12 @@ async function loadAudioFile(file: File): Promise<void> {
   // fetched only when a user actually transcribes audio, not on every page load.
   const { transcribeAudioFile } = await import("./transcribe");
   const notes = await transcribeAudioFile(file, (fraction) => {
+    if (!shouldApply()) return; // do not narrate progress for an abandoned job
     showStatus(`Transcribing audio... ${Math.round(fraction * 100)}%`);
   });
+  // Drop the result if the job was cancelled or superseded while it was running, checked
+  // right before the load so the abandoned score never reaches the screen.
+  if (!shouldApply()) return;
   const duration = notes.reduce((max, n) => Math.max(max, n.time + n.duration), 0);
   // Audio has no MusicXML title, so the default name comes from the file name (issue #44).
   loadNotes({ notes, stepTimes: [], duration }, deriveDefaultSheetName(file.name, null), false);
@@ -539,18 +563,98 @@ function setBusyUI(active: boolean): void {
     playBtn.disabled = true;
     exportBtn.disabled = true;
     setTransportControlsEnabled(false);
+  } else {
+    // Restore play/export/transport to match whether a score is loaded (issue #86 cancel
+    // fix). On the cancel/abandon path loadNotes never runs, so without this a previously
+    // loaded score would be left with its controls stuck disabled. Enable only when a score
+    // exists, matching the post-load and post-export enable conditions.
+    const enabled = controlsEnabledForScore(!!score);
+    playBtn.disabled = !enabled;
+    exportBtn.disabled = !enabled;
+    setTransportControlsEnabled(enabled);
   }
 }
 
+// Scan-overlay state. `cancelRequested` is the client-side abandon flag the OMR poll
+// loop checks (the job keeps running server-side, we just stop waiting). `overlayKind`
+// records what is running so a programmatic cancel knows it was the audio path (whose
+// transcription cannot be polled-aborted, so cancelling just abandons the UI wait).
+let cancelRequested = false;
+let overlayKind: ScanOverlayKind | null = null;
+let lastFocusedBeforeOverlay: HTMLElement | null = null;
+// Bumped each time a job starts so a cancelled-then-restarted audio job's late finally
+// cannot tear down the newer job's overlay (the audio transcription cannot be aborted).
+let jobGeneration = 0;
+
+// Show the blocking overlay over the stage for a ~1-minute opaque job. Saves the
+// previously-focused element and moves focus to Cancel; the busy state already greyed
+// the toolbar, so this is the primary feedback.
+function showScanOverlay(kind: ScanOverlayKind): void {
+  overlayKind = kind;
+  cancelRequested = false;
+  scanOverlayTitleEl.textContent = scanOverlayTitle(kind);
+  lastFocusedBeforeOverlay =
+    document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  scanOverlay.hidden = false;
+  scanOverlayCancel.focus();
+}
+
+// Re-hide the overlay and restore focus to whatever had it before the overlay opened.
+function hideScanOverlay(): void {
+  if (scanOverlay.hidden) return;
+  scanOverlay.hidden = true;
+  overlayKind = null;
+  const toRestore = lastFocusedBeforeOverlay;
+  lastFocusedBeforeOverlay = null;
+  if (toRestore && document.contains(toRestore)) {
+    toRestore.focus();
+  }
+}
+
+// Cancel = client-side abandon. Sets the poll-loop flag (the scan path rejects with the
+// CANCELLED sentinel its catch swallows), closes the overlay, re-enables the controls,
+// and restores the prior slot. For the audio path there is nothing to poll-abort, so we
+// just tear down the UI here; the in-flight transcription is ignored on completion.
+function cancelScanOverlay(): void {
+  if (scanOverlay.hidden) return;
+  cancelRequested = true;
+  const wasAudio = overlayKind === "audio";
+  hideScanOverlay();
+  if (wasAudio) {
+    setBusyUI(false);
+    restoreSheetName();
+  }
+}
+
+scanOverlayCancel.addEventListener("click", () => cancelScanOverlay());
+
+// Minimal focus trap: Cancel is the only control, so Tab / Shift+Tab keep focus on it,
+// and Escape behaves like Cancel (abandon + close). Scoped to the overlay node so it
+// only fires while the overlay is open.
+scanOverlay.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    cancelScanOverlay();
+  } else if (e.key === "Tab") {
+    e.preventDefault();
+    scanOverlayCancel.focus();
+  }
+});
+
 async function scanSheet(file: File): Promise<void> {
+  ++jobGeneration;
   setBusyUI(true);
+  showScanOverlay("scan");
   showStatus("Scanning sheet... (this can take a minute)");
   try {
     const jobId = await submitOmr(file);
-    const xml = await pollOmrResult(jobId);
+    const xml = await pollOmrResult(jobId, {
+      isCancelledRequested: () => cancelRequested,
+    });
     await loadScoreXml(xml, file.name);
   } finally {
     setBusyUI(false);
+    hideScanOverlay();
   }
 }
 
@@ -559,6 +663,11 @@ scanInput.addEventListener("change", () => {
   const file = scanInput.files?.[0];
   if (!file) return;
   scanSheet(file).catch((err) => {
+    // A cancel is a deliberate abandon, not a failure: just restore the slot quietly.
+    if (isCancelled(err)) {
+      restoreSheetName();
+      return;
+    }
     console.error("Scan failed:", err);
     showStatus("Scan failed.");
     alert(`Scan failed: ${err.message}`);
@@ -568,12 +677,25 @@ scanInput.addEventListener("change", () => {
 });
 
 async function transcribeAudio(file: File): Promise<void> {
+  const generation = ++jobGeneration;
   setBusyUI(true);
+  showScanOverlay("audio");
   showStatus("Transcribing audio... (this can take a minute)");
   try {
-    await loadAudioFile(file);
+    // Gate the actual load: loadAudioFile only calls loadNotes when this job is still the
+    // active one and was not cancelled. showScanOverlay resets cancelRequested when a NEW
+    // job starts, so the generation check (not just cancelRequested) is what stops job A's
+    // late result from loading under job B's overlay.
+    await loadAudioFile(file, () =>
+      shouldApplyResult(generation, jobGeneration, cancelRequested),
+    );
   } finally {
-    setBusyUI(false);
+    // Only tear down if this is still the active job: a cancel may have started a newer
+    // one, and this stale transcription must not close the new overlay.
+    if (generation === jobGeneration) {
+      setBusyUI(false);
+      hideScanOverlay();
+    }
   }
 }
 
@@ -582,6 +704,10 @@ audioInput.addEventListener("change", () => {
   const file = audioInput.files?.[0];
   if (!file) return;
   transcribeAudio(file).catch((err) => {
+    if (cancelRequested) {
+      restoreSheetName();
+      return;
+    }
     console.error("Transcription failed:", err);
     showStatus("Transcription failed.");
     alert(`Could not transcribe audio: ${err.message}`);
@@ -728,10 +854,9 @@ async function exportVideo(): Promise<void> {
     if (streamDest) Tone.getDestination().disconnect(streamDest);
     canvasStream?.getTracks().forEach((t) => t.stop());
     restoreSheetName();
+    // setBusyUI(false) restores play/export/transport based on whether a score is loaded
+    // (issue #86 cancel fix), so no separate re-enable is needed here.
     setBusyUI(false);
-    playBtn.disabled = !score;
-    exportBtn.disabled = !score;
-    setTransportControlsEnabled(!!score);
   }
 }
 

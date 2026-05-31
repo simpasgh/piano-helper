@@ -61,6 +61,8 @@ body {
 #app {
   display: flex;
   flex-direction: column;
+  /* Containing block for the #86 scan overlay (position: absolute; inset: 0). */
+  position: relative;
 }
 
 .topbar {
@@ -73,7 +75,10 @@ body {
   box-shadow:
     0 1px 0 rgba(255, 255, 255, 0.03) inset,
     0 6px 18px rgba(0, 0, 0, 0.35);
-  z-index: 2;
+  /* Positioned + above the #86 scan overlay (z-index 5) so the toolbar stays visible
+     and on top while the overlay covers only the stage area below it. */
+  position: relative;
+  z-index: 6;
 }
 
 .topbar h1 {
@@ -941,4 +946,142 @@ button:focus-visible,
   display: block;
   width: 100%;
   min-height: 0;
+}
+
+/* Scan / transcribe loading overlay (issue #86). Covers the stage area, not the toolbar
+   (the topbar is positioned above it). A centered card gives a ~1-minute indeterminate
+   job the weight the old quiet status line lacked. */
+.scan-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5; /* above #sheet/#stage; below the topbar (z-index 6) so the bar stays visible */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background: rgba(10, 7, 18, 0.72); /* --bg at 0.72 so the stage dims through it */
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  animation: scan-overlay-in 0.18s ease both;
+}
+.scan-overlay[hidden] {
+  display: none;
+}
+
+.scan-overlay-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 0.9rem;
+  max-width: 22rem;
+  padding: 2rem 2.25rem;
+  border-radius: 16px;
+  background: var(--bar-surface);
+  border: 1px solid var(--bar-border);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.04) inset,
+    0 18px 50px rgba(0, 0, 0, 0.55),
+    0 0 40px rgba(177, 75, 255, 0.12); /* faint violet bloom ties it to the brand */
+}
+
+.scan-spinner {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 3px solid rgba(232, 224, 245, 0.14); /* faint track */
+  border-top-color: var(--accent); /* the rotating violet arc */
+  animation: scan-spin 0.85s linear infinite;
+}
+
+.scan-overlay-title {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: 0.01em;
+}
+.scan-overlay-body {
+  font-size: 0.9rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.scan-overlay-cancel {
+  margin-top: 0.25rem;
+  background: var(--ghost-bg);
+  color: var(--text);
+  border: 1px solid var(--ghost-border);
+  border-radius: 8px;
+  padding: 0.5rem 1.4rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+.scan-overlay-cancel:hover {
+  background: var(--ghost-bg-hover);
+  border-color: var(--ghost-border-hover);
+  color: #fff;
+}
+.scan-overlay-cancel:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.scan-overlay-note {
+  font-size: 0.72rem;
+  color: var(--text-faint);
+  max-width: 18rem;
+}
+
+@keyframes scan-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes scan-overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Phone: shrink the card and drop the second body sentence so it stays short on a
+   landscape phone where the stage is short. */
+@media (max-width: 720px) {
+  .scan-overlay-card {
+    padding: 1.5rem 1.25rem;
+    max-width: calc(100vw - 2rem);
+  }
+  .scan-overlay-body-extra {
+    display: none;
+  }
+  .scan-overlay-cancel {
+    min-height: 44px;
+  }
+}
+
+/* Reduced motion: no spin, no fade. The spinner pulses opacity gently so there is still
+   a "working" signal without rotation. */
+@media (prefers-reduced-motion: reduce) {
+  .scan-overlay {
+    animation: none;
+  }
+  .scan-spinner {
+    animation: scan-pulse 1.4s ease-in-out infinite;
+    border-top-color: var(--accent);
+  }
+}
+@keyframes scan-pulse {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 1;
+  }
 }
