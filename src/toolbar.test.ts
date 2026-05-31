@@ -262,6 +262,28 @@ describe("scan overlay markup + CSS (issue #86)", () => {
     expect(busyFn).toMatch(/setTransportControlsEnabled\(enabled\)/);
   });
 
+  it("re-enables controls synchronously on cancel for BOTH paths (issue #93)", () => {
+    // cancelScanOverlay must call setBusyUI(false) + restoreSheetName unconditionally, not
+    // only in a wasAudio branch, so the scan path restores controls without waiting for the
+    // in-flight /api/omr round-trip to settle.
+    const cancelFn = main.slice(
+      main.indexOf("function cancelScanOverlay"),
+      main.indexOf("function cancelScanOverlay") + 400,
+    );
+    expect(cancelFn).toContain("setBusyUI(false)");
+    expect(cancelFn).toContain("restoreSheetName()");
+    expect(cancelFn).not.toContain("wasAudio");
+  });
+
+  it("gates scanSheet's finally on the job generation so a stale settle can't stomp a newer job (issue #93)", () => {
+    const scanFn = main.slice(
+      main.indexOf("async function scanSheet"),
+      main.indexOf("async function scanSheet") + 1200,
+    );
+    expect(scanFn).toMatch(/const\s+generation\s*=\s*\+\+jobGeneration/);
+    expect(scanFn).toMatch(/if\s*\(\s*generation\s*===\s*jobGeneration\s*\)/);
+  });
+
   it("keeps the overlay copy free of em and en dashes", () => {
     const overlay = html.slice(
       html.indexOf('id="scan-overlay"'),
