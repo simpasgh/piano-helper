@@ -126,6 +126,49 @@ export function readClefDeclarations(sheet: MusicSheet): ClefDeclaration[] {
   return declarations;
 }
 
+// A note pulled off the cursor, plus the identity of the tie it belongs to (issue #123). A
+// MusicXML tie is several <note> segments sharing one curve; OSMD gives each segment the same
+// Tie object, with tie.StartNote marking the first. We carry a per-tie id and an isTieStart
+// flag so mergeTiedNotes can fold a held note back into one sustained bar.
+export interface RawNote extends VisNote {
+  tieId?: number; // shared across every segment of one tie; undefined for an untied note
+  isTieStart?: boolean; // true only for the segment that begins the tie chain
+}
+
+// Folds tie continuations into the note they're tied from, so a held pitch becomes ONE
+// sustained falling bar instead of restruck notes (issue #123). A continuation segment never
+// emits its own VisNote: its duration is added to the chain's start note. Defensive: a
+// continuation with no recorded start (malformed/partial tie from a noisy OMR scan) is emitted
+// standalone rather than dropped, so we never lose a note.
+export function mergeTiedNotes(raw: readonly RawNote[]): { notes: VisNote[]; duration: number } {
+  const notes: VisNote[] = [];
+  const startIndexByTie = new Map<number, number>();
+  let duration = 0;
+  for (const r of raw) {
+    if (r.tieId !== undefined && !r.isTieStart) {
+      const startIndex = startIndexByTie.get(r.tieId);
+      if (startIndex !== undefined) {
+        notes[startIndex].duration += r.duration;
+        duration = Math.max(duration, notes[startIndex].time + notes[startIndex].duration);
+        continue;
+      }
+    }
+    const note: VisNote = {
+      midi: r.midi,
+      time: r.time,
+      duration: r.duration,
+      hand: r.hand,
+      spelling: r.spelling,
+    };
+    notes.push(note);
+    duration = Math.max(duration, note.time + note.duration);
+    if (r.tieId !== undefined && r.isTieStart) {
+      startIndexByTie.set(r.tieId, notes.length - 1);
+    }
+  }
+  return { notes, duration };
+}
+
 // Walks the score with a cloned iterator (so the visible cursor isn't disturbed),
 // converting each note's whole-note timestamp/length into absolute seconds.
 export function extractScore(osmd: OpenSheetMusicDisplay): ScoreData {
@@ -145,9 +188,11 @@ export function extractScore(osmd: OpenSheetMusicDisplay): ScoreData {
   );
 
   const it = osmd.cursor.iterator.clone();
-  const notes: VisNote[] = [];
+  const raw: RawNote[] = [];
   const stepTimes: number[] = [];
-  let duration = 0;
+  // Assigns each OSMD Tie object a small stable id, so mergeTiedNotes can group a held note's
+  // segments without depending on OSMD object identity downstream (issue #123).
+  const tieIds = new Map<object, number>();
 
   while (!it.EndReached) {
     const time = it.currentTimeStamp.RealValue * wholeNoteSeconds;
@@ -188,12 +233,25 @@ export function extractScore(osmd: OpenSheetMusicDisplay): ScoreData {
             hand = handFromClefInEffect(timeline?.[measureIndex]);
           }
         }
-        notes.push({ midi, time, duration: noteDuration, hand, spelling });
-        duration = Math.max(duration, time + noteDuration);
+        // Tag the tie this note belongs to (issue #123) so a held note merges into one bar.
+        let tieId: number | undefined;
+        let isTieStart = false;
+        const tie = note.NoteTie;
+        if (tie) {
+          let id = tieIds.get(tie);
+          if (id === undefined) {
+            id = tieIds.size;
+            tieIds.set(tie, id);
+          }
+          tieId = id;
+          isTieStart = tie.StartNote === note;
+        }
+        raw.push({ midi, time, duration: noteDuration, hand, spelling, tieId, isTieStart });
       }
     }
     it.moveToNext();
   }
 
+  const { notes, duration } = mergeTiedNotes(raw);
   return { notes, stepTimes, duration };
 }

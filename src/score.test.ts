@@ -26,7 +26,7 @@ import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 beforeAll(() => {
   HTMLCanvasElement.prototype.getContext = () => null as unknown as null;
 });
-import { readClefDeclarations, readSpelling } from "./score";
+import { readClefDeclarations, readSpelling, mergeTiedNotes, type RawNote } from "./score";
 import {
   buildStaffClefMap,
   buildStaffClefTimeline,
@@ -88,6 +88,26 @@ const GRAND_STAFF = `<?xml version="1.0" encoding="UTF-8"?>
 // that OSMD's Pitch.Accidental / FundamentalNote API reports flats for a real <alter>-1 parse,
 // which is the exact data readSpelling threads into the labels (issues #56, #58). A natural C
 // (no <alter>) and a real sharp (<alter>1) are included so naturals/sharps are covered too.
+// A single bass-clef pitch (G2) held across three measures by ties: measure 1 starts the tie,
+// measures 2-3 continue/stop it. This is the icarus.pdf shape from issue #123, where the held
+// note was rendered as three restruck notes instead of one sustained bar.
+const TIED_WHOLE_NOTE = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>F</sign><line>4</line></clef></attributes>
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>4</duration><type>whole</type><tie type="start"/><notations><tied type="start"/></notations></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>4</duration><type>whole</type><tie type="stop"/><tie type="start"/><notations><tied type="stop"/><tied type="start"/></notations></note>
+    </measure>
+    <measure number="3">
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>4</duration><type>whole</type><tie type="stop"/><notations><tied type="stop"/></notations></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
 const DB_MAJOR_FLATS = `<?xml version="1.0" encoding="UTF-8"?>
 <score-partwise version="3.1">
   <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
@@ -205,5 +225,88 @@ describe("readSpelling against a real OSMD parse (issues #56, #58)", () => {
       expect(midiToLabel(midis[i], "letters", spelling)).toBe(letters[i]);
       expect(midiToLabel(midis[i], "solfege", spelling)).toBe(solfege[i]);
     });
+  });
+});
+
+describe("mergeTiedNotes (issue #123)", () => {
+  const base = (over: Partial<RawNote>): RawNote => ({
+    midi: 43,
+    time: 0,
+    duration: 2,
+    hand: "left",
+    ...over,
+  });
+
+  it("folds a tie chain into one sustained note summing its segments", () => {
+    const raw: RawNote[] = [
+      base({ time: 0, duration: 2, tieId: 0, isTieStart: true }),
+      base({ time: 2, duration: 2, tieId: 0 }),
+      base({ time: 4, duration: 2, tieId: 0 }),
+    ];
+    const { notes, duration } = mergeTiedNotes(raw);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatchObject({ midi: 43, time: 0, duration: 6 });
+    expect(duration).toBe(6);
+  });
+
+  it("leaves untied notes untouched", () => {
+    const raw: RawNote[] = [
+      base({ midi: 60, time: 0, duration: 1 }),
+      base({ midi: 62, time: 1, duration: 1 }),
+    ];
+    const { notes, duration } = mergeTiedNotes(raw);
+    expect(notes.map((n) => n.midi)).toEqual([60, 62]);
+    expect(duration).toBe(2);
+  });
+
+  it("merges two independent tie chains separately (e.g. a tied chord)", () => {
+    const raw: RawNote[] = [
+      base({ midi: 60, time: 0, duration: 2, tieId: 0, isTieStart: true }),
+      base({ midi: 64, time: 0, duration: 2, tieId: 1, isTieStart: true }),
+      base({ midi: 60, time: 2, duration: 2, tieId: 0 }),
+      base({ midi: 64, time: 2, duration: 2, tieId: 1 }),
+    ];
+    const { notes } = mergeTiedNotes(raw);
+    expect(notes).toHaveLength(2);
+    expect(notes.find((n) => n.midi === 60)?.duration).toBe(4);
+    expect(notes.find((n) => n.midi === 64)?.duration).toBe(4);
+  });
+
+  it("emits a continuation with no recorded start standalone rather than dropping it", () => {
+    const raw: RawNote[] = [base({ time: 4, duration: 2, tieId: 7, isTieStart: false })];
+    const { notes } = mergeTiedNotes(raw);
+    expect(notes).toHaveLength(1);
+    expect(notes[0].duration).toBe(2);
+  });
+});
+
+describe("OSMD exposes tie data extractScore reads (issue #123)", () => {
+  it("populates note.NoteTie for a tied whole note held across measures", async () => {
+    const osmd = await parse(TIED_WHOLE_NOTE);
+    const notes = [];
+    for (const measure of osmd.Sheet.SourceMeasures) {
+      for (const container of measure.VerticalSourceStaffEntryContainers) {
+        for (const staffEntry of container.StaffEntries) {
+          if (!staffEntry) continue;
+          for (const voiceEntry of staffEntry.VoiceEntries) {
+            for (const note of voiceEntry.Notes) {
+              if (note.isRest()) continue;
+              notes.push(note);
+            }
+          }
+        }
+      }
+    }
+
+    // Three sounding segments, all sharing ONE Tie object, with the first as StartNote.
+    expect(notes).toHaveLength(3);
+    const tie = notes[0].NoteTie;
+    expect(tie).toBeTruthy();
+    expect(tie.StartNote).toBe(notes[0]);
+    expect(notes[1].NoteTie.StartNote).toBe(notes[0]);
+    expect(notes[2].NoteTie.StartNote).toBe(notes[0]);
+    // Only the first segment is the chain start: the merge keeps one note, drops the rest.
+    const isStart = notes.map((n) => n.NoteTie?.StartNote === n);
+    expect(isStart).toEqual([true, false, false]);
   });
 });
