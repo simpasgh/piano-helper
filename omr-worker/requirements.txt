@@ -1,13 +1,25 @@
-# OMR worker Python dependencies. Install into a venv:  pip install -r requirements.txt
+# OMR worker Python dependencies. Install into a venv (two steps, see README.md):
+#   pip install -r requirements.txt
+#   pip install --no-deps -r requirements-oemer.txt
 # NOTE: poppler-utils (the pdftoppm binary) is an OS package, not pip. Install it with
-#   sudo apt-get install -y poppler-utils
+#   sudo apt-get install -y poppler-utils   (Linux)  /  brew install poppler  (macOS)
 # See README.md.
 
-# Primary OMR engine (PyTorch/onnx based). Pulls in its own heavy ML stack.
-oemer
-
-# Fallback OMR engine, tried only when oemer produces nothing.
+# Fallback OMR engine, tried only when oemer produces nothing. Pulls a torch/transformers
+# ML stack and requires a modern numpy (>=2.2.6).
 homr
+
+# oemer's runtime dependencies, listed here so the second (--no-deps) install of oemer
+# still has everything it imports. oemer itself is pinned in requirements-oemer.txt and
+# installed with --no-deps because it declares onnxruntime-gpu, which has no ARM/macOS
+# wheel; we run CPU inference through onnxruntime instead (same `onnxruntime` module).
+onnxruntime
+opencv-python-headless>=4.5.3.56
+matplotlib
+pillow
+scipy
+scikit-learn>=1.2
+typing-extensions
 
 # S3-compatible client used to talk to Cloudflare R2.
 boto3

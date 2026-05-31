@@ -1,0 +1,12 @@
+# Primary OMR engine, installed separately with --no-deps:
+#   pip install --no-deps -r requirements-oemer.txt
+#
+# Why pinned and why --no-deps:
+#  - 0.1.8 fixes the crash that 0.1.5 hit on numpy >= 1.24 (numpy removed the `np.int`
+#    alias that oemer 0.1.5 used in staffline_extraction.py, so every page failed and the
+#    worker silently fell back to homr, which flattens a grand staff into one part).
+#  - 0.1.8 declares onnxruntime-gpu as a dependency, which has no ARM/macOS wheel, so a
+#    normal install fails. We skip its deps (--no-deps) and provide the CPU onnxruntime
+#    plus oemer's other runtime deps from requirements.txt. The `onnxruntime` package
+#    exposes the same `onnxruntime` module oemer imports, so CPU inference works.
+oemer==0.1.8
