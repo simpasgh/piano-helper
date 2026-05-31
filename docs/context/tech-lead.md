@@ -30,6 +30,42 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-31 - #123 PRE-MERGE REVIEW: APPROVE. `fix/omr-tied-notes` merges true MusicXML ties into one sustained note. This is NOT the #121-rejected blanket same-pitch merge; it is the safe complement, and it does not contradict the #121 audit.**
+  Reviewed `fix/omr-tied-notes` (commit f9b6342, `src/score.ts` + `src/score.test.ts`). `extractScore` now
+  tags each note with a per-Tie id (`note.NoteTie`, `tie.StartNote` marks the chain head) into a `RawNote[]`,
+  and a pure `mergeTiedNotes` folds tie-continuation durations into the chain's start note. Verdict APPROVE,
+  no blocking findings. Why this is correct and safe:
+  - **The #121 reject and this fix are different problems with the SAME object property.** #121 rejected
+    fabricating ties oemer DROPPED (no `<tie>` in oemer output, so a blanket "merge adjacent same-pitch whole
+    notes" would silence icarus's legitimately re-struck LH block triads). This fix only acts on ties the
+    source XML ACTUALLY declares: it keys on `note.NoteTie`, which OSMD populates ONLY from real `<tie>`/`<tied>`
+    markup. Verified empirically (jsdom probe): a score with two repeated G2 whole notes and NO `<tie>` markup
+    yields `note.NoteTie === undefined` on both, so the merge never fires. OSMD does not invent ties on
+    coincidental repeats. So this fix CANNOT corrupt block-chord LH parts (the #121 fear) and does not relitigate
+    #121: it serves real-tie source files (MusicXML uploads, music21 output), while oemer scans that drop the
+    tie marker simply get no merge (unchanged, still re-attacked, which #121 already accepted as engine-ceiling).
+  - **No double-counting (the load-bearing fact, verified by jsdom probe).** Each tied segment's
+    `note.Length.RealValue` reports ONLY its own segment length (a 3-measure tied whole note = `len=1` on all
+    three segments, NOT a summed 3 on the start). OSMD does NOT pre-sum the tie into the start note's Length.
+    So `extractScore`'s old code emitted three full-length restruck notes, and `mergeTiedNotes` summing the
+    three segment durations (1+1+1 -> 3 whole notes) reconstructs the correct sustain. (Aside: `tie.Duration.RealValue`
+    came back as 3 too, but the code does not use it; summing segment Lengths is equivalent and is what the
+    tests pin.)
+  - **Sync invariant intact.** The merge only EXTENDS the start note's `duration`; it never changes any note
+    `time` and never touches `stepTimes` (still pushed once per iterator step). Falling notes (note.time) and the
+    sheet cursor (stepTimes) stay from the one timestamp source. Playback (`main.ts:233-239`) schedules ONE
+    `triggerAttackRelease` per `score.notes` entry with `note.duration`, so a merged tie = one held attack
+    instead of N re-attacks. Exactly the #123 fix.
+  - **Edge cases checked:** independent simultaneous tie chains (a tied chord) merge separately by tieId (test
+    covers it); an orphan continuation with no recorded start is emitted standalone (never dropped) and does NOT
+    register itself as a start, so it cannot absorb a later segment; the output `VisNote` is a fresh object that
+    strips `tieId`/`isTieStart`, so no tie metadata leaks downstream.
+  - **Test-env limitation (not a defect):** the suite cannot drive full `extractScore` under jsdom because
+    `osmd.cursor` is undefined without a render (no real SVG layout), so the shipped real-parse test validates
+    `note.NoteTie`/`StartNote` via `Sheet.SourceMeasures` (the same object graph `extractScore` reads) plus pure
+    `mergeTiedNotes` cases. That is the established pattern in this repo and adequately pins the contract. 308/308
+    tests + build green. No security review warranted: pure parsing logic, no network/auth/dep/file-handling change.
+
 - **2026-05-31 - #121 GAP 1 DIFF AUDIT: oemer raw output vs OUR pipeline on icarus.pdf. Verdict: ties + arpeggios + ALL metadata are ENGINE-DROPPED (absent from oemer's raw MusicXML), NOT pipeline-dropped. No cheap parse/render fix exists for them; only cross-bar ties are worth a pipeline fix in Gap 2.**
   Generated the RAW oemer MusicXML locally at 350 DPI exactly like the worker (`pdftoppm -r 350`, then `oemer img -o out --without-deskew`) and diffed it per-measure against the source score images. Captured BEFORE any of our post-processing, so engine gaps are distinguishable from pipeline gaps.
   - **GOTCHA (cost ~40 min): oemer 0.1.5 crashes on numpy >= 1.24** with `AttributeError: module 'numpy' has no attribute 'int'` at `staffline_extraction.py:327` (`np.array(rr, dtype=np.int)`, a removed alias). It exits NON-ZERO with an EMPTY `-o` dir, so it looks like a silent no-op. Fix: `pip install 'numpy<1.24'` (1.23.5 works; opencv-python warns it wants numpy>=2 but still runs). The OMR worker image MUST pin numpy<1.24 or oemer produces nothing.
