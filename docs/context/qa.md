@@ -4,6 +4,44 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-05-31: PR #91 / issue #90 fix-forward (collect clefs from real single-staff OSMD
+  parses so collapsed treble->bass scans split into hands) -> **PASS** on prod
+  (https://piano-helper.pages.dev, main @ 10a60e9, served bundle `index-S08hI_BF.js`, which
+  contains `LastInstructionsStaffEntries` x13). Re-ran the EXACT #90 repro live in real
+  Chromium (Playwright): one single-staff part, NO `<staves>`, measure 1 treble (C5 D5 E5 F5)
+  then measure 2 bass clef (C3 D3 E3 G3); OSMD renders it as one staff that flips clef
+  mid-line. This is the case that was the original FAIL.
+  - CORE FIX (was the FAIL): `#hand-mutes` now becomes VISIBLE after load: `hidden` attr
+    false, computed `display:flex`, rect 458x30 on screen; Right hand + Left hand toggles +
+    Balance slider + readout "L100 R100" all present. Track reads "8 notes". Visibility is
+    driven by `handMutes.hidden = !hasBothHands(score.notes)` (main.ts:246), so visible ==
+    `hasBothHands` true == both a right- and a left-hand note set exist. Pre-fix this stayed
+    hidden.
+  - HAND TAGGING correct (authoritative read = the falling-note caps, NOT gain hooks):
+    seek-to-0 screenshots show the 4 BASS notes (C3-G3, lower-left register) and the 4 TREBLE
+    notes (C5-F5, upper-right register) as two distinct clusters. With LEFT muted, the bass
+    cluster (Do/Re/Mi/Sol on the left of the keyboard) goes DIM/GHOSTED while the treble
+    cluster (Do/Re/Mi/Fa) stays BRIGHT (#54 ghosting). So treble measure = right hand, bass
+    measure = left hand, exactly. The before/after of the same seek-0 frame is the cleanest
+    proof.
+  - Controls WORK: mute-left aria-pressed false->true and ghosts only the bass; Balance slider
+    +60 -> readout "L40 R100", -60 -> "L100 R40". Transport advanced under playback (0:00 ->
+    0:03 on the 0:04 score, Pause showing), cursor tracked onto the final bass "Sol".
+  - REGRESSION GUARD: a genuine two-staff grand staff (same pitches, `<staves>2</staves>`)
+    still renders with the brace as TWO staves, shows the controls, splits low/high registers,
+    and mute-right works (aria-pressed true, right cluster ghosts). Unchanged. "8 notes".
+  - Console: ZERO errors and ZERO pageerrors across load + mute + balance + play for BOTH the
+    single-staff and grand-staff scores. This CLOSES #90 and the #87 work. (icarus.pdf OMR
+    path still blocked on the OMR backend, #88; not exercised, per the ticket.)
+  - GOTCHA confirmed (do not rely on the gain hook for the per-hand audio proof here): the
+    AudioBufferSourceNode.start -> connected GainNode.gain read that worked for #75 is FLAKY
+    on this short 2-measure score. Baseline showed 5 `null` gains + 7 `1`s, mute traces gave
+    inconsistent counts, and the attenuated 0.40 balance gain never appeared (bundled Tone
+    sampler routes through a separate gain the hook misses, plus the ~4s score rewinds
+    mid-capture). The VISUAL hand-cap ghosting (seek-0 before/after screenshot) is the
+    reliable per-hand evidence for short fixtures; use it instead of gain counts. Screenshots
+    at /tmp/qa-pr91/ (transient): A-nomute-seek0.png vs A-leftmute-seek0.png show the split.
+
 - 2026-05-31: #90 (the #87 fix did NOT work against a real OSMD parse: per-hand controls
   stayed hidden for a collapsed single-staff treble->bass scan). Root cause was in
   `readClefDeclarations` extraction, not the hand-tagging helpers: (1) OSMD 1.9.9 leaves
