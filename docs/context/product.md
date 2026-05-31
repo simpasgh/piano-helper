@@ -19,7 +19,86 @@ performance on an animated piano, with the score highlighted in sync. Make the f
 
 ## Decisions
 
-### 2026-05-31 - icarus round 3 OUTCOME: #121 closed on the audit, all three gaps are engine-ceiling
+### 2026-05-31 - Monetization model: launch FREE, gate on conversion volume, add a one-time Pro unlock later (NOT a subscription at launch)
+
+- **Chosen model: free product with a hard daily/monthly conversion cap, plus a future one-time
+  "Pro" unlock (lifetime, ~$29-39) that raises the cap. NOT a freemium subscription at launch.**
+  Rationale: a solo founder on free-only infra cannot honestly promise "unlimited conversions"
+  because every OMR scan burns real CPU on a single free VM (the throughput ceiling). A
+  subscription creates an ongoing support + churn + billing burden that does not fit a hobby-scale
+  free-infra product. A one-time unlock matches Synthesia's proven model (~$29-39 one-time), needs
+  no churn management, and the cash can directly fund the one paid thing we would ever buy
+  (overflow compute) without committing to recurring server cost.
+- **The compute cost cliff is the load-bearing constraint, not pricing psychology.** One oemer
+  conversion takes ~3-6.5 min of CPU wall-time (infra round-2 entry: ~6.5 min at 400 DPI, now 350
+  DPI so somewhat faster, call it ~4-5 min, GUESS). The conversions are strictly serial on one
+  worker, so the ceiling is TIME, not dollars: ~12-20 conversions per CPU-hour, so even running the
+  free VM 24/7 caps the whole product at very roughly ~290-480 conversions/day GROSS, and far less
+  in practice because the Mac interim host is not 24/7. The Cloud Run fallback is capped at ~50
+  instance-hours/mo of CPU-active time = only ~600-1000 conversions/MONTH before it leaves the free
+  tier. **That ~600-1000 conversions/month is the real product ceiling to design pricing around.**
+- **Free-tier cap to stay solvent (recommendation): 3 conversions/day and 10/month per user,
+  unauthenticated, keyed by a soft signal (cookie/localStorage + light IP rate-limit).** This keeps
+  total demand under the VM ceiling at low user counts and makes "unlimited" a paid-only promise we
+  can throttle. NEVER ship "unlimited free conversions"; it is the one thing that makes the product
+  lose money per user the moment it outgrows the free VM.
+- **Kill metrics the founder must watch:** (1) **conversions/day vs the worker ceiling** (when the
+  queue wait exceeds ~10 min consistently, the free VM is saturated and you are about to pay for
+  compute or degrade UX); (2) **free->paid conversion on the Pro unlock** (need it to clear the
+  blended cost of overflow compute; if < ~1% you do not have a business, only a cost center).
+- **Why not a subscription (PlayScore ~$35-50/yr, Soundslice ~$50/yr, learning-app norm ~$120/yr):**
+  those companies pay for staff + servers and amortize via recurring revenue. We have neither cost
+  base nor the operational appetite. A subscription also implies an SLA on conversion speed we
+  cannot give on one free VM. Revisit a subscription ONLY if conversion volume forces paid compute
+  AND retention data shows repeat weekly use (the learning-app pattern). Full numbers + 3-scenario
+  revenue model delivered to the founder 2026-05-31.
+
+### 2026-05-31 - Naming & domains
+
+- Leading name: **PlayMyScore** (playmyscore.com + .app confirmed available via whois). Brandable
+  and doubles as the keyword "play my sheet music." Use the consumer term "sheet music" (not
+  "score") in SEO/landing copy even though the brand says "Score".
+- Other confirmed-free .com (+.app): sheetfall, notecade, fallkeys, keysfall.
+- Top original picks Notefall and Scrollo have BOTH .com and .app taken (branding tax, deprioritized).
+- DNS NS/SOA absence + whois "No match" is a strong availability signal; registrar checkout is the
+  final word. Avoid trademark-crowded music words (Aria, Cadenza, Cascade, Lumina).
+
+### 2026-05-31 - Go-to-market plan (90-day, solo founder)
+
+- Positioning: **"Synthesia, but it reads YOUR sheet music. No catalog, no lock-in, free."**
+  Audience anchor = adult self-taught beginner who has a specific piece they want to play.
+- Honesty-as-feature: surface the "review and fix" step near upload + in an FAQ; pre-empts the #1
+  launch complaint ("the notes were wrong"). NEVER market "perfect transcription"; we win on
+  experience + free + bring-your-own-sheet, not accuracy.
+- Channel rank for a solo founder: (1) **SEO** (compounding, exact-match intent: "sheet music to
+  synthesia", "convert sheet music to falling notes", "synthesia alternative free no download");
+  (2) **Reddit/communities** (r/piano, r/pianolearning, adult-beginner FB groups; lead with a demo
+  clip not a link, reply to every comment for 24-48h, honor self-promo rules); (3) **shareable demo
+  loop**.
+- KEY insight tying GTM to infra: the viral share-unit must be a **PRE-RENDERED watch-only clip**,
+  NOT a live conversion, so virality does not melt the ~600-1000/mo worker ceiling. The in-app
+  "share your result" must produce a watch-only replay that does NOT re-run OMR.
+- Launch sequencing (stagger, never same-day blast): soft launch -> Product Hunt (Tue/Wed 00:01 PT)
+  -> Show HN -> big Reddit posts. PH/HN buy credibility + a small first cohort, not a hockey stick.
+  Durable growth = the slow SEO keyword cluster + the clip flywheel, both started day one.
+- GTM metrics: **activation rate** (upload-started -> conversion-completed -> playback-started,
+  target >25%), **share rate**, and **top ACTIVATING source** (not top by raw volume).
+
+### 2026-05-31 - Soundslice threat read (the one competitor that could copy the wedge)
+
+- Soundslice is the only player with BOTH OMR quality AND the product surface to copy the wedge.
+  But honest probability they ship a true falling-notes mode in 12-18mo is **LOW (~20-30%)**.
+- Why low: audience mismatch (they serve notation-literate musicians + teachers, not non-readers);
+  founder (Holovaty) is customer-led and anti-gamification; falling notes has no clear ROI for their
+  B2B/teacher/embed revenue; their roadmap is all notation-centric depth (dynamics, stems, audio
+  transcription "holy grail"). Their piano view is a static key-lighting aid, NOT a falling runway.
+- Risk is **INCIDENTAL not strategic**: falling notes is ~1 engineer-month for them, so NEVER let
+  the feature be our moat. Defensible moat = the COMBINATION (free + no-account + non-reader +
+  falling-notes-first) sold to a segment they deliberately do not serve. Their scanning is paywalled
+  + sign-up-gated; our no-account, free-at-moment-of-need first run is a structural edge.
+- Do NOT compete on OMR accuracy (we lose). Early-warning signals: a piano-roll/falling toggle ships,
+  scanning becomes free/expanded, beginner/"learn without reading music" messaging appears, or a free
+  consumer mobile app. Monitor their blog RSS + Holovaty's feed; quarterly check for "falling".
 
 - The Gap 1 diff audit (the gating deliverable) ran and SETTLED the question: ties, arpeggio
   rolls, and metadata (title/tempo/dynamics) are all ENGINE-dropped by oemer (absent from its raw
