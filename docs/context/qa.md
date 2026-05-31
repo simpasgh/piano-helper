@@ -4,6 +4,71 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-05-31: issue #109 / PR #110 (tune the image fed to OMR for higher scan fidelity: PDF
+  raster DPI 300 -> 400, ALL PDF pages now rasterized + stitched vertically into one tall
+  PNG, and oemer run with `--without-deskew` on the vector-PDF path) -> **PASS** (fidelity
+  IMPROVED on the headline gap). Ran a REAL end-to-end live scan against the LOCAL Mac worker
+  now running the new code (launchd/worker restarted 11:47:18; worker.py confirmed to contain
+  `PDF_RASTER_DPI=400`, `pdftoppm -png -r 400` rendering ALL pages, `stitch_pages_vertical`,
+  and `--without-deskew` gated on the PDF path). Fixture: the user's own
+  `/Users/simonepasculli/Documents/MuseScore4/Scores/icarus.pdf` (clean 1-page vector grand
+  staff, the source-of-truth). Network flow exercised exactly as the app does it.
+  - HTTP FLOW (genuine, not simulated): `POST https://piano-helper.pages.dev/api/omr` with
+    multipart field `file` (type application/pdf) -> 202 `{"jobId":"a1ea4eea-..."}`. Polled
+    `GET /api/omr/result?jobId=...` every 10s; returned 404 `{"status":"pending"}` (20 bytes)
+    the whole time, then 200 + **35861 bytes of real MusicXML** (NOT the omr-status="failed"
+    sentinel; `<work-title>Stitched</work-title>`, `Transcribed by Oemer`). WALL CLOCK **397s
+    (~6m37s)**, upload 11:50:34 -> result written 11:57:02.
+  - ENGINE: **oemer won** (NOT the homr fallback). Worker log: `detected mime
+    'application/pdf'` -> `rasterized 1 page(s) at 400 DPI` -> oemer argv ended in
+    `--without-deskew` on `stitched.png` -> `recognized via engine output .../oemer-out/
+    stitched.musicxml`. So #109's three levers (400 DPI, stitch, no-deskew) all fired and
+    oemer consumed the bigger image without OOM/crash. Only benign warnings: the usual
+    `build_system.py:825 RuntimeWarning: overflow ... scalar subtract` + ~23 per-symbol
+    `Note N is not a valid note.` lines. No error, no crash, no fallback. (Process probe
+    mid-run confirmed the oemer pid in state `R`, ~230% CPU, climbing CPU time == genuinely
+    computing on the ~16 MP raster, not hung. Slower than the old 300 DPI run as predicted.)
+  - FIDELITY (after vs before-baseline vs source truth):
+
+    | metric | before (300 DPI, oemer 0.1.8) | after (400 DPI #109) | source truth |
+    | --- | --- | --- | --- |
+    | parts | 1 | 1 | 1 |
+    | staves | 2 (G + F) | **2 (G + F)** | 2 |
+    | measures | 27 | **27** | 27 |
+    | total notes | 128 | 109 | (~melody + 27 LH chords) |
+    | split RH(st1)/LH(st2) | 72 / 56 | 66 / 43 | - |
+    | LH multi-note chords | (reported COLLAPSED to single notes) | **12 measures w/ an LH chord; 8 dyads + 4 triads, max size 3** | every measure an LH triad |
+
+  - VERDICT: **PASS / improvement on the headline gap.** The user's specific complaint was LH
+    block triads collapsing to single notes; after #109 the LH staff (staff 2) carries 12
+    chord events (8 two-note + 4 three-note, max size 3) across 12 of 27 measures, where the
+    baseline reportedly flattened them. So LH chords are now genuinely RICHER, not collapsed.
+    Staff/hand separation SURVIVED the bigger raster: still 1 part / 2 staves with a real G
+    clef (staff 1) and F clef (staff 2), 27 measures, 4/4. No new failure mode, no homr
+    fallback, no OOM. NOT a regression.
+  - HONEST CAVEAT (not a #109 regression, an oemer-accuracy ceiling): total note count DROPPED
+    72->66 RH and 56->43 LH (128 -> 109), and oemer still only recovers an LH chord in 12 of
+    27 measures with just 4 triads, where the source has a triad in EVERY measure. So the scan
+    is "better than before but still not fully accurate" exactly as the user said: the LH-chord
+    recovery improved but is still partial, and oemer is dropping some notes. This is engine
+    accuracy on a single-engine OMR, not something #109 broke; #109 did what it set out to do
+    (feed a faithfully-rasterized, deskew-free, all-pages image) and the LH-chord metric moved
+    the right direction. Further gains need a different engine/ensemble or post-OMR heuristics
+    (the deferred #88/#6 work), not more DPI.
+  - METHOD note for OMR-fidelity QA (faster than browser-driving for a pipeline change): curl
+    the multipart `file` field directly to `/api/omr`, poll the result endpoint, and PARSE the
+    returned MusicXML for the fidelity table rather than eyeballing the rendered sheet. The
+    chord metric that actually answers "did LH triads survive" = walk each measure's staff-2
+    notes and group a leading note with its following `<chord>` siblings; count groups of
+    size >= 2 (dyad) and >= 3 (triad). A collapsed LH would show ZERO size>=2 groups. Tag the
+    engine that won by grepping the worker log for `recognized via engine output .../oemer-out`
+    (oemer) vs a homr path. To prove the new code is live, grep worker.py for `PDF_RASTER_DPI`
+    / `--without-deskew` AND confirm the launchd restart timestamp is after the deploy. Record
+    the pre-upload `wc -l worker.log` so you can slice only this run's log lines. BUDGET: the
+    400 DPI raster pushes a single icarus page to ~6.5 min wall on this Mac (vs ~3-5 min at
+    300 DPI); the app polls 15 min so it tolerates this, but do not run two oemer jobs at once.
+    Temp artifacts were under /tmp/qa-icarus-109/ (deleted after).
+
 - 2026-05-31: PR #107 / issue #96 (on mobile, the three upload buttons did nothing because
   their `<input type=file>` used the HTML `hidden` attr (display:none), which iOS Safari /
   in-app webviews refuse to forward a label tap to; fix swaps `hidden` for a
