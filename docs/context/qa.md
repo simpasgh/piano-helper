@@ -41,6 +41,65 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
     Artifacts under /tmp/qa-hm/ (demo.musicxml + drive.mjs + 01-loaded / 02-left-muted /
     03-balance .png). GOTCHA: the slider drag must dispatch an `input` event (not `change`); the
     readout is wired to `balanceSlider.addEventListener("input", ...)` (main.ts:941).
+- 2026-05-31: issue #131 (the brighter "active" highlight FILL on falling bars used to light
+  ALL bars sharing a pitch while any one instance sounded; fix gates the active fill on each
+  bar's OWN time window via the new `fallingBarActive(note, currentTime)` helper in
+  `src/visualizer.ts` -- `currentTime >= note.time && currentTime < note.time + note.duration`
+  -- instead of the per-pitch `active` set. The keyboard KEY highlight stays pitch-keyed by
+  design (`activeMidis` reuses `fallingBarActive` per note, unioned by midi)) -> **PASS** on
+  prod (https://piano-helper.pages.dev, served bundle `index-B760dcyv.js`). Drove live in real
+  Chromium (Playwright 1.59.1). FIRST live QA of the per-bar active-fill gate.
+  - BUNDLE PROOF the fix is live: the served JS contains the exact `fallingBarActive` time-window
+    test minified as `e>=_.time&&e<_.time+_.duration` (1 occurrence), plus both fill tokens
+    `hsl(h,95%,72%)` (activeFill) and `hsl(h,85%,62%)` (whiteFill base). The pre-fix code keyed
+    the fill on a per-pitch Set membership, not a `<note.time+note.duration` window.
+  - FIXTURE (the cleanest same-pitch-sequence proof): `/tmp/qa131/repeat.musicxml`, a 2-measure
+    grand staff (`<staves>2</staves>`). RH = A4 (midi 69, pitch-class hue 310/magenta) struck as
+    a QUARTER + quarter REST four times, so consecutive A4 bars are SPACED APART and at least two
+    (here up to four) are simultaneously in flight, stacked in the same column. LH = a C3 whole
+    note (single sustained) in m1 and a true E3+G3+C4 triad (3 distinct pitches sounding together)
+    in m2. One fixture exercises all four gate items. Loaded via `#file-input` ("8 notes",
+    `#hand-mutes` display:flex), pressed Play, ran ~4.5s.
+  - PASS CRITERION (the headline, measured rAF-accurately): instrumented the canvas, delimiting
+    each true render frame by the app's full-canvas bg `fillRect(0,0,W,H)`, and captured every
+    falling-bar fill's column + bottom-y + `fillStyle` per frame. Classified fills by HSL
+    (active = sat>=94 & light>=70; base white = 85/62). Across **428 frames with a same-pitch
+    A4 stack: 308 had EXACTLY ONE active bar and it was ALWAYS the LOWEST (max bottom-y, i.e. the
+    one at the keybed); 0 frames had two active bars in a column; 0 frames had the active bar be
+    anything but the lowest.** Canonical captured state (col 702 = the A4 column): bottom bar
+    (the bar in contact with the keybed) = active `hsl(310,95%,72%)`, the three upper twins at
+    y=176/118/59 = base `hsl(310,85%,62%)`. The remaining ~120 stacked frames had ZERO active
+    (all twins still descending, none arrived) = also correct. SCREENSHOT
+    `/tmp/qa131/03-playing-clean.png` shows it by eye: four stacked magenta "La" bars, only the
+    LOWEST (touching + labeled + lighting the A4 key) is bright; the three above are visibly
+    dimmer/calm and unlabeled.
+  - REQ 2 (single notes + true chords still highlight): TRUE CHORD frame found at frame 248 with
+    **4 distinct pitch columns simultaneously active** at the keybed (the E3/G3/C4 triad +
+    sustained bass), so distinct-pitch simultaneity still lights all members. 180 frames had
+    exactly one active column (single-note case). Both correct.
+  - REQ 3 (keyboard KEY highlight unchanged, still pitch-keyed): 488 frames had key rects filled
+    with an active hsl color (e.g. the A4 key lit `hsl(310,85%,66%)` = activeWhiteKey, a C key
+    `hsl(40,85%,66%)`). The key light fires off `activeMidis` (pitch-keyed union), so the sounding
+    pitch's key still lights even though only one same-pitch BAR is bright. Confirmed in the
+    screenshot (A4 key glows magenta, C3 key lit under the sustained bar).
+  - REQ 4 (no console errors, playback + sync): **0 console.error, 0 pageerror** across boot +
+    load + play. Play flipped to Pause, transport advanced (0:00 / 0:03), sheet cursor + solfege
+    labels (La/Do/Mi/Sol) track the falling notes in the screenshot.
+  - VERDICT: **PASS.** The active fill now lights ONLY the single same-pitch bar in contact with
+    the keybed; upcoming same-pitch twins stay in base hue until each reaches the keybed (308/428
+    stacked frames show one-active-lowest, 0 bug frames). Single notes and true distinct-pitch
+    chords still highlight; the pitch-keyed KEY light is unchanged; clean console; sheet in sync.
+  - METHOD note (reuse for any falling-bar fill/state QA): manual setInterval frame-bumping
+    CONFLATES multiple real render frames into one bucket and produces FALSE "two active in a
+    column" readings (a first naive drive showed 62 fake bug-frames vs the rAF-accurate 0). The
+    right delimiter is the app's per-`render()` full-canvas bg `fillRect(0,0,W,H)`: start a new
+    frame bucket on each one. Tag a falling BAR fill by hooking beginPath (reset bbox) +
+    moveTo/arcTo (accumulate bbox, the app draws bars via roundRect) + fill (emit bbox+current
+    fillStyle); tag KEY fills via fillRect. Classify active vs base by HSL light/sat (95/72 vs
+    85/62 vs black 70/50), since the fill is the only on-canvas signal (no DOM for bars). To
+    prove the gate is on the bar's OWN window, assert the single active bar in a same-pitch
+    column is the LOWEST (max bottom-y). Artifacts under /tmp/qa131/ (repeat.musicxml +
+    01-loaded / 02-playing / 03-playing-clean .png); drivers transient. This CLOSES the #131 gate.
 
 - 2026-05-31: issue #127 / PR #128 (replace the generic violet/purple theme with the
   piano-inspired "Nocturne" palette: ebony chrome `#0b0a0d`, ivory text `#efe9dc`, a single
