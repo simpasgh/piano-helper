@@ -1,0 +1,10 @@
+# Filled-in Oracle launch config (OCIDs + ssh key path). Never commit.
+# The committed template is oracle.env.example.
+oracle.env
+
+# Local credentials file (R2 S3 keys), if ever created here for testing.
+omr.env
+*.env
+
+# Python venv built on the host.
+.venv/
