@@ -19,6 +19,53 @@ performance on an animated piano, with the score highlighted in sync. Make the f
 
 ## Decisions
 
+### 2026-05-31 - icarus round 3 OUTCOME: #121 closed on the audit, all three gaps are engine-ceiling
+
+- The Gap 1 diff audit (the gating deliverable) ran and SETTLED the question: ties, arpeggio
+  rolls, and metadata (title/tempo/dynamics) are all ENGINE-dropped by oemer (absent from its raw
+  MusicXML), not lost in our pipeline. There is no fabrication-safe pipeline fix for any of them.
+- The one "audible + maybe fixable" gap (cross-bar ties) was REJECTED for build: icarus's LH is
+  un-tied whole-note triads that share tones across barlines, so reconstructing the dropped tie by
+  merging adjacent same-pitch notes would silence legitimately re-struck notes (an audible
+  regression, the #113 overreach class). User chose "defer build, close #121 on the audit."
+- **Net:** #121 closed as a completed spike (deliverable = the audit). Build work (stronger recall
+  + native tie/arpeggio/metadata) deferred to #88; user corrections go through the #6/#105 UI. No
+  app code changed; this was an honest "the engine, not our code, is the ceiling here" finding.
+
+### 2026-05-31 - icarus re-scan round 3: NEW ticket for arpeggios + ties + diff audit, do NOT bury in #118
+
+- **Context:** user re-scanned icarus.pdf after the 350-DPI merge (#118/#120). Verdict "better
+  but still not there." Three explicit gaps: (1) broad "audit ALL diffs PDF vs output, not just
+  headline ones"; (2) arpeggios (arpeggiato, rolled chords with the wavy vertical line) still
+  not generated; (3) ties across barlines (e.g. the final two tied whole notes in 4/4, incl. one
+  in the bass staff) not reproduced as one sustained sound.
+- **Decision: file ONE NEW ticket, not extend #118.** #118 is scoped specifically to "honest
+  recall gaps without fabricating pitches" (arpeggios landing as RESTS, dropped notes, collapsed
+  LH chords) and is mid-flight after the #113 revert. The new asks are a different shape:
+  arpeggio and tie handling are about preserving *articulation/duration semantics* that exist in
+  the MusicXML or need to be read from it, plus a structured *diff-audit* deliverable. Folding a
+  diff audit + two new feature behaviors into a recall ticket would muddy its acceptance criteria
+  and its measurable target. Keep #118 tight; the new ticket can reference and de-dupe against it.
+- **Overlap call on arpeggios:** #118 already notes "arpeggios as rests" as a RECALL symptom (the
+  notes vanish). The NEW ticket owns the *positive* behavior: once the pitches survive, render the
+  chord as a rolled/sequential strike (or at minimum a simultaneous chord, never a rest). If #118
+  ships first and stops arpeggios becoming rests, the new ticket's arpeggio item shrinks to the
+  roll articulation only. Cross-link both; whoever lands first updates the other.
+- **Why a spike-flavored first step, not a straight feature:** we do not yet know whether oemer
+  even emits <arpeggiate> or correct <tie>/<tied> for icarus, or whether it drops them upstream.
+  The honest first deliverable is the diff audit (read the generated MusicXML against the PDF and
+  enumerate every divergence), which tells us if these are parser gaps in OUR pipeline (cheap fix)
+  or engine gaps in oemer (harder). Label type:spike + type:feature, area:omr + area:viz,
+  priority:high. The audit gates the build.
+- **Hard constraint carried forward (post-#113):** never fabricate pitches. Ties and arpeggios
+  must be read from the MusicXML oemer produces, not invented. If oemer drops a tie, we may
+  reconnect two adjacent same-pitch notes ONLY when both already exist; we never add a missing
+  note to complete a tie. Arpeggio roll is presentation of pitches already detected.
+- **Success measure:** structured diff table for icarus.pdf (per measure: pitches, durations,
+  ties, arpeggios, dynamics, tempo, title) with each row marked match/miss/extra; plus the two
+  named cases pass end to end (rolled chord plays as a roll or chord not a rest; final tied whole
+  notes sustain across the barline as one note in both staves).
+
 ### 2026-05-31 - OMR fidelity round 2: ship LH chord-completion post-pass, NOT the DPI sweep
 
 - **Context:** after #109 (400 DPI + stitch + no-deskew, merged + deployed), QA's icarus.pdf
