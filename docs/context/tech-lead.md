@@ -30,6 +30,47 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-31 - #109: OMR worker rasterization tuned for clean vector PDFs (DPI 300 -> 400, all pages stitched, oemer deskew off on PDF path).**
+  Concrete first child of spike #88. oemer has NO DPI/quality CLI knob (only `-o`,
+  `--use-tf`, `--save-cache`, `-d/--without-deskew`), so the raster we hand it in
+  `omr-worker/worker.py rasterize_if_pdf` is the only preprocessing lever we own.
+  - **DPI 300 -> 400** via new `PDF_RASTER_DPI = 400` constant fed to `pdftoppm -r`.
+    Conservative vs 600 for the Oracle Always Free ARM VM memory/time budget. Measured
+    before/after on the icarus.pdf fixture (1-page A4 vector): 300 DPI rendered
+    2480x3509 (8.7 MP), 400 DPI rendered 3306x4678 (15.5 MP), a 1.78x pixel-density
+    gain for the ML engine. Did NOT run the full oemer engine here (heavy ML stack /
+    onnxruntime not installed in the worktree); verified the rasterization step only.
+  - **All pages, stitched.** Dropped the `-f 1 -l 1` flags so `pdftoppm` renders every
+    page; new pure `stitch_pages_vertical(page_paths, dest)` stacks them top-to-bottom
+    into one tall PNG (oemer reads ONE image). Chose vertical stitch over "pick best
+    page" because it preserves ALL music and the engine scans staves top-to-bottom
+    anyway. Single page short-circuits to a plain RGB copy (no compositing). Canvas
+    width = widest page, narrower pages left-aligned on white. Uses Pillow, already an
+    oemer runtime dep (no new dependency); imported LAZILY inside the function so the
+    module stays importable for tests on a host without Pillow.
+  - **Deskew off on the PDF path only.** `rasterize_if_pdf` now returns
+    `(image_path, is_pdf)`; `process_job` passes `without_deskew=is_pdf` to `run_oemer`,
+    which appends `--without-deskew` for the clean (already-orthogonal) vector raster.
+    Scanned PNG/JPEG inputs keep deskew on. The argv build is the pure, testable
+    `oemer_command(image_path, out_dir, without_deskew)`.
+  - **R2 transport contract untouched:** result key, content-type, FAILURE_SENTINEL,
+    poll loop all unchanged. `run_homr` fallback still gets the stitched image.
+  - **Tests + CI gap:** repo CI (`.github/workflows/ci.yml`) is Node-only (typecheck +
+    vitest + build); there is NO pytest gate. Added `omr-worker/test_worker.py` (7 pytest
+    cases: DPI > 300 and <= 600, deskew gating both ways, single-page copy, multi-page
+    vertical stack with pixel-offset + white-gutter asserts, document page order, empty
+    rejection) for a local run (boto3 stubbed at import so it runs without the S3 deps;
+    Pillow via `importorskip`). Since pytest is not in CI, also added
+    `src/omr-worker.test.ts`: a vitest SOURCE-GUARD that reads `worker.py` as text and
+    locks the #109 wiring (DPI constant > 300 and <= 600 passed to pdftoppm, old
+    `-f 1 -l 1` gone, `stitch_pages_vertical` called on pages, `without_deskew=is_pdf`,
+    R2 contract strings, no em/en dash). This is the same text-guard pattern as
+    `toolbar.test.ts` and is what keeps a regression catchable in the green CI. JS suite
+    296 -> 302, `npm run build` green. NOTE: `npm test` first hit the known `jsdom`
+    ERR_MODULE_NOT_FOUND; a plain `npm install` fixed it.
+  - **NEEDS LIVE QA:** CI does not run the OMR engine. QA must scan icarus.pdf on `main`
+    and confirm the score still loads (and ideally that LH chord recovery improved).
+
 - **2026-05-31 - #96: mobile file pickers never opened because the file inputs used `hidden` (display:none).**
   The three source buttons in `index.html` are `<label class="file-btn">` wrapping an icon, a label span,
   and a hidden `<input type="file">`. iOS Safari and in-app webviews refuse to forward a label tap to a

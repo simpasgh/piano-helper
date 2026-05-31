@@ -12,8 +12,10 @@ Cloudflare Pages Functions is unchanged and lives entirely in R2:
 Loop, for each object under uploads/:
   1. validate the jobId (it is a UUID; reject anything else),
   2. skip if results/<jobId>.musicxml already exists (idempotent re-runs),
-  3. download the upload, rasterize first PDF page with pdftoppm if needed,
-  4. run oemer, fall back to homr, and on success upload the MusicXML,
+  3. download the upload, rasterize all PDF pages with pdftoppm if needed and
+     stitch them into one tall PNG,
+  4. run oemer (deskew disabled on the PDF path), fall back to homr, and on
+     success upload the MusicXML,
   5. if BOTH engines fail, upload a failure-sentinel MusicXML the browser
      detects (functions ... src/omr.ts FAILURE_SENTINEL_RE),
   6. delete uploads/<jobId> so it is not reprocessed.
@@ -43,6 +45,16 @@ UPLOAD_PREFIX = "uploads/"
 RESULT_SUFFIX = ".musicxml"
 RESULT_CONTENT_TYPE = "application/vnd.recordare.musicxml+xml"
 DEFAULT_POLL_SECONDS = 5
+
+# Rasterization DPI for the PDF path. oemer exposes no DPI/quality knob of its own
+# (its CLI is just -o, --use-tf, --save-cache, -d/--without-deskew), so the raster we
+# hand it is the ONLY preprocessing lever we own. 400 (up from the old 300) gives the
+# ML engine denser staff-line and notehead pixels, which is the highest-leverage,
+# lowest-risk free fidelity gain (#109). It is deliberately conservative versus 600 to
+# stay within the Oracle Always Free ARM VM's memory/time budget: a single A4 page at
+# 400 DPI is ~3300x4675 px (~46 MP), and we may stitch several pages into one tall
+# image below, so the working bitmap stays bounded. Bump cautiously if the VM allows.
+PDF_RASTER_DPI = 400
 
 # Byte-compatible with src/omr.ts FAILURE_SENTINEL_RE = /name="omr-status"\s*>\s*failed/.
 # Written to the result key when both engines fail so the browser stops polling and
@@ -148,43 +160,99 @@ def result_key(job_id):
     return "results/" + job_id + RESULT_SUFFIX
 
 
-def rasterize_if_pdf(input_path, workdir):
-    """oemer needs a raster image. Sniff the type and, for a PDF, render the first
-    page to PNG with poppler's pdftoppm at 300 DPI (same as the old workflow). Returns
-    the path to the image oemer should read."""
-    kind = subprocess.run(
+def sniff_mime(input_path):
+    """Return the libmagic mime-type string for the input, or "" on failure."""
+    return subprocess.run(
         ["file", "--brief", "--mime-type", input_path],
         capture_output=True,
         text=True,
         check=False,
     ).stdout.strip()
+
+
+def rasterize_if_pdf(input_path, workdir):
+    """oemer needs a single raster image. Sniff the type and, for a PDF, render EVERY
+    page to PNG with poppler's pdftoppm at PDF_RASTER_DPI, then stitch all pages
+    vertically into one tall PNG so no music past page 1 is dropped (the old code
+    rendered only the first page).
+
+    Returns (image_path, is_pdf). is_pdf lets the caller disable oemer's deskew on the
+    clean vector-PDF path (a vector raster is already orthogonal; deskew can warp it)."""
+    kind = sniff_mime(input_path)
     log("detected mime %r" % kind)
 
     if kind == "application/pdf":
         out_prefix = os.path.join(workdir, "page")
+        # No -f/-l: render ALL pages. -r sets the DPI (the only quality lever we own).
         subprocess.run(
-            ["pdftoppm", "-png", "-r", "300", "-f", "1", "-l", "1",
-             input_path, out_prefix],
+            ["pdftoppm", "-png", "-r", str(PDF_RASTER_DPI), input_path, out_prefix],
             check=True,
         )
-        # pdftoppm appends -1, -01, or -001 depending on page-count width.
+        # pdftoppm appends -1, -01, or -001 depending on page-count width; sorting the
+        # zero-padded names keeps pages in document order (page-001 < page-002 < ...).
         pages = sorted(
-            p for p in os.listdir(workdir)
+            os.path.join(workdir, p)
+            for p in os.listdir(workdir)
             if p.startswith("page-") and p.endswith(".png")
         )
         if not pages:
             raise RuntimeError("pdftoppm produced no page image")
-        return os.path.join(workdir, pages[0])
+        log("rasterized %d page(s) at %d DPI" % (len(pages), PDF_RASTER_DPI))
+        stitched = os.path.join(workdir, "stitched.png")
+        return stitch_pages_vertical(pages, stitched), True
 
     if kind == "image/png":
-        return _rename_to(input_path, os.path.join(workdir, "page.png"))
+        return _rename_to(input_path, os.path.join(workdir, "page.png")), False
 
     if kind == "image/jpeg":
-        return _rename_to(input_path, os.path.join(workdir, "page.jpg"))
+        return _rename_to(input_path, os.path.join(workdir, "page.jpg")), False
 
     # Best effort: hand the raw bytes to oemer as a PNG and let it try.
     log("unrecognized mime %r; treating as PNG" % kind)
-    return _rename_to(input_path, os.path.join(workdir, "page.png"))
+    return _rename_to(input_path, os.path.join(workdir, "page.png")), False
+
+
+def stitch_pages_vertical(page_paths, dest_path):
+    """Stack page PNGs top-to-bottom into one tall PNG and write it to dest_path.
+
+    oemer reads ONE image, so a multi-page PDF must collapse to a single raster.
+    Vertical stitching (rather than picking one "best" page) preserves ALL music: a
+    grand staff reads the same whether the systems sit on one page or several, and the
+    engine processes staves top-to-bottom regardless. A single page short-circuits to a
+    plain copy (no compositing cost). Canvas width is the widest page so nothing is
+    cropped; narrower pages are left-aligned on a white background (matches sheet-music
+    paper and the engine's binarization assumptions). Returns dest_path.
+
+    Pillow is already an oemer runtime dependency (see requirements.txt), so this adds
+    no new dependency. Imported lazily so the rest of the module (and its unit tests)
+    stays importable on a host without Pillow installed."""
+    if not page_paths:
+        raise RuntimeError("no pages to stitch")
+
+    from PIL import Image
+
+    if len(page_paths) == 1:
+        # Single page: just normalize to RGB at dest_path, no compositing.
+        with Image.open(page_paths[0]) as only:
+            only.convert("RGB").save(dest_path)
+        return dest_path
+
+    images = []
+    try:
+        for path in page_paths:
+            images.append(Image.open(path).convert("RGB"))
+        total_width = max(img.width for img in images)
+        total_height = sum(img.height for img in images)
+        canvas = Image.new("RGB", (total_width, total_height), (255, 255, 255))
+        y = 0
+        for img in images:
+            canvas.paste(img, (0, y))
+            y += img.height
+        canvas.save(dest_path)
+    finally:
+        for img in images:
+            img.close()
+    return dest_path
 
 
 def _rename_to(src, dest):
@@ -208,13 +276,24 @@ def find_musicxml(*dirs):
     return None
 
 
-def run_oemer(image_path, workdir):
+def oemer_command(image_path, out_dir, without_deskew):
+    """Build the oemer argv. Pure so the deskew gating is unit-testable without running
+    the engine. --without-deskew is added ONLY when without_deskew is true (the clean
+    vector-PDF path): a vector raster is already orthogonal, so oemer's deskew step can
+    only warp it. A scanned/photo PNG/JPEG keeps deskew on (it may be skewed)."""
+    cmd = ["oemer", image_path, "-o", out_dir]
+    if without_deskew:
+        cmd.append("--without-deskew")
+    return cmd
+
+
+def run_oemer(image_path, workdir, without_deskew=False):
     """Run the primary engine. Returns the MusicXML path or None on failure."""
     out_dir = os.path.join(workdir, "oemer-out")
     os.makedirs(out_dir, exist_ok=True)
     try:
         subprocess.run(
-            ["oemer", image_path, "-o", out_dir],
+            oemer_command(image_path, out_dir, without_deskew),
             check=True,
             cwd=workdir,
         )
@@ -246,8 +325,9 @@ def process_job(client, bucket, job_id):
         input_path = os.path.join(workdir, "input.bin")
         client.download_file(bucket, upload_key(job_id), input_path)
 
-        image_path = rasterize_if_pdf(input_path, workdir)
-        result_path = run_oemer(image_path, workdir)
+        image_path, is_pdf = rasterize_if_pdf(input_path, workdir)
+        # Disable deskew only on the vector-PDF raster (already orthogonal).
+        result_path = run_oemer(image_path, workdir, without_deskew=is_pdf)
         if result_path is None:
             log("oemer produced nothing for %s; trying homr" % job_id)
             result_path = run_homr(image_path, workdir)
