@@ -425,12 +425,22 @@ const LABEL_TIME_EPSILON = 1e-3;
 // so a repeated "Do Do Do" reads as one clear name instead of a noisy stack. Notes of a
 // different pitch (or the same pitch in the other hand's lane) each start their own run.
 //
+// Piano music is polyphonic, so a lane can sound SEVERAL pitches at one onset (a chord).
+// The run boundary is therefore chord-aware: we group a lane's notes by onset time and
+// compare the SET of pitches at each onset against the previous onset's set in that lane.
+// A pitch already sounding at the previous onset is a held/repeated voice and is left
+// unlabeled; a pitch new to this onset starts its own run and is labeled. This makes the
+// decision order-independent (it never depends on which chord note happens to sort last)
+// and dedupes a repeated identical chord. Monophonic input is the one-pitch-per-onset
+// special case, so the historical behavior is preserved exactly (issue #66).
+//
 // Returns a boolean per input note, index-aligned to `notes` AS GIVEN (the caller keeps
 // its own order; we do not reorder the caller's array). Pure and DOM-free for unit tests.
 export function labelableFallingNotes(notes: readonly LabelNote[]): boolean[] {
-  // Track the last labeled pitch per hand lane independently, so the left and right
-  // melodic lines each dedupe within themselves and never suppress each other.
-  const lastMidiByLane = new Map<string, number>();
+  // Track the set of pitches sounding at the previous onset per hand lane independently,
+  // so the left and right lines each dedupe within themselves and never suppress each
+  // other. Onsets a hair apart group together via LABEL_TIME_EPSILON.
+  const prevSetByLane = new Map<string, Set<number>>();
   // Sort indices by time so "consecutive" means consecutive in playback, not array order;
   // map the decision back onto the original indices.
   const order = notes
@@ -438,14 +448,46 @@ export function labelableFallingNotes(notes: readonly LabelNote[]): boolean[] {
     .sort((a, b) => a.n.time - b.n.time || a.i - b.i);
 
   const result = new Array<boolean>(notes.length).fill(false);
-  for (const { n, i } of order) {
-    const lane = n.hand ?? "unknown";
-    const prev = lastMidiByLane.get(lane);
-    // First note in the lane, or a pitch change from the previous note in this lane,
-    // gets the label; an immediate repeat of the same pitch does not.
-    const isRunStart = prev === undefined || prev !== n.midi;
-    result[i] = isRunStart;
-    lastMidiByLane.set(lane, n.midi);
+  let groupStart = 0;
+  while (groupStart < order.length) {
+    // Gather every note that shares this onset (within the epsilon) across all lanes.
+    const onsetTime = order[groupStart].n.time;
+    let groupEnd = groupStart;
+    while (
+      groupEnd < order.length &&
+      order[groupEnd].n.time - onsetTime <= LABEL_TIME_EPSILON
+    ) {
+      groupEnd++;
+    }
+
+    // Split this onset's notes by lane so each lane's chord is compared to that lane's
+    // previous onset, not to the other hand's.
+    const currentByLane = new Map<string, Set<number>>();
+    for (let k = groupStart; k < groupEnd; k++) {
+      const lane = order[k].n.hand ?? "unknown";
+      let set = currentByLane.get(lane);
+      if (!set) {
+        set = new Set<number>();
+        currentByLane.set(lane, set);
+      }
+      set.add(order[k].n.midi);
+    }
+
+    // Label a pitch only if it is NEW relative to the same lane's previous onset (a run
+    // start). Held/repeated voices carry over and stay unlabeled.
+    for (let k = groupStart; k < groupEnd; k++) {
+      const { n, i } = order[k];
+      const lane = n.hand ?? "unknown";
+      const prev = prevSetByLane.get(lane);
+      result[i] = prev === undefined || !prev.has(n.midi);
+    }
+
+    // Each lane that sounded at this onset advances its previous-set to this chord.
+    for (const [lane, set] of currentByLane) {
+      prevSetByLane.set(lane, set);
+    }
+
+    groupStart = groupEnd;
   }
   return result;
 }
