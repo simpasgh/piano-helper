@@ -4,6 +4,82 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-05-31: issue #135 / PR #142 (swap the OMR engine to Clarity-OMR as PRIMARY because it is
+  the only free engine that recovers TIES/held notes on our material; oemer stays as fallback.
+  Worker `run_clarity` runs the PDF directly in its OWN venv via subprocess, then UNCONDITIONAL
+  post-transforms `merge_to_grand_staff` (collapse Clarity's 2 parts to 1 grand-staff part with
+  `<staves>2</staves>`) + `normalize_ties` (pitch-matched pairing: close dangling starts across
+  barlines, drop cross-pitch false positives) run on the output before R2 upload) -> **PASS**.
+  FIRST live end-to-end QA that actually exercises TIES through the DEPLOYED Clarity pipeline
+  (the #123 tie-merge QA used a hand-built fixture; #88/#109/#118 ran oemer, which emits ZERO
+  ties). Worker `~/piano-helper-omr/worker.py` is the Clarity build (`run_clarity`,
+  `merge_to_grand_staff`, `normalize_ties` present), restarted 21:44:11 with `CLARITY_OMR_DIR`/
+  `CLARITY_PYTHON` in omr.env; `~/clarity-omr/.venv` + HF cache warmed.
+  - FIXTURE = a GENUINE engraved 2-staff piano score with ties across barlines:
+    `/Users/simonepasculli/Documents/MuseScore4/Scores/the cut that always bleeds.pdf` (Conan
+    Gray arr., 2 pages A4, full grand staff, treble melody + bass block-chord LH, MANY tie/slur
+    arcs incl. LH whole-note chords held across barlines). Rendered the source first
+    (`pdftoppm -r 120`) to confirm real ties before scanning. icarus.pdf was NOT usable here (it
+    has no ties). Reverie.pdf/Liminality.pdf are also genuine grand staffs on disk if needed.
+  - REAL DEPLOYED FLOW (R2 transport, exactly as the app does it): `POST
+    https://piano-helper.pages.dev/api/omr` multipart `file` (application/pdf) -> 202
+    `{"jobId":"51b92cfd-ec85-4a21-ade0-2365353e7fe8"}`. Polled `/api/omr/result?jobId=...` every
+    10s -> 404 pending, then **200 + 122169 bytes of real MusicXML** at ~140s. ENGINE PROOF (the
+    headline): worker log `51b92cfd... recognized via engine output .../omr-ditdc0ya/
+    clarity.musicxml` (NOT `oemer-out`) + `[stage-b-eval] inference on 22 samples (device=cpu,
+    beam=2)` -> **Clarity won, no oemer fallback.** Movement-title "Music21 Fragment", music21
+    v10.3.0 encoder (Clarity's writer), NOT the omr-status=failed sentinel.
+  - ASSERTIONS on the DEPLOYED result vs RAW Clarity (I also ran Clarity directly via
+    `set -a; . ~/piano-helper-omr/omr.env; set +a; $CLARITY_PYTHON $CLARITY_OMR_DIR/omr.py
+    tied.pdf -o clarity-raw.musicxml --device cpu --fast --work-dir ...` to capture the
+    pre-transform output, since the worker's tempdir is deleted post-job):
+
+    | metric | RAW Clarity | DEPLOYED (merge+normalize) | gate |
+    | --- | --- | --- | --- |
+    | parts | 2 | **1** | (a) PASS |
+    | `<staves>2</staves>` | none | **yes (every measure)** | (a) PASS |
+    | clefs | 11x G then 11x F (2 parts) | **(num=1,G) + (num=2,F) per measure** | (b) PASS |
+    | pitched notes by staff | all untagged | **staff1=250 (RH/treble), staff2=191 (LH/bass)** | (b) PASS |
+    | total `<note>` / pitched / rests | 513 / 441 / 72 | **513 / 441 / 72 (identical)** | (d) PASS, 0 dropped |
+    | tie start / stop markers | 49 / 50 | **49 / 49** | (c) |
+    | VALID tie pairs | 44 | **49** | (c) PASS |
+    | unmatched starts / stops | 5 / 6 | **0 / 0** | (c) PASS |
+
+    (c) is the money result: raw Clarity emitted 5 dangling starts + 6 cross-pitch stops (e.g. an
+    A4 stop with no preceding A4 start, a G4 start with no follower); `normalize_ties` dropped all
+    11 false positives and closed the danglers, leaving **49 perfectly pitch+staff-matched
+    start->stop pairs, ZERO unmatched/cross-pitch.** Sample valid pairs span barlines: G4 staff1
+    m1->m2, E5 m2->m3, B4 m3->m4, A4 m5->m6, G4 m6->m7. Note count preserved EXACTLY (513/441/72)
+    so transforms dropped no notes (d).
+  - BROWSER (live OSMD on prod, real Chromium via the sibling todeoapp Playwright install, bundle
+    `index-Btv4ZqcA.js`): loaded the deployed result via `#file-input` -> "Music21 Fragment",
+    "392 notes" (the 441 pitched collapse via score.ts mergeTiedNotes on the 49 ties),
+    `#hand-mutes` display:flex (BOTH hands = grand staff detected), Play enabled, **0
+    console.error / 0 pageerror**. Screenshot /tmp/qa135/browser-loaded.png shows a piano-brace
+    GRAND STAFF (treble G-clef 2/2 over bass F-clef), **tie/slur ARCS rendered** (long arcs over
+    m3->5 and m9->10 in the treble), bass-clef "Do"/"Mi" block chords on staff 2, and falling
+    notes colored by hand: **GREEN = Left hand (staff 2), PURPLE/violet = Right hand (staff 1)**,
+    green sync cursor on beat 1. Visual confirms ties render and hands color correctly.
+  - VERDICT: **PASS** on all four gates: (a) 1 part + `<staves>2</staves>`, (b) treble=staff1 /
+    bass=staff2 with G@1/F@2 clefs and 250/191 split, (c) 49 valid tie pairs / 0 unmatched, (d)
+    note count preserved 513/441/72. The Clarity swap recovers genuine ties end-to-end through the
+    deployed R2 pipeline and the transforms clean its cross-pitch tie noise without dropping notes.
+    This CLOSES the #135 post-merge QA gate.
+  - METHOD / GOTCHAS for future Clarity-tie QA: (1) icarus.pdf has NO ties -- use a tie-bearing
+    engraved score (`the cut that always bleeds.pdf`, Reverie/Liminality on disk are grand staffs
+    too). VERIFY ties exist in the SOURCE (`pdftoppm` render) before scanning. (2) Engine attrib
+    is in the worker log: `recognized via engine output .../clarity.musicxml` (Clarity) vs
+    `.../oemer-out/stitched.musicxml` (fallback); also `[stage-b-eval] ... device=cpu beam=2` is
+    the Clarity tell. (3) Clarity `--fast` CPU is ~0.15-0.2 samples/s; a 2-page score segments to
+    ~22 staff samples = ~2 min/page; ~140s wall for this job (the app polls 15 min, fine). Do NOT
+    run two Clarity jobs at once (I ran a direct probe concurrently and both slowed). (4) To get
+    the PRE-transform Clarity output for the note-count/tie-pairing diff, run Clarity directly
+    (the worker's tempdir is gone after the job); env via `set -a; . ~/piano-helper-omr/omr.env;
+    set +a`. (5) The tie assertion = flatten notes in doc order, pair each `tie type=start` to the
+    NEXT same-(step,alter,octave)+same-staff note carrying `tie type=stop`; count unmatched both
+    directions. Artifacts under /tmp/qa135/ (tied.pdf, result.musicxml = deployed, clarity-raw.
+    musicxml = pre-transform, analyze.py, drive.mjs, browser-loaded.png, source renders).
+
 - 2026-05-31: PR #139 (the LH/RH mute toggles + Balance slider now show for ANY loaded score,
   not just grand-staff: every note gets a real hand, by clef for a 2-staff grand staff,
   otherwise a pitch split at middle C `HAND_SPLIT_MIDI=60` via `handFromPitch`; `#hand-mutes`
