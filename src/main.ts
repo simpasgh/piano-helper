@@ -1,8 +1,18 @@
 import "./style.css";
 import * as Tone from "tone";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
-import { Visualizer } from "./visualizer";
+import { Visualizer, type VisNote } from "./visualizer";
 import { extractScore, type ScoreData } from "./score";
+import { nudgePitch, deleteNote, recomputeDuration, hasEdits } from "./note-edit";
+import { midiToBarLabel } from "./piano";
+
+// Label a note for the edit readout + announcements. Falls back to letter-mode names when the
+// label mode is "off" (which midiToBarLabel returns as an empty string), so the edit cluster and
+// the aria-live region always read a concrete note even with names turned off.
+function editNoteLabel(note: VisNote): string {
+  const mode = labelMode === "off" ? "letters" : labelMode;
+  return midiToBarLabel(note.midi, mode, note.spelling);
+}
 import { submitOmr, pollOmrResult, isCancelled } from "./omr";
 import {
   scanOverlayTitle,
@@ -66,6 +76,13 @@ function reflectHandMute(btn: HTMLButtonElement, muted: boolean): void {
     ? `${name}: muted. Click to unmute.`
     : `${name}: audible. Click to mute.`;
 }
+const correctBtn = document.getElementById("correct-btn") as HTMLButtonElement;
+const noteEdit = document.getElementById("note-edit") as HTMLDivElement;
+const noteEditReadout = document.getElementById("note-edit-readout") as HTMLSpanElement;
+const pitchDownBtn = document.getElementById("pitch-down-btn") as HTMLButtonElement;
+const pitchUpBtn = document.getElementById("pitch-up-btn") as HTMLButtonElement;
+const deleteNoteBtn = document.getElementById("delete-note-btn") as HTMLButtonElement;
+const editLive = document.getElementById("edit-live") as HTMLSpanElement;
 const tempoSlider = document.getElementById("tempo-slider") as HTMLInputElement;
 const tempoReadout = document.getElementById("tempo-readout") as HTMLButtonElement;
 const sheetContainer = document.getElementById("sheet") as HTMLDivElement;
@@ -129,6 +146,38 @@ const handMuted = { left: false, right: false };
 // the next onset with no Part rebuild. Layered under the mute flags: a muted hand returns
 // early before velocity is ever computed. "unknown" notes ignore balance (always full).
 let handBalance = BALANCE_DEFAULT;
+
+// OMR correction UI (issue #6, first slice: pitch nudge + delete). `correctMode` is an
+// explicit toggle, OFF by default; entering it pauses playback so the player edits a still
+// target. `selectedIndex` is the note picked for editing, or null. Editing is allowed only
+// while in Correct mode (which implies paused); pressing Play clears the selection so a moving
+// target is never edited. The sheet stays AUTHORITATIVE and unchanged: edits diverge the
+// falling-notes model only, marked per-note with `edited` and surfaced once in #track-status.
+let correctMode = false;
+let selectedIndex: number | null = null;
+
+// Reflect the current selection on screen + to assistive tech, and show/hide the edit cluster.
+// The cluster is visible only in Correct mode WITH a note selected (Designer decision #4).
+function reflectSelection(announce?: string): void {
+  visualizer.setSelected(selectedIndex);
+  const note = score && selectedIndex !== null ? score.notes[selectedIndex] : null;
+  noteEdit.hidden = !(correctMode && note !== null);
+  if (note) {
+    noteEditReadout.textContent = editNoteLabel(note);
+  }
+  if (announce) editLive.textContent = announce;
+}
+
+// Move the selection by +-1 within the note list (Up/Down arrows; Left/Right/Space are taken
+// by transport). Wraps at the ends so repeated arrows cycle the whole score. No-op with no notes.
+function moveSelection(delta: 1 | -1): void {
+  if (!score || score.notes.length === 0) return;
+  const n = score.notes.length;
+  const base = selectedIndex === null ? (delta > 0 ? -1 : 0) : selectedIndex;
+  selectedIndex = ((base + delta) % n + n) % n;
+  const note = score.notes[selectedIndex];
+  reflectSelection(`Selected ${editNoteLabel(note)}`);
+}
 
 // Sync the readout text to the current balance. The slider position is set separately so
 // programmatic resets (per load) and the reset button both reflect cleanly.
@@ -260,6 +309,12 @@ function loadNotes(data: ScoreData, name: string, sheet: boolean): void {
   reflectBalance();
   handMutes.hidden = false;
 
+  // Issue #6: a fresh load drops any prior correction state. Selection clears, Correct mode
+  // turns off, and the "Edited" status note is allowed to reappear only after the next edit.
+  selectedIndex = null;
+  exitCorrectMode();
+  reflectSelection();
+
   stepIndex = 0;
   onsets = uniqueOnsets(score.notes);
   // Issue #44: adopt the derived default name (the user can rename it) and show it with the
@@ -276,6 +331,129 @@ function loadNotes(data: ScoreData, name: string, sheet: boolean): void {
   setTransportControlsEnabled(true);
   updateSeekUI(0);
   setPlaying(false);
+}
+
+// NARROW rebuild after an in-memory edit (issue #6). Unlike loadNotes this does NOT reset hand
+// mutes/balance/tempo, does NOT re-render the sheet, and does NOT touch the sheet name. It only
+// rebuilds what depends on score.notes: disposes + rebuilds the Tone.Part, recomputes the onset
+// list and the total duration, refreshes the visualizer notes + the note-count readout. Pause
+// and restore the transport position around the Part rebuild so the swap is inaudible (a Part
+// rebuild while playing would reschedule mid-flight and click). The sheet/cursor are left as-is:
+// edits diverge the falling notes from the authoritative scan on purpose (Designer decision #1).
+function reloadNotes(notes: VisNote[]): void {
+  if (!score) return;
+  const transport = Tone.getTransport();
+  const wasPlaying = playing;
+  // Capture the current playhead in transport seconds so we can restore it after the rebuild.
+  const positionSeconds = transport.seconds;
+  transport.pause();
+
+  score = { ...score, notes, duration: recomputeDuration(notes) };
+
+  part?.dispose();
+  // Rebuild at the baseline bpm so the new notes' score seconds map to rate-independent ticks,
+  // exactly as loadNotes does, then restore the live tempo. This keeps the sync invariant: the
+  // falling notes and the cursor still read from one timeline (we never changed any note time).
+  transport.bpm.value = BASE_BPM;
+  visualizer.setNotes(score.notes);
+  part = new Tone.Part((time, note) => {
+    if (note.hand === "left" && handMuted.left) return;
+    if (note.hand === "right" && handMuted.right) return;
+    const gains = handGains(handBalance);
+    const velocity =
+      note.hand === "left" ? gains.left : note.hand === "right" ? gains.right : 1;
+    getInstrument().triggerAttackRelease(
+      Tone.Frequency(note.midi, "midi").toFrequency(),
+      note.duration,
+      time,
+      velocity,
+    );
+  }, score.notes.map((n) => ({ time: n.time, midi: n.midi, duration: n.duration, hand: n.hand })));
+  part.start(0);
+  transport.bpm.value = rateToBpm(tempoRate, BASE_BPM);
+
+  // Restore the playhead. A delete can shorten the score below the old position; clamp it.
+  transport.seconds = Math.min(positionSeconds, score.duration / (tempoRate || 1));
+  onsets = uniqueOnsets(score.notes);
+  noteCount = score.notes.length;
+  renderSheetName(); // refresh the note-count readout next to the name
+  if (wasPlaying) transport.start();
+  // Issue #6 divergence note: once the score carries any edit, show one quiet line so the user
+  // knows the sheet below still reflects the original scan. Cleared on a fresh load.
+  if (hasEdits(score.notes)) showEditedStatus();
+  updateSeekUI(Tone.getTransport().seconds * tempoRate);
+}
+
+// Apply an edit transform to the selected note and rebuild the playback pipeline. `transform`
+// returns the new immutable notes array. After a nudge the selection stays on the same index;
+// after a delete the index is clamped/cleared so it never points past the shortened array.
+function applyEdit(
+  transform: (notes: VisNote[]) => VisNote[],
+  kind: "nudge" | "delete",
+): void {
+  if (!score || selectedIndex === null || !correctMode) return;
+  const index = selectedIndex;
+  const before = score.notes[index];
+  const next = transform(score.notes);
+  if (kind === "delete") {
+    // Drop the selection if nothing remains, else keep it in range so the player can keep
+    // editing the neighbor that slid into this slot.
+    selectedIndex = next.length === 0 ? null : Math.min(index, next.length - 1);
+  }
+  reloadNotes(next);
+  if (kind === "nudge") {
+    const after = score.notes[index];
+    reflectSelection(
+      `${editNoteLabel(before)} changed to ${editNoteLabel(after)}`,
+    );
+  } else {
+    reflectSelection(
+      `Deleted ${editNoteLabel(before)}`,
+    );
+  }
+}
+
+// Show the one-time divergence line (Designer decision #1). It does not fight an active status
+// message (scanning/transcribing); it only takes the slot when the loaded-piece view is showing.
+function showEditedStatus(): void {
+  if (nameEditing) return;
+  sheetNameBtn.hidden = true;
+  sheetNoteCount.hidden = true;
+  trackStatus.hidden = false;
+  trackStatus.textContent = "Edited. The sheet below still shows the original scan.";
+}
+
+// Enter Correct mode (Designer decision #2): pause playback so the player edits a still target,
+// make the stage a focusable application region for keyboard editing, and reveal the edit cluster
+// if a note is already selected. Pressing Play later clears the selection (handled in togglePlay).
+function enterCorrectMode(): void {
+  if (correctMode) return;
+  correctMode = true;
+  correctBtn.setAttribute("aria-pressed", "true");
+  if (playing) {
+    Tone.getTransport().pause();
+    setPlaying(false);
+  }
+  canvas.setAttribute("tabindex", "0");
+  canvas.setAttribute("role", "application");
+  canvas.setAttribute("aria-label", "Falling notes editor. Up and down arrows select a note; minus and plus nudge its pitch; Delete removes it.");
+  reflectSelection("Correct mode on. Click a note or use the arrow keys to select one.");
+}
+
+// Leave Correct mode: clear the selection, hide the edit cluster, and drop the stage's
+// application role so global transport shortcuts behave normally again.
+function exitCorrectMode(): void {
+  if (!correctMode && selectedIndex === null) {
+    canvas.removeAttribute("tabindex");
+    canvas.removeAttribute("role");
+    return;
+  }
+  correctMode = false;
+  correctBtn.setAttribute("aria-pressed", "false");
+  selectedIndex = null;
+  canvas.removeAttribute("tabindex");
+  canvas.removeAttribute("role");
+  reflectSelection();
 }
 
 // Load MusicXML into OSMD and rebuild the pipeline. Shared by the direct MusicXML file
@@ -448,6 +626,13 @@ async function togglePlay(): Promise<void> {
     transport.pause();
     setPlaying(false);
   } else {
+    // Pressing Play suspends selection so a moving target is never edited (Designer decision
+    // #2/#3). The selection clears but Correct mode itself stays on; pausing again lets the
+    // player re-select. The edit cluster hides because reflectSelection sees no selection.
+    if (selectedIndex !== null) {
+      selectedIndex = null;
+      reflectSelection();
+    }
     transport.start();
     setPlaying(true);
   }
@@ -823,7 +1008,12 @@ async function exportVideo(): Promise<void> {
     });
 
     // Start the performance from the top and record it in real time. The timeslice flushes
-    // a chunk each second so a long performance does not buffer entirely in memory.
+    // a chunk each second so a long performance does not buffer entirely in memory. Clear any
+    // active correction selection first so its ring is never baked into the recorded video.
+    if (selectedIndex !== null) {
+      selectedIndex = null;
+      reflectSelection();
+    }
     rewind();
     recorder.start(1000);
     const transport = Tone.getTransport();
@@ -975,6 +1165,68 @@ namesBtn.addEventListener("click", () => {
     // Persistence is best-effort; the toggle still works for this session.
   }
   applyLabelMode(labelMode);
+});
+
+// Correct mode toggle (issue #6): flip the mode, pausing playback on entry.
+correctBtn.addEventListener("click", () => {
+  if (!score) return;
+  if (correctMode) exitCorrectMode();
+  else enterCorrectMode();
+});
+
+// Click/tap a falling bar to select it (issue #6). Only meaningful in Correct mode (and the
+// transport is paused there). Convert the click to canvas-local px and hit-test against the
+// current playhead so the rectangle matches what the user sees.
+canvas.addEventListener("click", (e) => {
+  if (!score || !correctMode) return;
+  const rect = canvas.getBoundingClientRect();
+  const px = e.clientX - rect.left;
+  const py = e.clientY - rect.top;
+  const scoreTime = Tone.getTransport().seconds * tempoRate;
+  const hit = visualizer.hitTest(px, py, scoreTime);
+  if (hit === null) {
+    selectedIndex = null;
+    reflectSelection("Selection cleared.");
+    return;
+  }
+  selectedIndex = hit;
+  const note = score.notes[hit];
+  reflectSelection(`Selected ${editNoteLabel(note)}`);
+});
+
+// Edit cluster buttons (issue #6). Each is bound to a transform; also bound to keys below.
+pitchUpBtn.addEventListener("click", () => applyEdit((n) => nudgePitch(n, selectedIndex!, 1), "nudge"));
+pitchDownBtn.addEventListener("click", () => applyEdit((n) => nudgePitch(n, selectedIndex!, -1), "nudge"));
+deleteNoteBtn.addEventListener("click", () => applyEdit((n) => deleteNote(n, selectedIndex!), "delete"));
+
+// Correct-mode keyboard editing (issue #6). Up/Down move the selection (Left/Right/Space are
+// transport, handled by the global listener); -/+ nudge pitch; Delete/Backspace remove. Active
+// only in Correct mode, and ignored while a form field is focused (so the rename input is safe).
+window.addEventListener("keydown", (e) => {
+  if (!score || busy || !correctMode) return;
+  const target = e.target as HTMLElement | null;
+  const tag = target?.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target?.isContentEditable) {
+    return;
+  }
+  if (e.key === "ArrowUp") {
+    e.preventDefault();
+    moveSelection(1);
+  } else if (e.key === "ArrowDown") {
+    e.preventDefault();
+    moveSelection(-1);
+  } else if (selectedIndex === null) {
+    return; // the edit keys below need a selected note
+  } else if (e.key === "+" || e.key === "=") {
+    e.preventDefault();
+    applyEdit((n) => nudgePitch(n, selectedIndex!, 1), "nudge");
+  } else if (e.key === "-" || e.key === "_") {
+    e.preventDefault();
+    applyEdit((n) => nudgePitch(n, selectedIndex!, -1), "nudge");
+  } else if (e.key === "Delete" || e.key === "Backspace") {
+    e.preventDefault();
+    applyEdit((n) => deleteNote(n, selectedIndex!), "delete");
+  }
 });
 
 function frame(): void {

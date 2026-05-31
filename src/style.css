@@ -483,6 +483,36 @@ button:focus-visible,
   gap: 0.4rem;
 }
 
+/* Correct mode (issue #6): the ghost toggle turns to an engaged brass fill when active,
+   matching the hand-mute pressed style so the toolbar stays consistent. */
+#correct-btn[aria-pressed="true"] {
+  background: rgba(216, 162, 58, 0.28);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+/* Compact edit cluster (issue #6): shown only in Correct mode with a note selected. The
+   `:not([hidden])` guard mirrors the hand-mutes group so the native [hidden] -> display:none
+   is not clobbered by display:flex. */
+.note-edit:not([hidden]) {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.note-edit-readout {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+/* Stage gains a focus ring in Correct mode (it becomes a focusable application region). */
+#stage:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
 /* Speaker glyph that gains a slash when the hand is muted: the canonical, colorblind-safe
    mute mark (a shape change, not a hue). Audible shows the sound waves; muted hides the
    waves, shows the slash, and the whole pill turns to an engaged accent fill. This replaces

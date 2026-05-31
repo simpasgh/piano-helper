@@ -31,6 +31,81 @@ export interface VisNote {
   // for a "Db". Drives the label NAME only (color, octave, and geometry stay MIDI-driven).
   // Absent for audio-transcribed scores, which fall back to the always-sharp name.
   spelling?: NoteSpelling;
+  // Set true by the OMR correction transforms (issue #6) when the user has nudged or otherwise
+  // changed this note away from the scan. drawFallingNotes outlines an edited bar with a thin
+  // dashed brass border so the divergence from the (authoritative, unchanged) sheet is legible.
+  edited?: boolean;
+}
+
+// Geometry of one falling bar in canvas px, computed purely from the layout + a note's time
+// window. Shared by the renderer and the click hit-test (issue #6) so a tap lands on exactly
+// the rectangle the user sees. `clamped` flags an off-window bar pinned to an edge column on a
+// narrow keyboard (issue #33); those are a dim "off-screen" hint and are NOT selectable.
+export interface BarRect {
+  x: number;
+  top: number;
+  width: number;
+  height: number;
+  clamped: boolean;
+}
+
+// Inputs the bar math needs, independent of any canvas. `keyByMidi`/edge fields come from the
+// current key layout; `pps` (pixels per second) and `keyboardTop` from the current size.
+export interface BarLayout {
+  keyByMidi: ReadonlyMap<number, KeyGeometry>;
+  firstVisibleMidi: number;
+  lastVisibleMidi: number;
+  keyboardTop: number;
+  pps: number;
+  lookAhead: number;
+}
+
+// Pure rectangle for note `n` at `currentTime`, or null when the bar is off-screen (not within
+// the look-ahead window and not still sounding) or its key column is missing. Mirrors the exact
+// math drawFallingNotes uses, so the renderer and the hit-test never drift apart.
+export function barRect(
+  n: { midi: number; time: number; duration: number },
+  currentTime: number,
+  layout: BarLayout,
+): BarRect | null {
+  const delta = n.time - currentTime;
+  if (delta > layout.lookAhead || delta + n.duration < 0) return null; // off-screen
+  const clamped = n.midi < layout.firstVisibleMidi || n.midi > layout.lastVisibleMidi;
+  const lookupMidi = clamped
+    ? n.midi < layout.firstVisibleMidi
+      ? layout.firstVisibleMidi
+      : layout.lastVisibleMidi
+    : n.midi;
+  const key = layout.keyByMidi.get(lookupMidi);
+  if (!key) return null;
+  const height = Math.max(6, n.duration * layout.pps);
+  const bottom = layout.keyboardTop - delta * layout.pps;
+  const top = bottom - height;
+  const black = isBlackKey(n.midi);
+  const width = noteBarWidth(key.width, black);
+  const x = key.x + (key.width - width) / 2;
+  return { x, top, width, height, clamped };
+}
+
+// First (topmost-drawn) note whose on-screen bar contains (px, py) at `currentTime`, or null.
+// "Topmost on overlap" = the LAST index drawn wins, since later bars paint over earlier ones;
+// we scan from the end so a stacked chord selects the bar the user actually sees on top.
+// Clamped off-window bars are skipped: they are a dim hint, not a precise target.
+export function hitTestBars(
+  notes: readonly { midi: number; time: number; duration: number }[],
+  px: number,
+  py: number,
+  currentTime: number,
+  layout: BarLayout,
+): number | null {
+  for (let i = notes.length - 1; i >= 0; i--) {
+    const r = barRect(notes[i], currentTime, layout);
+    if (!r || r.clamped) continue;
+    if (px >= r.x && px <= r.x + r.width && py >= r.top && py <= r.top + r.height) {
+      return i;
+    }
+  }
+  return null;
 }
 
 // Whether a single falling bar should carry the brighter "active" fill (issue #131).
@@ -71,6 +146,9 @@ export class Visualizer {
   // and so the run-dedupe / per-hand-consistency decision is made once, not every frame.
   private labelableNote: boolean[] = [];
   private mutedHands = { left: false, right: false };
+  // Index of the note selected in Correct mode (issue #6), or null when nothing is selected.
+  // A selected bar gets a solid focus-ring outline + brass halo so the edit target is obvious.
+  private selectedIndex: number | null = null;
   private width = 0;
   private height = 0;
   private dpr = 1;
@@ -102,6 +180,32 @@ export class Visualizer {
 
   setLabelMode(mode: LabelMode): void {
     this.labelMode = mode;
+  }
+
+  // Mark the selected note for the correction UI (issue #6); null clears the selection. The
+  // index is into the current `notes`; the caller is responsible for passing a valid index.
+  setSelected(index: number | null): void {
+    this.selectedIndex = index;
+  }
+
+  // Build the current bar layout (key columns + scale) so the pure hit-test sees exactly the
+  // geometry the render loop draws. pps must match render()'s `(height - keyboardHeight)/LOOK_AHEAD`.
+  private barLayout(): BarLayout {
+    return {
+      keyByMidi: this.keyByMidi,
+      firstVisibleMidi: this.firstVisibleMidi,
+      lastVisibleMidi: this.lastVisibleMidi,
+      keyboardTop: this.keyboardTop(),
+      pps: (this.height - this.keyboardHeight) / LOOK_AHEAD,
+      lookAhead: LOOK_AHEAD,
+    };
+  }
+
+  // Hit-test a click/tap in canvas px against the falling bars at `currentTime`, returning the
+  // topmost note's index or null (issue #6). Topmost-on-overlap wins; clamped off-window bars
+  // are not selectable.
+  hitTest(px: number, py: number, currentTime: number): number | null {
+    return hitTestBars(this.notes, px, py, currentTime, this.barLayout());
   }
 
   resize(): void {
@@ -260,6 +364,36 @@ export class Visualizer {
         ctx.fillRect(x + 1, top + 1, w - 2, capH);
         ctx.fillStyle = dividerColor;
         ctx.fillRect(x + 1, top + 1 + capH, w - 2, 1);
+      }
+
+      // Edited-note divergence outline (issue #6): a thin DASHED brass border on any bar the
+      // user changed (pitch nudge), drawn AFTER the body fill and independent of the #27 contact
+      // stroke and #131 active fill. It marks where the falling-notes model now disagrees with
+      // the authoritative, unchanged sheet below. Persistent (not gated on contact), no glow.
+      if (note.edited) {
+        ctx.save();
+        ctx.shadowBlur = 0;
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = "#d8a23a"; // --accent (brass)
+        ctx.setLineDash([4, 3]);
+        this.roundRect(x, top, w, barHeight, 4);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      // Selection outline + halo (issue #6): the note picked in Correct mode gets a solid 2px
+      // focus-ring border and a soft brass halo so the edit target reads clearly. Drawn on the
+      // real (non-clamped) bar only; the selection survives play being paused.
+      if (this.selectedIndex === i) {
+        ctx.save();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = "#f0c66b"; // --focus-ring
+        ctx.shadowColor = "rgba(216, 162, 58, 0.55)"; // --accent-glow
+        ctx.shadowBlur = 16;
+        ctx.globalAlpha = 1;
+        this.roundRect(x, top, w, barHeight, 4);
+        ctx.stroke();
+        ctx.restore();
       }
 
       // Clamped off-window bars get neither the contact glow nor a label: they are a
