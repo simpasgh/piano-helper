@@ -6,6 +6,7 @@ import type { Hand, NoteLetter, NoteSpelling } from "./piano";
 import {
   handFromStaff,
   handFromClefInEffect,
+  handFromPitch,
   buildStaffClefMap,
   buildStaffClefTimeline,
 } from "./piano";
@@ -233,6 +234,11 @@ export function extractScore(osmd: OpenSheetMusicDisplay): ScoreData {
             hand = handFromClefInEffect(timeline?.[measureIndex]);
           }
         }
+        // The per-hand controls must always be available, so every note has to land on a
+        // real hand. When clef/staff data can't decide (a lone staff with a no-hand clef,
+        // or a malformed score), split by pitch at middle C, the same heuristic the
+        // audio-derived path uses, instead of leaving the note "unknown".
+        if (hand === "unknown") hand = handFromPitch(midi);
         // Tag the tie this note belongs to (issue #123) so a held note merges into one bar.
         let tieId: number | undefined;
         let isTieStart = false;

@@ -14,9 +14,9 @@
 // cursor iterator, which only exists after render. The #90 bug, however, is entirely in
 // readClefDeclarations' extraction from the parsed Sheet model, and osmd.load() populates
 // that model without rendering, so this test pins the exact broken code path. Hand resolution
-// downstream (buildStaffClefTimeline -> handFromClefInEffect -> hasBothHands) is covered by
-// the pure-helper tests in piano.test.ts / playback.test.ts; here we compose them on the real
-// declarations to assert the user-visible "both hands" outcome.
+// downstream (buildStaffClefTimeline -> handFromClefInEffect) is covered by the pure-helper
+// tests in piano.test.ts; here we compose them on the real declarations to assert the
+// user-visible hand split.
 import { describe, it, expect, beforeAll } from "vitest";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 

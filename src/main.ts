@@ -11,7 +11,6 @@ import {
 } from "./scan-overlay";
 import { chooseVideoFormat, buildExportFilename } from "./recorder";
 import {
-  hasBothHands,
   uniqueOnsets,
   nextOnset,
   prevOnset,
@@ -242,10 +241,9 @@ function loadNotes(data: ScoreData, name: string, sheet: boolean): void {
   // Apply the current tempo now that the Part is built at BASE_BPM.
   transport.bpm.value = rateToBpm(tempoRate, BASE_BPM);
 
-  // Per-hand mute toggles (issue #37): shown only when the score has both a right- and a
-  // left-hand note set. Grand-staff sheets split by clef; audio-derived scores split by pitch
-  // (issue #70 follow-up), so a two-handed clip now shows the controls and a single-register
-  // one stays hidden. Reset on every load so a previously muted hand does not carry over.
+  // Per-hand mute toggles (issue #37): always shown. Every note is assigned a hand (grand
+  // staff by clef, everything else by pitch at middle C), so the controls are meaningful for
+  // any score. Reset on every load so a previously muted hand does not carry over.
   handMuted.left = false;
   handMuted.right = false;
   reflectHandMute(muteRightBtn, false);
@@ -256,7 +254,7 @@ function loadNotes(data: ScoreData, name: string, sheet: boolean): void {
   handBalance = BALANCE_DEFAULT;
   balanceSlider.value = String(BALANCE_DEFAULT);
   reflectBalance();
-  handMutes.hidden = !hasBothHands(score.notes);
+  handMutes.hidden = false;
 
   stepIndex = 0;
   onsets = uniqueOnsets(score.notes);

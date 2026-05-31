@@ -215,8 +215,8 @@ export function handFromClef(clef: StaffClefKind): Hand | null {
 // grand-staff convention with a fixed boundary at middle C (MIDI 60): a note at or above
 // middle C reads as the right hand, below it as the left. This is a heuristic, not ground
 // truth (a left hand can reach above middle C), but it makes the two-hand controls reachable
-// for the common melody-over-bass piano clip. A genuinely single-register clip lands on one
-// hand, so `hasBothHands` stays false and the controls stay hidden, which is correct.
+// for the common melody-over-bass piano clip. The same split is the fallback for any sheet
+// note a clef can't resolve, so every score lands on real hands and the controls are usable.
 export const HAND_SPLIT_MIDI = 60;
 
 export function handFromPitch(midi: number): Hand {
