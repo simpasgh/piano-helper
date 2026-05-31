@@ -30,6 +30,32 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-31 - Hand tagging now branches on staff count: a single COLLAPSED staff splits by the clef IN EFFECT, a real grand staff keeps first-clef-per-staff (#87).**
+  Scanning a piano PDF (icarus.pdf, "Andante") makes the OMR engine flatten the grand staff onto ONE
+  staff that switches clef mid-piece (treble, then bass at ~measure 9). The old `readStaffClefs` recorded
+  only the FIRST clef per staff id (`buildStaffClefMap`), so every note on that one staff (including the
+  bass section) tagged "right", `hasBothHands` was false, and `handMutes.hidden` stayed true: the per-hand
+  controls never appeared. Fix is CONDITIONAL on the note's instrument staff count, because mid-staff clef
+  changes mean opposite things in the two cases:
+  - **Multi-staff instrument (`staves.length > 1`)**: UNCHANGED. Still `handFromStaff(buildStaffClefMap...)`
+    (first clef per staff, position fallback for C/percussion). A transient clef change on the RH staff
+    must NOT move those notes to the LH (this is the #73/#82/#36 invariant; do not regress it).
+  - **Single-staff instrument (`staves.length === 1`)**: NEW. Tag each note by the clef in effect at its
+    measure via `buildStaffClefTimeline` (carries the previous clef forward across measures that don't
+    redeclare one) + `handFromClefInEffect`. A collapsed grand staff now splits into both hands. A stable
+    single-staff part (music21 fragments, #70) is unaffected because clef-in-effect == its first clef.
+  - **OSMD API used:** `score.ts` reads `it.CurrentMeasureIndex` off the cloned cursor iterator each step
+    (public getter on `MusicPartManagerIterator`, preserved across `.clone()`) and looks up the timeline at
+    that measure. `readClefDeclarations` collects `{staffId, measureIndex, clef}` once; both lookups
+    (`buildStaffClefMap` for multi, `buildStaffClefTimeline` for single) are built from that one pass.
+  - **Tests:** the OSMD iterator is still not jsdom-mockable, so coverage lives on the new pure helpers
+    in `piano.ts` (`buildStaffClefTimeline` carry-forward / per-staff independence / undefined-before-first,
+    `handFromClefInEffect` treble->right, bass->left, undefined/other->unknown) plus two
+    `playback.test.ts` integration checks that compose timeline -> handFromClefInEffect -> `hasBothHands`:
+    a treble->bass single staff yields BOTH hands (true), a stable treble single staff stays one (false).
+    Suite 237 green, `npm run build` green. Live in-browser pass with a real icarus.pdf scan is the
+    post-merge QA gate (no OMR/PDF fixture in unit tests).
+
 - **2026-05-30 - Hand tagging is now CLEF-first so the per-hand controls also appear when the piano is two separate single-staff parts (not just a one-instrument grand staff).**
   Reported as "controls show on localhost but not in production". It was NOT a deploy gap: the prod
   bundle matched `main` byte-for-byte (same hash). The two screenshots simply loaded DIFFERENT files,

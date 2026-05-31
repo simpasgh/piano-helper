@@ -2,8 +2,13 @@ import type { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { ClefEnum, ClefInstruction } from "opensheetmusicdisplay";
 import type { VisNote } from "./visualizer";
 import type { Hand } from "./piano";
-import { handFromStaff, buildStaffClefMap } from "./piano";
-import type { StaffClefKind } from "./piano";
+import {
+  handFromStaff,
+  handFromClefInEffect,
+  buildStaffClefMap,
+  buildStaffClefTimeline,
+} from "./piano";
+import type { StaffClefKind, ClefDeclaration } from "./piano";
 
 export interface ScoreData {
   notes: VisNote[]; // drives audio scheduling and falling notes
@@ -11,18 +16,17 @@ export interface ScoreData {
   duration: number; // total seconds
 }
 
-// Reads the first clef declared on each staff so a note can be assigned a hand from its clef
-// rather than its staff position. Treble => right, bass => left, "other" for clefs with no
-// hand convention (C, percussion). The map is keyed by the staff's sheet-wide id
-// (Staff.idInMusicSheet) so it matches the lookup at the call site: the per-measure
-// staff-entry index can diverge from that id for exotic multi-instrument files, so we
-// resolve each entry back to its ParentStaff rather than trusting array position (issue #73
-// / PR #82 follow-up). buildStaffClefMap keeps the first clef seen per staff id.
-function readStaffClefs(
-  osmd: OpenSheetMusicDisplay,
-): Map<number, StaffClefKind> {
-  const declarations: { staffId: number; clef: StaffClefKind }[] = [];
-  for (const measure of osmd.Sheet.SourceMeasures) {
+// Reads every clef declaration in the score, tagged with its staff id and measure index, so
+// hand-tagging can consult either the FIRST clef per staff (multi-staff grand staff) or the
+// clef IN EFFECT at a note's measure (single collapsed staff, issue #87). Treble => right,
+// bass => left, "other" for clefs with no hand convention (C, percussion). Declarations are
+// keyed by the staff's sheet-wide id (Staff.idInMusicSheet) so they match the lookup at the
+// call site: the per-measure staff-entry index can diverge from that id for exotic
+// multi-instrument files, so we resolve each entry back to its ParentStaff rather than
+// trusting array position (issue #73 / PR #82 follow-up).
+function readClefDeclarations(osmd: OpenSheetMusicDisplay): ClefDeclaration[] {
+  const declarations: ClefDeclaration[] = [];
+  osmd.Sheet.SourceMeasures.forEach((measure, measureIndex) => {
     measure.FirstInstructionsStaffEntries?.forEach((entry) => {
       const staffId = entry?.ParentStaff?.idInMusicSheet;
       if (entry == null || staffId == null) return;
@@ -34,13 +38,13 @@ function readStaffClefs(
               : instruction.ClefType === ClefEnum.F
                 ? "bass"
                 : "other";
-          declarations.push({ staffId, clef });
+          declarations.push({ staffId, measureIndex, clef });
           break;
         }
       }
     });
-  }
-  return buildStaffClefMap(declarations);
+  });
+  return declarations;
 }
 
 // Walks the score with a cloned iterator (so the visible cursor isn't disturbed),
@@ -48,7 +52,18 @@ function readStaffClefs(
 export function extractScore(osmd: OpenSheetMusicDisplay): ScoreData {
   const bpm = osmd.Sheet.DefaultStartTempoInBpm || 120;
   const wholeNoteSeconds = (60 / bpm) * 4; // a whole note spans 4 quarter-note beats
-  const staffClefs = readStaffClefs(osmd);
+  const declarations = readClefDeclarations(osmd);
+  // Two lookups, chosen per note by the staff count of its instrument:
+  //  - First clef per staff (multi-staff grand staff): a transient mid-staff clef change on
+  //    the RH staff must not move those notes to the LH (issues #73/#82/#36).
+  //  - Clef in effect per measure (single collapsed staff, issue #87): an OMR scan can flatten
+  //    a grand staff onto one staff that switches treble -> bass mid-piece, where the clef at
+  //    the note's measure IS the correct hand.
+  const staffClefs = buildStaffClefMap(declarations);
+  const clefTimeline = buildStaffClefTimeline(
+    declarations,
+    osmd.Sheet.SourceMeasures.length,
+  );
 
   const it = osmd.cursor.iterator.clone();
   const notes: VisNote[] = [];
@@ -57,6 +72,7 @@ export function extractScore(osmd: OpenSheetMusicDisplay): ScoreData {
 
   while (!it.EndReached) {
     const time = it.currentTimeStamp.RealValue * wholeNoteSeconds;
+    const measureIndex = it.CurrentMeasureIndex; // preserved across the cloned iterator
     stepTimes.push(time);
     for (const entry of it.CurrentVoiceEntries) {
       for (const note of entry.Notes) {
@@ -67,17 +83,28 @@ export function extractScore(osmd: OpenSheetMusicDisplay): ScoreData {
         // right, bass => left) so the split is correct even when the file lists its staves
         // bass-first, AND whether the piano is one instrument with two staves or two
         // separate single-staff parts (music21 fragments do the latter; issue #70 follow-up).
-        // Staff position is only a fallback for clefs with no hand convention. Guard
-        // defensively so a malformed score (missing staff/instrument) degrades to "unknown".
+        // Guard defensively so a malformed score (missing staff/instrument) degrades to
+        // "unknown".
         const staff = note.ParentStaff;
         const staves = staff?.ParentInstrument?.Staves;
-        const hand: Hand = staff
-          ? handFromStaff(
+        let hand: Hand = "unknown";
+        if (staff) {
+          const staffCount = staves?.length ?? 1;
+          if (staffCount > 1) {
+            // True grand staff: first clef per staff, position fallback for C/percussion.
+            hand = handFromStaff(
               staffClefs.get(staff.idInMusicSheet),
               staves ? staves.indexOf(staff) : -1,
-              staves?.length ?? 1,
-            )
-          : "unknown";
+              staffCount,
+            );
+          } else {
+            // Single staff: use the clef in effect at this measure so a collapsed grand
+            // staff splits into hands (issue #87). A stable-clef single-staff part keeps
+            // its single hand, since clef-in-effect == its first clef.
+            const timeline = clefTimeline.get(staff.idInMusicSheet);
+            hand = handFromClefInEffect(timeline?.[measureIndex]);
+          }
+        }
         notes.push({ midi, time, duration: noteDuration, hand });
         duration = Math.max(duration, time + noteDuration);
       }
