@@ -12,13 +12,16 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const worker = readFileSync(`${root}omr-worker/worker.py`, "utf8");
 
 describe("OMR worker rasterization preprocessing (issue #109)", () => {
-  it("raises the rasterization DPI above the old 300", () => {
+  it("keeps the rasterization DPI in the #112-swept sweet spot", () => {
     const match = worker.match(/PDF_RASTER_DPI\s*=\s*(\d+)/);
     expect(match, "PDF_RASTER_DPI constant must exist").not.toBeNull();
     const dpi = Number(match![1]);
+    // #109 raised this from 300 to 400; the #112 DPI sweep on icarus.pdf then found 400
+    // was past oemer's sweet spot (it collapsed real LH triads) and 350 recovers more
+    // genuine chord tones with zero fabricated accidentals. Lock the swept value: above
+    // the old 300 baseline, at the measured 350, never drifting back up to the worse 400.
     expect(dpi).toBeGreaterThan(300);
-    // Stay within the Oracle Always Free VM memory/time budget.
-    expect(dpi).toBeLessThanOrEqual(600);
+    expect(dpi).toBe(350);
   });
 
   it("passes the DPI constant to pdftoppm (not a hardcoded 300)", () => {

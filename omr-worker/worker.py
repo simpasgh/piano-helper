@@ -48,23 +48,31 @@ DEFAULT_POLL_SECONDS = 5
 
 # Rasterization DPI for the PDF path. oemer exposes no DPI/quality knob of its own
 # (its CLI is just -o, --use-tf, --save-cache, -d/--without-deskew), so the raster we
-# hand it is the ONLY preprocessing lever we own. 400 (up from the old 300) gives the
-# ML engine denser staff-line and notehead pixels, which is the highest-leverage,
-# lowest-risk free fidelity gain (#109). It is deliberately conservative versus 600 to
-# stay within the Oracle Always Free ARM VM's memory/time budget: a single A4 page at
-# 400 DPI is ~3300x4675 px (~46 MP), and we may stitch several pages into one tall
-# image below, so the working bitmap stays bounded. Bump cautiously if the VM allows.
-PDF_RASTER_DPI = 400
+# hand it is the ONLY preprocessing lever we own. The #112 DPI sweep on icarus.pdf
+# (250/300/350/400/500, judged by recall AND fidelity against the source PDF, not raw
+# note count) found 350 is the sweet spot: it recovers the most genuine left-hand chord
+# tones (11 triads vs 4 at 400, ~3x the collapsed-LH-chord recovery #118 tracks) and the
+# highest total recall (123 notes vs 400's 109), preserves all 27 measures, and crucially
+# introduces ZERO accidentals on this accidental-free C-major score (DPI only changes
+# raster density, it cannot invent pitches, so this lever is fabrication-safe by
+# construction). 400 (the prior #109 value) turned out to be PAST oemer's sweet spot:
+# over-upscaling the noteheads HURT chord-tone separation, collapsing real triads to lone
+# bass notes. 500 starts dropping whole measures (25/27). Wall-clock is ~180s at every DPI
+# in this range, so 350 costs nothing in speed. NOTE: right-hand arpeggio/dropped-note
+# recall (#118 symptoms 1/2) is identical at every DPI (66 RH notes everywhere), so it is
+# an engine limit this lever cannot move; that stays with #88 (stronger engine) / #6
+# (human-in-the-loop correction UI).
+PDF_RASTER_DPI = 350
 
 # Resource guards for the stitched raster. The upload Function caps inputs at 10 MB
 # (src/omr-server.ts MAX_UPLOAD_BYTES), but a sparse VECTOR PDF compresses so well that
-# 10 MB can still hold hundreds of pages. At 400 DPI each A4 page is ~15.5 MP, so an
+# 10 MB can still hold hundreds of pages. At 350 DPI each A4 page is ~11.8 MP, so an
 # unbounded vertical stitch of a crafted many-page PDF would allocate a multi-GB RGB
 # bitmap on a box that also runs the oemer PyTorch/onnx stack: a real OOM that would
 # kill the always-on poller (the OS OOM-killer is not catchable by poll_once). Bound BOTH
 # the page count and the total stitched pixel area; exceeding either raises RuntimeError,
 # which poll_once turns into a clean failure sentinel instead of crashing the worker.
-# 60 pages * 15.5 MP ~= 930 MP is also the ceiling we hand oemer (well past any real score).
+# 60 pages * 11.8 MP ~= 708 MP is also the ceiling we hand oemer (well past any real score).
 MAX_STITCH_PAGES = 60
 MAX_STITCH_PIXELS = 1_000_000_000  # ~1 GP; RGB canvas ~3 GB worst case, then freed.
 
@@ -255,7 +263,7 @@ def stitch_pages_vertical(page_paths, dest_path):
 
     # Arm Pillow's decompression-bomb guard so an Image.open of a crafted page raises
     # rather than silently decoding a giant bitmap. MAX_STITCH_PIXELS comfortably exceeds
-    # one real 400 DPI A4 page (~15.5 MP), so legitimate pages are unaffected.
+    # one real 350 DPI A4 page (~11.8 MP), so legitimate pages are unaffected.
     Image.MAX_IMAGE_PIXELS = MAX_STITCH_PIXELS
 
     if len(page_paths) == 1:

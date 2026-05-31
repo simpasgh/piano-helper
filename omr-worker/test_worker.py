@@ -38,11 +38,15 @@ import worker  # noqa: E402
 Image = pytest.importorskip("PIL.Image")
 
 
-def test_dpi_is_raised_above_old_300():
-    # The old workflow rasterized at 300 DPI. #109 raises it for denser pixels.
-    assert worker.PDF_RASTER_DPI > 300
-    # Stay within the Always Free VM budget: do not let a future edit push it absurdly high.
-    assert worker.PDF_RASTER_DPI <= 600
+def test_dpi_is_in_the_swept_sweet_spot():
+    # The old workflow rasterized at 300 DPI; #109 raised it to 400 for denser pixels.
+    # The #112 sweep (250/300/350/400/500 on icarus.pdf, judged by recall AND fidelity
+    # vs the source PDF) then found 400 was PAST oemer's sweet spot and 350 recovers more
+    # genuine LH chord tones with zero fabricated accidentals. Pin the value to the swept
+    # range: above the old 300 baseline but not back up at the 400 that hurt chord
+    # separation. A future edit must not silently drift outside this measured band.
+    assert 300 < worker.PDF_RASTER_DPI <= 400
+    assert worker.PDF_RASTER_DPI == 350
 
 
 def test_oemer_command_disables_deskew_on_pdf_path():

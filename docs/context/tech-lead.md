@@ -30,6 +30,38 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-31 - #112 DPI SWEEP: lower PDF_RASTER_DPI 400 -> 350 (`fix/omr-dpi-sweep`, commit 6e62835). Pre-merge review APPROVE-WITH-NITS.**
+  Real sweep on icarus.pdf (clean 1-page vector, 27 bars, 4/4, C major, NATURAL LH block triads, NO accidentals).
+  Each DPI mirrored the worker pipeline exactly (pdftoppm -r DPI, then `oemer img --without-deskew`), parsed the
+  MusicXML, and the 350 output was rendered in MuseScore and eyeballed against the source:
+
+  | DPI | total | RH | LH | LH chords>=2 | LH triads>=3 | rests | measures | fabricated alters |
+  |-----|-------|----|----|----|----|----|----|----|
+  | 250 | 111 | 66 | 45 | 14 | 5 | 4 | 26 (lost 1) | 0 |
+  | 300 | 118 | 66 | 52 | 16 | 7 | 10 | 27 | 0 |
+  | 350 | 123 | 66 | 57 | 17 | 11 | 7 | 27 | 0 |
+  | 400 (was shipped) | 109 | 66 | 43 | 12 | 4 | 8 | 27 | 0 |
+  | 500 | 118 | 66 | 52 | 18 | 8 | 6 | 25 (lost 2) | 0 |
+
+  - **350 is the sweet spot:** max genuine LH chord-tone recovery (11 triads vs 400's 4), max total recall (123 vs
+    109), keeps all 27 measures, and EVERY recovered LH note is a diatonic C-major natural (m5 C-E-G, m7 A-C-E,
+    m8 A-C-F). 400 over-upscaled noteheads and HURT chord separation (collapsed triads to lone bass). 500 starts
+    dropping whole measures. Wall-clock ~180s at every DPI in range, so 350 costs nothing in speed.
+  - **DPI is fabrication-safe BY CONSTRUCTION** (the key contrast with reverted #113): it only changes raster
+    density. It cannot synthesize a pitch the engine did not read. Zero non-natural alters at every DPI confirms it.
+    This is the right kind of lever for #118 (close honest recall gaps WITHOUT inventing pitches).
+  - **Honest non-result: RH recall is DPI-invariant (66 notes at every DPI).** The RH arpeggio/dropped-note
+    symptom is an oemer engine limit, NOT a preprocessing problem. DPI cannot move it; it stays with #88 (stronger
+    engine) / #6 (correction UI). Recorded so nobody re-sweeps DPI hoping to fix RH.
+  - **Review verdict / NITS (both addressed before merge):** (a) a stale comment at worker.py:266 said "one real
+    400 DPI A4 page (~15.5 MP)"; the first commit updated the two MP figures in the resource-guard block but missed
+    this third one in `stitch_pages_vertical`. FIXED in the amended commit (now 350 DPI ~11.8 MP). Cosmetic only:
+    MAX_STITCH_PAGES/PIXELS are DPI-independent and the guard still holds (verified: 350-DPI A4 = 11.8 MP, 60 pages
+    = 708 MP, under the 1 GP cap, ~85x headroom for one page). (b) Pinning `== 350` is correct, not over-brittle: it locks a measured
+    decision so a future drift back to 400 trips the test loudly; the looser `300 < dpi <= 400` band is kept
+    alongside as the rationale guard. No security-review warranted: no transport/contract/parser/dep change, the
+    only edit is a raster-density constant; the OOM guards that bound untrusted multi-page input are untouched.
+
 - **2026-05-31 - #113 REVERTED. Chord-completion fabricated wrong notes; metric went up, fidelity went down.**
   Shipped #113 cleared every gate (CI green, review APPROVE-WITH-NITS, QA triad count rose) and was still
   WRONG on the user's own score. icarus.pdf has NATURAL LH block triads almost every bar; the rendered output
