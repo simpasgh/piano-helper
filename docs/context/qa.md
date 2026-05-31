@@ -4,6 +4,53 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-05-31: PR #103 / issue #57 (the on-screen keyboard now labels a black key with its
+  SHARP accidental name only WHILE that black key is lit/sounding during playback; resting and
+  merely-approaching black keys show no name; white-key labels unchanged) -> **PASS** on prod
+  (https://piano-helper.pages.dev, served bundle `index-5vnjGJHK.js`, which contains the new
+  `600 9px system-ui` black-key label font + the `c.has(s.midi)` active-gate + `#f2ecf8` light
+  fill; pre-#103 bundles drew no black-key names). Drove live in real Chromium (Playwright)
+  with an all-black-keys grand-staff fixture (`/tmp/qa-bk/black.musicxml`, `<staves>2</staves>`,
+  every note a sharp: RH C#5/D#5/F#5/G#5 then A#5/C#6/D#6/F#6, LH F#3/G#3/A#3/C#4 then
+  D#3/F#2/G#2/A#2). This is the FIRST live QA that clicks the #57 black-key cue. Read the labels
+  by hooking `CanvasRenderingContext2D.fillText` (the cue is canvas-painted on `#stage`, no DOM)
+  and tagging each draw by font: 9px = the new black-key label, 11px = the existing white-key
+  label, 12px = falling-bar names.
+  - LETTERS mode = the core PASS: across an 8-position seek sweep, the ONLY 9px draws were the
+    five sharps C# D# F# G# A#, every one in fill `#f2ecf8` at canvas y=260 (near the black-key
+    bottom, `top + keyboardHeight*0.62 - 4`), x = key center. Screenshots /tmp/qa-bk/modeB-p50.png
+    + modeB-p87.png show lit black keys (green=LH, red/magenta=RH) each with a light "G#"/"C#"/
+    "D#" centered low on the key face, while every resting black key is blank and the falling
+    bars above carry their own bar labels. Confirms lit->labeled, resting->blank.
+  - APPROACHING-but-not-sounding black keys are NOT labeled: in modeB-p50.png several black bars
+    are descending toward keys that show no face label; only the two keys actually sounding that
+    frame are labeled. The gate is `active`/sounding only (the minified `if(L<=0||c.size===0)
+    return` early-out + `c.has(s.midi)` filter), not the approaching set used for white keys.
+  - SOLFEGE mode = the spec-sanctioned CLEAN DROP (acceptable, NOT a bug): the 9px font IS set
+    (so the black branch runs) but ZERO black labels draw, because the widest solfege black label
+    "Sol#" measures 20.57px at 9px and the black-key width on prod is 15.26px (gutter 2px), so
+    `20.57+2=22.57 > 15.26` fails the all-or-nothing fit check and the whole black row is skipped.
+    Letters fits: widest "G#" = 13.06px, `13.06+2=15.06 <= 15.26`. Screenshot modeA-p50.png shows
+    lit black keys (red Re#, blue La#) with NO face label while the FALLING BARS still show the
+    solfege sharps (Fa#/Sol#/La#/Re#/Do#) unchanged. So solfege drops the key-face cue cleanly and
+    does not disturb the bar names.
+  - OFF mode: the 9px font is never even set (`saw9pxFontSet:false`), no labels. Resting frame
+    (seek to end, nothing sounding): ZERO black labels. Both correct.
+  - REGRESSION: white-key label path intact (the `600 11px system-ui` font is still set every
+    render alongside the new 9px), `#hand-mutes` visible for this grand staff (display:flex, rect
+    457.875x29.78), falling-bar names render in all modes. The change is purely additive (a new
+    black-key branch after the white-key one). CONSOLE: 0 errors, 0 pageerrors across load +
+    seek sweep + all three label modes. This CLOSES #57.
+  - METHOD note for black-key (and any canvas) labels: hook `fillText` and TAG BY `this.font`
+    to separate the 9px black-key cue from the 11px white-key labels and 12px bar names in one
+    pass; also wrap the `font` SETTER to learn whether the black branch even ran (`saw9pxFontSet`)
+    vs was reached-but-fit-dropped (font set, zero 9px draws) vs never reached (mode off). To
+    prove a "clean drop" is the width fit and not a bug, read the black-key width by hooking
+    `fillRect` (the narrow key rects; here 15.26px) and compare to `measureText(label)` at 9px.
+    Default boot mode is Solfege; `#names-btn` cycles Solfege->Letters->Off. Drivers (transient,
+    deleted after): qa-bk-drive.mjs / qa-bk-fit.mjs / qa-bk-keys.mjs in worktree root; fixture +
+    screenshots persist at /tmp/qa-bk/.
+
 - 2026-05-31: PR #99 / issues #56 + #58 (note labels respect the sheet's WRITTEN accidental
   spelling: a flat-key score shows "Db"/"Reb" instead of the always-sharp "C#"/"Do#", on BOTH
   the falling-notes bars AND the synced sheet overlay, in BOTH letter and solfege modes;
