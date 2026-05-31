@@ -4,6 +4,42 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-05-31: PR #99 / issues #56 + #58 (note labels respect the sheet's WRITTEN accidental
+  spelling: a flat-key score shows "Db"/"Reb" instead of the always-sharp "C#"/"Do#", on BOTH
+  the falling-notes bars AND the synced sheet overlay, in BOTH letter and solfege modes;
+  octaves stay MIDI-derived; audio-derived scores with no notation still default to sharps) ->
+  **PASS** on prod (https://piano-helper.pages.dev, served bundle `index-BFLy4oSE.js`, which
+  contains the flat solfege syllables + `FundamentalNote`/`TransposedPitch` spelling pipeline,
+  10 hits on the Reb/Mib/Lab/Sib/Solb/Fab/Dob token set; pre-fix bundles had no flat solfege).
+  Drove live in real Chromium (Playwright). Built a Db-major grand-staff fixture
+  (`/tmp/qa-flats/db-major.musicxml`, `<staves>2</staves>`, `<fifths>-5</fifths>`, every note
+  written with explicit `<alter>-1</alter>`): treble RH Db5 Eb5 Gb5 Ab5 / Bb4 Db5, bass LH Bb2
+  Eb3 / Ab2 Gb2. This is the FIRST live QA that actually clicks the #56/#58 feature.
+  - SHEET-OVERLAY labels (read EXACTLY from the `#sheet-labels .sheet-label` span text, not a
+    screenshot OCR): solfege mode = ["Reb","Sib","Mib","Solb","Mib","Lab","Sib","Lab","Reb",
+    "Solb"]; letters mode = ["Db","Bb","Eb","Gb","Eb","Ab","Bb","Ab","Db","Gb"]. All 10 notes
+    flat-spelled, ZERO sharps. Pre-fix every one of these would have read the sharp enharmonic
+    (Reb->Do#, Sib->La#, Mib->Re#, Solb->Fa#, Lab->Sol#, and Db->C#, etc).
+  - FALLING-NOTE BAR labels (canvas, read by stage screenshot since the names are painted on
+    `#stage`, not DOM): solfege bars show Solb/Lab/Mib/Sib (LH lower-left cluster) + Reb/Sib/
+    Lab/Solb/Mib/Reb (RH upper-right). Letters bars show Gb2/Ab2/Eb3/Bb2 (LH) + Db5/Bb4/Ab5/
+    Gb5/Eb5/Db5 (RH). Flats everywhere, no "#".
+  - OCTAVES correct and MIDI-derived: letter-mode bars read Db5 Eb5 Gb5 Ab5 / Bb4 Db5 (treble)
+    and Bb2 Eb3 / Ab2 Gb2 (bass), matching the fixture exactly. The treble Bb4 vs bass Bb2
+    octave distinction renders right (so the flat spelling did not disturb octave bookkeeping).
+  - SURFACES MATCH: the synced sheet overlay labels and the falling-bar labels are the SAME
+    spellings, and both sit over a rendered grand staff with a flat key signature (5 flats in
+    the brace). Screenshots: /tmp/qa-flats/01-solfege-full.png + 02-letters-full.png show the
+    sheet + bars together; 01b/02b-*-stage.png are the cropped canvas reads.
+  - CONSOLE: 0 errors, 0 pageerrors across load + names-cycle (solfege->letters). Hand-mute +
+    Balance controls correctly visible (two-staff grand staff). This CLOSES #56 and #58.
+  - METHOD note (fast + reliable for label QA): the sheet overlay writes literal
+    `<span class="sheet-label">` text, so read those spans directly for an EXACT label assertion
+    (no OCR). The falling-BAR names are canvas-painted, so those must be read by screenshot.
+    Default label mode on boot is "solfege" (localStorage `pianoHelper.noteNames`); `#names-btn`
+    cycles solfege->letters->off. Driver (transient): qa-flats-drive.mjs in worktree root
+    (deleted after); fixture + screenshots persist at /tmp/qa-flats/.
+
 - 2026-05-31: issue #88 / PR #97 (upgrade OMR worker to oemer 0.1.8 on numpy 2.x so the
   primary engine stops crashing on `np.int` and scanned grand-staff piano scores stop
   collapsing into one part) -> **PASS** on prod (https://piano-helper.pages.dev, bundle
