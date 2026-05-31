@@ -23,6 +23,21 @@ describe("layoutSheetLabels", () => {
     expect(layoutSheetLabels(notes, "solfege")[0].text).toBe("Do#");
   });
 
+  // Issues #56/#58: the overlay must print the sheet's flat spelling, not the always-sharp
+  // enharmonic, so it agrees with the staff beneath it.
+  it("honors a note's flat spelling over the always-sharp MIDI name", () => {
+    // MIDI 61 sounds the same as C#, but the sheet prints it as Db (step D, alter -1).
+    const flatDb: NotePosition[] = [{ midi: 61, x: 10, y: 20, spelling: { letter: "D", alter: -1 } }];
+    expect(layoutSheetLabels(flatDb, "letters")[0].text).toBe("Db");
+    expect(layoutSheetLabels(flatDb, "solfege")[0].text).toBe("Reb");
+  });
+
+  it("falls back to the always-sharp name when a note has no spelling (no regression)", () => {
+    const noSpelling: NotePosition[] = [{ midi: 61, x: 10, y: 20 }];
+    expect(layoutSheetLabels(noSpelling, "letters")[0].text).toBe("C#");
+    expect(layoutSheetLabels(noSpelling, "solfege")[0].text).toBe("Do#");
+  });
+
   it("stacks a 3-note chord top-note-highest, one label per note, 11px gap", () => {
     // Three noteheads at the same x; y grows downward so the highest pitch (G4)
     // has the smallest y (top of staff).

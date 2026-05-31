@@ -1,5 +1,6 @@
 import type { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { layoutSheetLabels, type NotePosition } from "./sheet-labels";
+import { readSpelling } from "./score";
 import type { LabelMode } from "./piano";
 
 // DOM/OSMD glue for the sheet note-name overlay (issue #17). The pure stacking
@@ -50,7 +51,10 @@ function readNotePositions(
             if (rect.width === 0 && rect.height === 0) continue;
             const x = rect.left - containerRect.left + scrollLeft + rect.width / 2;
             const y = rect.top - containerRect.top + scrollTop;
-            positions.push({ midi: source.halfTone + 12, x, y });
+            // Read the printed spelling so the overlay name matches the staff (#56/#58).
+            // halfTone is the transposed pitch, so read the transposed spelling to match.
+            const spelling = readSpelling(source.TransposedPitch ?? source.Pitch);
+            positions.push({ midi: source.halfTone + 12, x, y, spelling });
           }
         }
       }

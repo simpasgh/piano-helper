@@ -26,12 +26,14 @@ import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 beforeAll(() => {
   HTMLCanvasElement.prototype.getContext = () => null as unknown as null;
 });
-import { readClefDeclarations } from "./score";
+import { readClefDeclarations, readSpelling } from "./score";
 import {
   buildStaffClefMap,
   buildStaffClefTimeline,
   handFromClefInEffect,
   handFromStaff,
+  midiToLabel,
+  type NoteSpelling,
 } from "./piano";
 
 // A single-part, single-staff score: treble clef in measure 1, a clef change to bass at the
@@ -82,6 +84,49 @@ const GRAND_STAFF = `<?xml version="1.0" encoding="UTF-8"?>
   </part>
 </score-partwise>`;
 
+// A short Db-major phrase whose printed spelling is flats (the <alter>-1 degrees). This pins
+// that OSMD's Pitch.Accidental / FundamentalNote API reports flats for a real <alter>-1 parse,
+// which is the exact data readSpelling threads into the labels (issues #56, #58). A natural C
+// (no <alter>) and a real sharp (<alter>1) are included so naturals/sharps are covered too.
+const DB_MAJOR_FLATS = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><key><fifths>-5</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>D</step><alter>-1</alter><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>E</step><alter>-1</alter><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>G</step><alter>-1</alter><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>A</step><alter>-1</alter><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>B</step><alter>-1</alter><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>F</step><alter>1</alter><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>D</step><alter>-1</alter><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+// Flatten every sounding note's Pitch out of a parsed Sheet, in document order.
+function pitchesOf(osmd: OpenSheetMusicDisplay) {
+  const pitches = [];
+  for (const measure of osmd.Sheet.SourceMeasures) {
+    for (const container of measure.VerticalSourceStaffEntryContainers) {
+      for (const staffEntry of container.StaffEntries) {
+        if (!staffEntry) continue;
+        for (const voiceEntry of staffEntry.VoiceEntries) {
+          for (const note of voiceEntry.Notes) {
+            if (note.isRest()) continue;
+            pitches.push(note.TransposedPitch ?? note.Pitch);
+          }
+        }
+      }
+    }
+  }
+  return pitches;
+}
+
 async function parse(xml: string): Promise<OpenSheetMusicDisplay> {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -126,5 +171,39 @@ describe("readClefDeclarations against a real OSMD parse (issue #90)", () => {
       handFromStaff(clefMap.get(trebleStaff.idInMusicSheet), 0, 2),
     ).toBe("right");
     expect(handFromStaff(clefMap.get(bassStaff.idInMusicSheet), 1, 2)).toBe("left");
+  });
+});
+
+describe("readSpelling against a real OSMD parse (issues #56, #58)", () => {
+  it("reads the printed flat spelling, not the always-sharp enharmonic", async () => {
+    const osmd = await parse(DB_MAJOR_FLATS);
+    const spellings = pitchesOf(osmd).map(readSpelling);
+
+    // Document order: Db Eb Gb Ab | Bb C(natural) F# Db
+    const expected: NoteSpelling[] = [
+      { letter: "D", alter: -1 },
+      { letter: "E", alter: -1 },
+      { letter: "G", alter: -1 },
+      { letter: "A", alter: -1 },
+      { letter: "B", alter: -1 },
+      { letter: "C", alter: 0 },
+      { letter: "F", alter: 1 },
+      { letter: "D", alter: -1 },
+    ];
+    expect(spellings).toEqual(expected);
+  });
+
+  it("threads those spellings into flat labels in both modes (the user-visible outcome)", async () => {
+    const osmd = await parse(DB_MAJOR_FLATS);
+    const spellings = pitchesOf(osmd).map(readSpelling);
+    // The four flat scale degrees, MIDI-pitch-class agnostic: the label honors the sheet.
+    const flats = spellings.slice(0, 5); // Db Eb Gb Ab Bb
+    const midis = [61, 63, 66, 68, 70]; // their sounding MIDI (sharp-side pitch classes)
+    const letters = ["Db", "Eb", "Gb", "Ab", "Bb"];
+    const solfege = ["Reb", "Mib", "Solb", "Lab", "Sib"];
+    flats.forEach((spelling, i) => {
+      expect(midiToLabel(midis[i], "letters", spelling)).toBe(letters[i]);
+      expect(midiToLabel(midis[i], "solfege", spelling)).toBe(solfege[i]);
+    });
   });
 });

@@ -240,19 +240,82 @@ const SOLFEGE_CLASSES = [
   "Do", "Do#", "Re", "Re#", "Mi", "Fa", "Fa#", "Sol", "Sol#", "La", "La#", "Si",
 ];
 
+// --- Notation spelling (issues #56, #58): respect the sheet's printed accidentals. ---
+
+// The diatonic letter of a note as written on the staff. A sheet's spelling is the
+// letter (step) plus an accidental, e.g. "Db" is step D with a flat, not "C#". We carry
+// this from the score (OSMD Pitch / MusicXML step+alter) so labels match the synced sheet
+// the learner reads, instead of recomputing an always-sharp name from MIDI.
+export type NoteLetter = "C" | "D" | "E" | "F" | "G" | "A" | "B";
+
+// A note's printed spelling: its diatonic letter and how many semitones the accidental
+// shifts it (MusicXML <alter>: +1 sharp, -1 flat, +2 double-sharp, -2 double-flat, 0 natural).
+// MIDI still drives color, octave, and geometry; this only changes the printed NAME, and
+// only for sheet-derived scores. Audio-transcribed scores omit it and fall back to sharps.
+export interface NoteSpelling {
+  letter: NoteLetter;
+  alter: number;
+}
+
+// Solfege syllable per diatonic letter (fixed-Do), "Si" (not "Ti") per the #11 spec.
+const LETTER_TO_SOLFEGE: Record<NoteLetter, string> = {
+  C: "Do",
+  D: "Re",
+  E: "Mi",
+  F: "Fa",
+  G: "Sol",
+  A: "La",
+  B: "Si",
+};
+
+// The accidental suffix for a spelling: sharps stack "#", flats stack "b". Caps at the
+// double accidental the notation realistically carries; anything more is clamped so a
+// pathological alter never produces a runaway string. A natural (alter 0) adds nothing.
+function accidentalSuffix(alter: number): string {
+  if (alter > 0) return "#".repeat(Math.min(alter, 2));
+  if (alter < 0) return "b".repeat(Math.min(-alter, 2));
+  return "";
+}
+
+// The pitch-class name from an explicit spelling (no octave). Letters mode prints the
+// diatonic letter + accidental (e.g. "Db"); solfege mode prints the syllable + accidental
+// (e.g. "Reb"). This is what makes a flat-key piece read its flats on both label surfaces.
+function spellingToLabel(spelling: NoteSpelling, mode: LabelMode): string {
+  if (mode === "off") return "";
+  const base =
+    mode === "solfege" ? LETTER_TO_SOLFEGE[spelling.letter] : spelling.letter;
+  return `${base}${accidentalSuffix(spelling.alter)}`;
+}
+
 // Pitch-class label only (no octave). Returns "" for off mode.
 // Callers that want an octave (letter-mode falling bars) use midiToBarLabel.
-export function midiToLabel(midi: number, mode: LabelMode): string {
+//
+// When `spelling` is present (sheet-derived scores) the printed name follows the sheet's
+// accidentals, so a Db reads "Db"/"Reb", not the always-sharp "C#"/"Do#". When absent
+// (audio-transcribed scores, issue #19) it falls back to the always-sharp pitch-class
+// arrays, the historical default that needs no notation.
+export function midiToLabel(
+  midi: number,
+  mode: LabelMode,
+  spelling?: NoteSpelling,
+): string {
   if (mode === "off") return "";
+  if (spelling) return spellingToLabel(spelling, mode);
   const pc = ((midi % 12) + 12) % 12;
   return mode === "solfege" ? SOLFEGE_CLASSES[pc] : LETTER_CLASSES[pc];
 }
 
 // Label for a falling bar: solfege has no octave; letters append the octave
-// (scientific pitch), e.g. "C4". Octave convention matches midiToName.
-export function midiToBarLabel(midi: number, mode: LabelMode): string {
+// (scientific pitch), e.g. "C4". Octave convention matches midiToName. The octave is
+// always taken from MIDI (the sounding pitch), even when a spelling is supplied, so a
+// Cb4 vs B3 enharmonic does not need its own octave bookkeeping for the common case.
+export function midiToBarLabel(
+  midi: number,
+  mode: LabelMode,
+  spelling?: NoteSpelling,
+): string {
   if (mode === "off") return "";
-  const base = midiToLabel(midi, mode);
+  const base = midiToLabel(midi, mode, spelling);
   if (mode === "letters") {
     const octave = Math.floor(midi / 12) - 1;
     return `${base}${octave}`;

@@ -30,6 +30,44 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-31 - #56/#58 SHIPPED: labels now respect the sheet's printed accidentals (show flats), with always-sharp only as the no-notation fallback.**
+  Closes the #40 spike's high-value slice. The fix threads each note's printed spelling alongside `midi`
+  through BOTH extraction points and into a spelling-aware label function; MIDI still drives color, octave,
+  and geometry (only the printed NAME changed, per the scope discipline).
+  - **Data model:** new `NoteSpelling { letter: NoteLetter; alter: number }` in `src/piano.ts` (alter is the
+    MusicXML `<alter>` semitone shift: +1 sharp, -1 flat, +-2 doubles, 0 natural). Added as an optional
+    `spelling?` field on `VisNote` (`src/visualizer.ts`) and `NotePosition` (`src/sheet-labels.ts`). Audio
+    scores omit it, so they fall back unchanged.
+  - **Label fns:** `midiToLabel(midi, mode, spelling?)` and `midiToBarLabel(midi, mode, spelling?)` now take an
+    optional spelling. When present they render `letter`+accidental (letters) or fixed-Do syllable+accidental
+    (solfege) via `LETTER_TO_SOLFEGE` + `accidentalSuffix` (#58: "Reb","Mib","Solb","Lab","Sib", and "##"/"bb"
+    for doubles, clamped at double). When absent they use the historical always-sharp `LETTER_CLASSES` /
+    `SOLFEGE_CLASSES`. Octave is ALWAYS from MIDI even with a spelling (a Cb4/B3 enharmonic keeps the sounding
+    octave; acceptable for the common case, no separate octave bookkeeping).
+  - **OSMD extraction (`src/score.ts`):** new exported `readSpelling(pitch)` maps `Pitch.FundamentalNote`
+    (NoteEnum C=0,D=2,E=4,F=5,G=7,A=9,B=11) -> letter and `Pitch.Accidental` (AccidentalEnum SHARP=0,FLAT=1,
+    NONE=2,NATURAL=3,DOUBLESHARP=4,DOUBLEFLAT=5,...) -> alter. Reads `note.TransposedPitch ?? note.Pitch`
+    because `note.halfTone` (the MIDI source) is the TRANSPOSED value, so the spelling must come from the
+    transposed pitch to agree. `sheet-overlay.ts` imports the same `readSpelling` (single source of truth) and
+    reads `source.TransposedPitch ?? source.Pitch` off the GraphicalNote's `sourceNote`.
+  - **OSMD API gotchas (verified against a real jsdom parse):** (1) AccidentalEnum is NOT a simple
+    sharp=+1/flat=-1 numeric; the .d.ts explicitly warns "do not use the number values for calculation",
+    so map via an explicit switch, never arithmetic on the enum. (2) `FundamentalNote` is a NoteEnum whose
+    values are the diatonic SEMITONE offsets (D=2, not 1), not a 0..6 step index, so map by the enum members,
+    not by `value`. (3) Microtonal/exotic accidentals (quarter-tones, slash, sori/koron) have no plain-letter
+    name or piano key, so `readSpelling` returns `undefined` for them and the note falls back to the sharp
+    default rather than inventing a spelling.
+  - **Tests (+12, suite 272 -> 284):** `piano.test.ts` covers the pure mapping (flat letter + flat solfege for
+    the Db-major degrees, always-sharp fallback with no spelling, naturals, sharps, double accidentals, off
+    mode). `score.test.ts` adds a REAL-OSMD-parse test (the strong one): a `<alter>-1` Db-major fixture loaded
+    through `osmd.load()`, walked via `SourceMeasures[].VerticalSourceStaffEntryContainers[].StaffEntries[].
+    VoiceEntries[].Notes[]`, asserting `readSpelling` returns flats/natural/sharp and that they thread into
+    "Db"/"Reb" labels. `sheet-labels.test.ts` asserts the overlay honors the flat spelling and falls back
+    without one. Build + 284 tests green.
+  - **Post-merge QA gate:** loading an actual flat-key MusicXML and reading the on-bar + overlay names in a
+    real browser is not reproducible from a static preview without a fixture; the real-parse test pins the
+    load-bearing OSMD extraction, the visual confirm is the live QA pass.
+
 - **2026-05-31 - #93 scan-cancel left a prior score's controls stuck disabled until the in-flight /api/omr settled.**
   Follow-up to #86. `cancelScanOverlay` only called `setBusyUI(false)` + `restoreSheetName()` in its
   `if (wasAudio)` branch, so the SCAN path's Play/Export/seek/step stayed disabled (and the toolbar kept

@@ -28,6 +28,7 @@ import {
   LABEL_CHAR_WIDTH_RATIO,
   LABEL_GUTTER,
   type LabelNote,
+  type NoteSpelling,
 } from "./piano";
 
 // MIDI helpers for the glyph-ink tests: pitch class 0 = C (=> Do), 60 = C4.
@@ -459,6 +460,78 @@ describe("midiToBarLabel", () => {
 
   it("returns an empty string in off mode", () => {
     expect(midiToBarLabel(60, "off")).toBe("");
+  });
+});
+
+// Issues #56 (respect the sheet's flat spelling) and #58 (flat solfege syllables). When a
+// note carries an explicit spelling the label follows the sheet's accidentals; when it does
+// not (audio-transcribed scores) it falls back to the historical always-sharp name.
+describe("midiToLabel / midiToBarLabel with notation spelling (#56, #58)", () => {
+  // A Db-major scale's flatted degrees: each is the SHARP-spelled MIDI pitch class but the
+  // sheet prints it as a flat (step letter + alter -1).
+  const flatDb: { midi: number; spelling: NoteSpelling; letter: string; solfege: string }[] = [
+    { midi: 61, spelling: { letter: "D", alter: -1 }, letter: "Db", solfege: "Reb" }, // Db (pc 1)
+    { midi: 63, spelling: { letter: "E", alter: -1 }, letter: "Eb", solfege: "Mib" }, // Eb (pc 3)
+    { midi: 66, spelling: { letter: "G", alter: -1 }, letter: "Gb", solfege: "Solb" }, // Gb (pc 6)
+    { midi: 68, spelling: { letter: "A", alter: -1 }, letter: "Ab", solfege: "Lab" }, // Ab (pc 8)
+    { midi: 70, spelling: { letter: "B", alter: -1 }, letter: "Bb", solfege: "Sib" }, // Bb (pc 10)
+  ];
+
+  it("(a) shows the flat letter name when the note is flat-spelled", () => {
+    for (const { midi, spelling, letter } of flatDb) {
+      expect(midiToLabel(midi, "letters", spelling)).toBe(letter);
+    }
+  });
+
+  it("(a) shows the flat solfege syllable when the note is flat-spelled (#58)", () => {
+    for (const { midi, spelling, solfege } of flatDb) {
+      expect(midiToLabel(midi, "solfege", spelling)).toBe(solfege);
+    }
+  });
+
+  it("(a) appends the octave to a flat letter name on the falling bar", () => {
+    // Db4 / Eb4 are MIDI 61 / 63, octave 4; the flat is preserved, octave from MIDI.
+    expect(midiToBarLabel(61, "letters", { letter: "D", alter: -1 })).toBe("Db4");
+    expect(midiToBarLabel(63, "letters", { letter: "E", alter: -1 })).toBe("Eb4");
+    // Solfege bar label stays octave-free.
+    expect(midiToBarLabel(61, "solfege", { letter: "D", alter: -1 })).toBe("Reb");
+  });
+
+  it("(b) falls back to the always-sharp name when no spelling is given (no regression)", () => {
+    // Same five pitches, no spelling => the historical always-sharp output, unchanged.
+    expect(midiToLabel(61, "letters")).toBe("C#");
+    expect(midiToLabel(61, "solfege")).toBe("Do#");
+    expect(midiToBarLabel(61, "letters")).toBe("C#4");
+    expect(midiToBarLabel(70, "solfege")).toBe("La#");
+  });
+
+  it("(c) renders naturals correctly from a spelling (no accidental suffix)", () => {
+    // A C natural spelled as step C, alter 0 prints just the letter / syllable.
+    expect(midiToLabel(60, "letters", { letter: "C", alter: 0 })).toBe("C");
+    expect(midiToLabel(60, "solfege", { letter: "C", alter: 0 })).toBe("Do");
+    expect(midiToBarLabel(60, "letters", { letter: "C", alter: 0 })).toBe("C4");
+    // A B natural (pc 11) spelled as step B.
+    expect(midiToLabel(71, "solfege", { letter: "B", alter: 0 })).toBe("Si");
+  });
+
+  it("(c) renders sharps correctly from a spelling (matches the sharp default)", () => {
+    expect(midiToLabel(61, "letters", { letter: "C", alter: 1 })).toBe("C#");
+    expect(midiToLabel(61, "solfege", { letter: "C", alter: 1 })).toBe("Do#");
+    expect(midiToBarLabel(61, "letters", { letter: "C", alter: 1 })).toBe("C#4");
+    expect(midiToLabel(70, "solfege", { letter: "A", alter: 1 })).toBe("La#");
+  });
+
+  it("renders double accidentals when the sheet spells them", () => {
+    // Fx (F double-sharp, sounds as G, pc 7) and Gbb (G double-flat, sounds as F, pc 5).
+    expect(midiToLabel(67, "letters", { letter: "F", alter: 2 })).toBe("F##");
+    expect(midiToLabel(65, "letters", { letter: "G", alter: -2 })).toBe("Gbb");
+    expect(midiToLabel(67, "solfege", { letter: "F", alter: 2 })).toBe("Fa##");
+    expect(midiToLabel(65, "solfege", { letter: "G", alter: -2 })).toBe("Solbb");
+  });
+
+  it("is silent in off mode even with a spelling", () => {
+    expect(midiToLabel(61, "off", { letter: "D", alter: -1 })).toBe("");
+    expect(midiToBarLabel(61, "off", { letter: "D", alter: -1 })).toBe("");
   });
 });
 
