@@ -130,6 +130,27 @@
                 </svg>
                 <span class="btn-label" id="names-label">Names: Solfege</span>
               </button>
+              <button
+                id="correct-btn"
+                class="toggle"
+                type="button"
+                aria-pressed="false"
+                title="Correct mode: pause and fix wrong notes from the scan"
+              >
+                <span class="btn-label">Correct</span>
+              </button>
+              <div
+                id="note-edit"
+                class="note-edit"
+                role="group"
+                aria-label="Edit selected note"
+                hidden
+              >
+                <span id="note-edit-readout" class="note-edit-readout"></span>
+                <button id="pitch-down-btn" class="step-btn" type="button" title="Pitch down a semitone (-)" aria-label="Pitch down a semitone">-</button>
+                <button id="pitch-up-btn" class="step-btn" type="button" title="Pitch up a semitone (+)" aria-label="Pitch up a semitone">+</button>
+                <button id="delete-note-btn" class="step-btn" type="button" title="Delete this note (Delete)" aria-label="Delete this note">Delete</button>
+              </div>
               <div id="hand-mutes" class="hand-mutes" role="group" aria-label="Mute by hand" hidden>
                 <button
                   id="mute-right-btn"
@@ -295,6 +316,7 @@
       </header>
       <div id="sheet"></div>
       <canvas id="stage"></canvas>
+      <span id="edit-live" class="visually-hidden" aria-live="polite"></span>
       <div
         id="scan-overlay"
         class="scan-overlay"

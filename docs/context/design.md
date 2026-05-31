@@ -3,6 +3,122 @@
 UX, visual design, interaction decisions. Append durable learnings at the top of the
 relevant section, dated.
 
+## OMR correction UI v1 (issue #6 / #6a): select + nudge pitch + delete + add (interaction spec)
+
+- **2026-05-31 - Build-ready interaction + visual spec for the first shippable correction
+  slice. Edits run against the in-memory `score.notes` array; the falling view and audio
+  re-sync for free via `visualizer.setNotes` + the existing Part rebuild (`loadNotes`). The
+  OSMD sheet is NOT written back in v1.**
+
+  ### Decision 1 (BLOCKING) - sheet divergence: keep the sheet authoritative, mark the EDIT on the falling view, banner the divergence. Chosen (c)+(a), rejected (b).
+
+  When an edit makes the falling view disagree with the printed OSMD sheet, the sheet stays
+  visible and UNCHANGED (it is still the user's ground truth, the thing they are checking
+  against), and the DIVERGENCE is made legible on the falling side plus a one-line app-level
+  notice. Specifically:
+  - **Edited notes wear a persistent "edited" marker on the falling bar** (a thin dashed
+    `--accent` brass outline around the whole bar, drawn after the body fill, independent of
+    the #27 contact stroke and #131 active fill so it reads at any moment). This is the (c)
+    leg: the bars the user changed are always identifiable, so "this no longer matches the
+    sheet" is visible per-note, not just globally. Deleted notes leave no bar (nothing to
+    mark); added notes get the same dashed marker since they too are absent from the sheet.
+  - **A single quiet status line** appears once the score has any edit: "Edited. The sheet
+    below still shows the original scan." in the existing `#track-status` slot styling
+    (muted ivory). This is the (a) leg: it names the divergence honestly in one place
+    without nagging. It clears on a fresh load.
+  - **Rejected (b) hide/dim the sheet:** the synced sheet is the differentiator AND the
+    reference the user is correcting against. Dimming it removes the very thing that lets
+    them judge whether their fix is right. Divergence is the honest state of a half-corrected
+    score, so SHOW it, do not hide it. Writing back to the sheet (closing the divergence) is
+    real value but is the OSMD-round-trip research problem (#6d); deferring it is why the
+    marker + banner exist as the honest interim.
+  - **Why authoritative-sheet over authoritative-falling:** the user trusts what they
+    uploaded. Until we can re-render the sheet from edits, the falling view is the "working
+    copy" and the sheet is the "original" - exactly the mental model the banner states.
+
+  ### Decision 2 - selection + edit affordances
+
+  - **Select:** click/tap a falling bar. Hit-test against the same geometry
+    `drawFallingNotes` already computes (x, top, w, barHeight per visible note); pick the
+    topmost bar under the pointer. Requires a stable id on `VisNote` (Tech Lead adds `id`).
+    Only visible (on-screen) bars are selectable in v1; to reach a note, seek/scrub it into
+    the lane. Keyboard: Tab moves focus to the stage; Left/Right arrows are already taken by
+    prev/next-note and Space by play, so selection uses **Up/Down to move the selection to the
+    nearest earlier/later onset** while the stage is focused.
+  - **Selected state:** solid 2px `--focus-ring` (#f0c66b) outline around the bar plus a soft
+    brass halo (canvas `shadowColor --accent-glow, shadowBlur 12`), drawn over the dashed
+    edited-marker if both apply. One selection at a time.
+  - **Edit controls = a small floating "edit panel" anchored near the selected bar**, NOT
+    inline icons on every bar (inline buttons on fast-falling bars are un-clickable and clutter
+    the lane). The panel is a compact horizontal toolbar that appears on selection, pinned just
+    above the keybed at the bar's x (clamped on-screen); it does not chase the falling bar.
+    Contents, left to right:
+    - **Pitch down** icon button (downward chevron), aria "Lower a semitone", shortcut **`-`**.
+    - **Pitch up** icon button (upward chevron), aria "Raise a semitone", shortcut **`+`**.
+    - Live **note readout** between them (e.g. "C4" / "Do4") so the user sees the pitch as they
+      nudge, in the current Names mode.
+    - **Delete** icon button (trash glyph), aria "Delete this note", shortcut
+      **Delete/Backspace**.
+    - Close affordance: Escape, or click empty stage, just deselects.
+  - **Add a missed note (full-epic scope, kept minimal):** a single **"Add note"** affordance.
+    Enter add-submode from a small "+ Add note" text button shown in the panel's empty state
+    (when Correct mode is on and nothing is selected, see Decision 3). In add-submode the
+    pointer is a crosshair; a click on the lane creates a note at that key (x -> nearest key ->
+    midi) and that time (y -> currentTime offset via pps), default duration one beat (fallback
+    0.5s), hand "unknown". The new note auto-selects so the user can immediately nudge its
+    pitch. Escape cancels. Copy: "Add note" / while armed "Click the lane to place a note. Esc
+    to cancel."
+  - **All edit copy uses ASCII only, no em dashes.**
+
+  ### Decision 3 - mode model: a distinct, explicit "Correct" mode toggle. Editable while paused; NOT while playing.
+
+  - Correction is **OFF by default** and toggled by a new ghost toolbar button **"Correct"**
+    (Heroicons `pencil-square`, outline; in `group-settings` next to Names). `aria-pressed`
+    mirrors #37's pattern. When ON, the stage shows the selection cursor / hit-testing and the
+    edit panel; when OFF, the stage is purely a player (today's behavior, zero overhead).
+    Always-on was rejected: hit-testing every click would steal taps from a user who just
+    wants to watch, and the marker/banner machinery should not run for non-editors.
+  - **Coexistence with playback:** entering Correct mode **pauses** playback if playing; the
+    transport stays usable (scrub/step to bring a note into the lane), but **editing is only
+    allowed while paused.** Pressing Play while in Correct mode keeps the mode on but
+    **suspends selection** (panel hides, bars not clickable) until paused again, so a moving
+    target is never edited. You correct a still frame, you watch it move. Edits apply on
+    pause-resume since they already rebuilt the Part.
+
+  ### Decision 4 - accessibility + discoverability
+
+  - **Discovery:** on the FIRST successful scan/transcribe load, show a one-time dismissible
+    tip in `#track-status`: "Scanned notes can be wrong. Click Correct to fix pitches or
+    remove stray notes." (Direct MusicXML loads, trusted, get no tip.) The "Correct" button is
+    a permanent labeled toolbar control so it is always findable.
+  - **A11y:** "Correct" is a real `<button aria-pressed>` with a state-explicit title
+    ("Correction mode off. Click to fix scanned notes." / "...on. Click to exit."), matching
+    the #37 hand-toggle wording rule. The stage becomes `tabindex="0"` only in Correct mode
+    with `role="application"` and an `aria-label` describing the arrow/edit keys; edit-panel
+    buttons are normal focusable buttons with aria-labels + the shortcuts above. Selecting a
+    bar fires an `aria-live="polite"` announcement ("Selected C4, right hand."); nudge/delete/
+    add each announce the result ("Raised to C#4", "Note deleted", "Added C4"). Focus ring is
+    the shared `--focus-ring`. Reduced-motion: the selection halo is static (no pulse).
+
+  ### Defer to later slices (explicit non-goals for v1)
+
+  - **Sheet write-back / closing the divergence** (the OSMD round-trip): #6d. The dashed
+    marker + banner are the interim.
+  - **Duration editing** (#6b) and **drag-to-move time** of a note: out. Pitch nudge + delete
+    + basic add only.
+  - **Multi-select, undo/redo history, persistence across reload:** out (no persistence layer
+    exists; an edit lives for the session, like the #44 rename).
+  - **Editing off-screen notes directly / a flat note-list editor:** out; v1 reaches notes by
+    scrubbing them into the lane. A list editor is a strong later surface.
+  - **Add-note hand assignment UI:** v1 adds as "unknown" (no cap, full velocity). Choosing
+    left/right for an added note is deferred.
+
+  ### Tokens / classes introduced
+  - `.correct-toggle` (reuses `.toggle` base); the dashed edited-marker is canvas-drawn in
+    `--accent`, not a class; `.edit-panel` + `.edit-panel-btn` (reuse ghost-button tokens,
+    44px tap targets on phone per #33/#84). New `VisNote.id` (Tech Lead). Edited-set +
+    selected-id live in main.ts state alongside `score`.
+
 ## Falling-bar active highlight (issue #131)
 
 - **2026-05-31 - The brighter "active" fill is per-bar, gated on that bar's own time
