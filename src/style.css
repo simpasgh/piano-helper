@@ -1,41 +1,54 @@
 :root {
+  /* "Nocturne" theme (issue #127): a grand piano on a darkened concert stage. Ebony
+     background, ivory text, a single brass/gold accent standing in for lamp-light on the
+     lid and the brass pedals. Replaces the generic violet that read as default AI styling. */
+
   /* brand anchors */
-  --bg: #0a0712;
-  --accent: #b14bff;
-  --accent-glow: rgba(177, 75, 255, 0.6);
-  --text: #e8e0f5;
+  --bg: #0b0a0d; /* warm ebony */
+  --accent: #d8a23a; /* brass */
+  --accent-glow: rgba(216, 162, 58, 0.55);
+  --text: #efe9dc; /* warm ivory */
 
   /* brand ramp */
-  --accent-deep: #7a2fd6;
+  --accent-deep: #a9761f; /* deep brass */
   --accent-gradient: linear-gradient(135deg, var(--accent-deep), var(--accent));
 
+  /* Editorial serif for the wordmark only (concert-program feel). System serifs, no
+     network font, so it degrades gracefully and stays free/offline. */
+  --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, "Hoefler Text",
+    Georgia, "Times New Roman", serif;
+
+  /* Ink for the one light accent surface (the brass Play hero): brass is a LIGHT color,
+     so white-on-brass fails contrast; near-black ink on brass passes AA (~7:1). */
+  --on-accent: #1a140d;
+
   /* Toolbar surfaces (issue #46): calmer, near-neutral dark so the bar reads as a tool
-     surface and the one filled-violet Play hero stands out instead of "purple everywhere". */
-  --bar-surface: rgba(16, 14, 22, 0.92);
-  --bar-border: rgba(232, 224, 245, 0.1);
-  --group-divider: rgba(232, 224, 245, 0.12);
+     surface and the one filled-brass Play hero stands out instead of "accent everywhere". */
+  --bar-surface: rgba(20, 18, 14, 0.92);
+  --bar-border: rgba(239, 233, 220, 0.1);
+  --group-divider: rgba(239, 233, 220, 0.12);
 
   /* SECONDARY tier (issue #46): the file loaders. A quiet raised neutral surface, NOT filled
-     violet. This breaks the monochrome: loaders only tint violet on hover. */
-  --secondary-bg: rgba(255, 255, 255, 0.07);
-  --secondary-bg-hover: rgba(255, 255, 255, 0.11);
-  --secondary-bg-active: rgba(177, 75, 255, 0.18);
-  --secondary-border: rgba(232, 224, 245, 0.16);
-  --secondary-border-hover: rgba(177, 75, 255, 0.5);
+     brass. This breaks the monochrome: loaders only tint brass on hover. */
+  --secondary-bg: rgba(239, 233, 220, 0.07);
+  --secondary-bg-hover: rgba(239, 233, 220, 0.11);
+  --secondary-bg-active: rgba(216, 162, 58, 0.2);
+  --secondary-border: rgba(239, 233, 220, 0.16);
+  --secondary-border-hover: rgba(216, 162, 58, 0.55);
 
   /* GHOST tier: transport step buttons, Names + hand mutes, Export, tempo readout. */
-  --ghost-bg: rgba(255, 255, 255, 0.03);
-  --ghost-bg-hover: rgba(177, 75, 255, 0.12);
-  --ghost-bg-active: rgba(177, 75, 255, 0.2);
-  --ghost-border: rgba(232, 224, 245, 0.14);
-  --ghost-border-hover: rgba(177, 75, 255, 0.5);
+  --ghost-bg: rgba(239, 233, 220, 0.03);
+  --ghost-bg-hover: rgba(216, 162, 58, 0.13);
+  --ghost-bg-active: rgba(216, 162, 58, 0.22);
+  --ghost-border: rgba(239, 233, 220, 0.14);
+  --ghost-border-hover: rgba(216, 162, 58, 0.55);
 
   /* text tiers */
-  --text-muted: rgba(232, 224, 245, 0.6);
-  --text-faint: rgba(232, 224, 245, 0.4);
+  --text-muted: rgba(239, 233, 220, 0.62);
+  --text-faint: rgba(239, 233, 220, 0.4);
 
   /* focus ring (one ring for every control) */
-  --focus-ring: #d9a6ff;
+  --focus-ring: #f0c66b;
 }
 
 * {
@@ -82,9 +95,10 @@ body {
 }
 
 .topbar h1 {
-  font-size: 1.1rem;
+  font-family: var(--font-display);
+  font-size: 1.25rem;
   font-weight: 600;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.02em;
   line-height: 2.1rem;
   color: var(--accent);
   text-shadow: 0 0 10px var(--accent-glow);
@@ -243,7 +257,7 @@ body {
   height: 18px;
   margin-top: -6.5px;
   border-radius: 50%;
-  background: #f2ecf8;
+  background: #f6f1e6;
   border: 2px solid var(--accent);
   box-shadow: 0 0 8px var(--accent-glow);
   cursor: pointer;
@@ -254,7 +268,7 @@ body {
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  background: #f2ecf8;
+  background: #f6f1e6;
   border: 2px solid var(--accent);
   box-shadow: 0 0 8px var(--accent-glow);
   cursor: pointer;
@@ -301,11 +315,11 @@ body {
   white-space: nowrap;
 }
 
-/* Tier 1, PRIMARY (issue #46): the SOLE filled-violet hero is Play. One accent per viewport
-   is what gives the bar a real primary instead of "purple everywhere". */
+/* Tier 1, PRIMARY (issue #46): the SOLE filled-brass hero is Play. One accent per viewport
+   is what gives the bar a real primary instead of "accent everywhere". */
 #play-btn {
   background: var(--accent-gradient);
-  color: #f7f2ff;
+  color: var(--on-accent);
   border: 1px solid transparent;
   border-radius: 8px;
   padding: 0.5rem 1rem;
@@ -320,10 +334,10 @@ body {
 }
 
 #play-btn:hover:not(:disabled) {
-  filter: brightness(1.12);
+  filter: brightness(1.08);
   box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.08) inset,
-    0 2px 12px rgba(122, 47, 214, 0.5);
+    0 0 0 1px rgba(255, 255, 255, 0.12) inset,
+    0 2px 12px rgba(169, 118, 31, 0.55);
 }
 
 #play-btn:active:not(:disabled) {
@@ -345,8 +359,8 @@ body {
 }
 
 /* Tier 2, SECONDARY (issue #46): the three score loaders. A quiet raised neutral surface,
-   clearly clickable and more prominent than ghost controls, but NOT filled violet so it never
-   competes with the Play hero. Tints violet on hover so the brand still answers the touch. */
+   clearly clickable and more prominent than ghost controls, but NOT filled brass so it never
+   competes with the Play hero. Tints brass on hover so the brand still answers the touch. */
 .file-btn {
   position: relative;
   background: var(--secondary-bg);
@@ -368,7 +382,7 @@ body {
 .file-btn:hover {
   background: var(--secondary-bg-hover);
   border-color: var(--secondary-border-hover);
-  color: #f7f2ff;
+  color: #fbf6ea;
 }
 
 .file-btn:active {
@@ -419,7 +433,7 @@ body {
 .step-btn:hover:not(:disabled) {
   background: var(--ghost-bg-hover);
   border-color: var(--ghost-border-hover);
-  color: #f7f2ff;
+  color: #fbf6ea;
 }
 
 #export-btn:active:not(:disabled),
@@ -492,7 +506,7 @@ button:focus-visible,
 }
 
 .hand-toggle[aria-pressed="true"] {
-  background: rgba(177, 75, 255, 0.28);
+  background: rgba(216, 162, 58, 0.28);
   border-color: var(--accent);
   color: var(--text);
 }
@@ -558,7 +572,7 @@ button:focus-visible,
   height: 16px;
   margin-top: -6px;
   border-radius: 50%;
-  background: #f2ecf8;
+  background: #f6f1e6;
   border: 2px solid var(--accent);
   box-shadow: 0 0 6px var(--accent-glow);
   cursor: pointer;
@@ -568,7 +582,7 @@ button:focus-visible,
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: #f2ecf8;
+  background: #f6f1e6;
   border: 2px solid var(--accent);
   box-shadow: 0 0 6px var(--accent-glow);
   cursor: pointer;
@@ -649,7 +663,7 @@ button:focus-visible,
   height: 16px;
   margin-top: -6px;
   border-radius: 50%;
-  background: #f2ecf8;
+  background: #f6f1e6;
   border: 2px solid var(--accent);
   box-shadow: 0 0 6px var(--accent-glow);
   cursor: pointer;
@@ -659,7 +673,7 @@ button:focus-visible,
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: #f2ecf8;
+  background: #f6f1e6;
   border: 2px solid var(--accent);
   box-shadow: 0 0 6px var(--accent-glow);
   cursor: pointer;
@@ -813,8 +827,8 @@ button:focus-visible,
   max-width: calc(100% - 2rem);
   padding: 0.55rem 0.9rem;
   border-radius: 999px;
-  background: rgba(20, 12, 32, 0.92);
-  border: 1px solid rgba(177, 75, 255, 0.4);
+  background: rgba(22, 18, 12, 0.92);
+  border: 1px solid rgba(216, 162, 58, 0.45);
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
   color: var(--text);
   font-size: 0.8rem;
@@ -930,7 +944,9 @@ button:focus-visible,
   position: relative;
   height: 42%;
   overflow-y: auto;
-  background: #f6f2fb;
+  /* "Real paper" cream sheet pane: the reading-app analogue, scoped to where a light
+     surface belongs (the engraved score), while the stage stays dark ebony. */
+  background: #f6f1e6;
   padding: 1rem 1.25rem;
 }
 
@@ -949,21 +965,21 @@ button:focus-visible,
 .sheet-label {
   position: absolute;
   transform: translate(-50%, -100%);
-  color: #7a2fd6;
+  color: #6b4f1f; /* brass-brown annotation ink on the cream page */
   font: 600 9px system-ui, -apple-system, sans-serif;
   letter-spacing: 0.01em;
   line-height: 1;
   white-space: nowrap;
   text-align: center;
-  /* Triple-stacked light halo in the panel color so the violet stays legible
+  /* Triple-stacked light halo in the panel color so the ink stays legible
      over ledger lines, stems, and the green cursor box. */
-  text-shadow: 0 0 2px #f6f2fb, 0 0 2px #f6f2fb, 0 0 3px #f6f2fb;
+  text-shadow: 0 0 2px #f6f1e6, 0 0 2px #f6f1e6, 0 0 3px #f6f1e6;
 }
 
 #sheet:empty::before {
   content: "Load a MusicXML file to see the score here.";
   display: block;
-  color: #7a7088;
+  color: #6f6043; /* warm brown on cream, meets AA (~4.8:1) */
   font-size: 0.9rem;
   padding: 1rem;
 }
@@ -986,7 +1002,7 @@ button:focus-visible,
   align-items: center;
   justify-content: center;
   padding: 1.5rem;
-  background: rgba(10, 7, 18, 0.72); /* --bg at 0.72 so the stage dims through it */
+  background: rgba(11, 10, 13, 0.74); /* --bg at ~0.74 so the stage dims through it */
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
   animation: scan-overlay-in 0.18s ease both;
@@ -1009,15 +1025,15 @@ button:focus-visible,
   box-shadow:
     0 1px 0 rgba(255, 255, 255, 0.04) inset,
     0 18px 50px rgba(0, 0, 0, 0.55),
-    0 0 40px rgba(177, 75, 255, 0.12); /* faint violet bloom ties it to the brand */
+    0 0 40px rgba(216, 162, 58, 0.13); /* faint brass bloom ties it to the brand */
 }
 
 .scan-spinner {
   width: 44px;
   height: 44px;
   border-radius: 50%;
-  border: 3px solid rgba(232, 224, 245, 0.14); /* faint track */
-  border-top-color: var(--accent); /* the rotating violet arc */
+  border: 3px solid rgba(239, 233, 220, 0.14); /* faint track */
+  border-top-color: var(--accent); /* the rotating brass arc */
   animation: scan-spin 0.85s linear infinite;
 }
 
@@ -1051,7 +1067,7 @@ button:focus-visible,
 .scan-overlay-cancel:hover {
   background: var(--ghost-bg-hover);
   border-color: var(--ghost-border-hover);
-  color: #fff;
+  color: #fbf6ea;
 }
 .scan-overlay-cancel:focus-visible {
   outline: 2px solid var(--focus-ring);
