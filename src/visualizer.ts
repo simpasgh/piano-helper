@@ -18,6 +18,7 @@ import {
   type KeyGeometry,
   type LabelMode,
   type Hand,
+  type NoteSpelling,
 } from "./piano";
 
 export interface VisNote {
@@ -25,6 +26,10 @@ export interface VisNote {
   time: number; // start time in seconds
   duration: number; // seconds
   hand?: Hand; // which hand plays this note (issue #36); absent reads as "unknown"
+  // The note's printed spelling from the sheet (issues #56/#58), e.g. step D + alter -1
+  // for a "Db". Drives the label NAME only (color, octave, and geometry stay MIDI-driven).
+  // Absent for audio-transcribed scores, which fall back to the always-sharp name.
+  spelling?: NoteSpelling;
 }
 
 const MAX_KEYBOARD_HEIGHT = 140;
@@ -274,7 +279,7 @@ export class Visualizer {
         // now let the name overflow horizontally, centered on the bar, down to a 7px floor
         // (issue #67). The name is still centered vertically so it stays within the bar's
         // height. Ink is chosen from the bar's luminance so it reads on every hue.
-        const text = midiToBarLabel(note.midi, this.labelMode);
+        const text = midiToBarLabel(note.midi, this.labelMode, note.spelling);
         const fit = fitBarLabel(w, barHeight, text.length, true);
         if (fit.show) {
           labels.push({

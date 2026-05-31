@@ -1,8 +1,8 @@
 import type { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
-import type { MusicSheet, SourceStaffEntry } from "opensheetmusicdisplay";
-import { ClefEnum, ClefInstruction } from "opensheetmusicdisplay";
+import type { MusicSheet, Pitch, SourceStaffEntry } from "opensheetmusicdisplay";
+import { AccidentalEnum, ClefEnum, ClefInstruction, NoteEnum } from "opensheetmusicdisplay";
 import type { VisNote } from "./visualizer";
-import type { Hand } from "./piano";
+import type { Hand, NoteLetter, NoteSpelling } from "./piano";
 import {
   handFromStaff,
   handFromClefInEffect,
@@ -23,6 +23,54 @@ function clefKind(instruction: ClefInstruction): StaffClefKind {
     : instruction.ClefType === ClefEnum.F
       ? "bass"
       : "other";
+}
+
+// OSMD FundamentalNote (NoteEnum: C=0, D=2, E=4, F=5, G=7, A=9, B=11) -> diatonic letter.
+const NOTE_ENUM_TO_LETTER: ReadonlyMap<NoteEnum, NoteLetter> = new Map([
+  [NoteEnum.C, "C"],
+  [NoteEnum.D, "D"],
+  [NoteEnum.E, "E"],
+  [NoteEnum.F, "F"],
+  [NoteEnum.G, "G"],
+  [NoteEnum.A, "A"],
+  [NoteEnum.B, "B"],
+]);
+
+// OSMD AccidentalEnum -> the <alter> semitone shift the spelling carries. SHARP/FLAT and
+// their doubles map to +-1/+-2; NONE and NATURAL carry no shift (a natural prints just the
+// letter, since the staff position already says which letter). Microtonal/exotic accidentals
+// have no piano key and no plain-letter name, so we return undefined to fall back to the
+// always-sharp MIDI name rather than invent a spelling.
+function accidentalAlter(accidental: AccidentalEnum): number | undefined {
+  switch (accidental) {
+    case AccidentalEnum.SHARP:
+      return 1;
+    case AccidentalEnum.DOUBLESHARP:
+      return 2;
+    case AccidentalEnum.FLAT:
+      return -1;
+    case AccidentalEnum.DOUBLEFLAT:
+      return -2;
+    case AccidentalEnum.NONE:
+    case AccidentalEnum.NATURAL:
+      return 0;
+    default:
+      return undefined;
+  }
+}
+
+// Reads a note's printed spelling (issues #56/#58) from OSMD's Pitch so labels match the
+// synced sheet instead of an always-sharp name recomputed from MIDI. Returns undefined when
+// the note has no pitch or carries a microtonal/exotic accidental, so those notes fall back
+// to the default. Prefers the TRANSPOSED pitch when the score is transposed, so the spelling
+// agrees with the transposed staff (and with `note.halfTone`, which is also transposed).
+export function readSpelling(pitch: Pitch | undefined): NoteSpelling | undefined {
+  if (!pitch) return undefined;
+  const letter = NOTE_ENUM_TO_LETTER.get(pitch.FundamentalNote);
+  if (letter === undefined) return undefined;
+  const alter = accidentalAlter(pitch.Accidental);
+  if (alter === undefined) return undefined;
+  return { letter, alter };
 }
 
 // Reads every clef declaration in the score, tagged with its staff id and measure index, so
@@ -110,6 +158,10 @@ export function extractScore(osmd: OpenSheetMusicDisplay): ScoreData {
         if (note.isRest()) continue;
         const midi = note.halfTone + 12; // OSMD halfTone 0 = C0; MIDI C0 = 12
         const noteDuration = note.Length.RealValue * wholeNoteSeconds;
+        // Printed spelling for the label (issues #56/#58): a Db reads "Db"/"Reb" instead of
+        // the always-sharp "C#"/"Do#". halfTone is the transposed pitch, so read the spelling
+        // from the transposed pitch too when present so the two agree.
+        const spelling = readSpelling(note.TransposedPitch ?? note.Pitch);
         // Tag the hand for piano (issue #36). The clef is the primary signal (treble =>
         // right, bass => left) so the split is correct even when the file lists its staves
         // bass-first, AND whether the piano is one instrument with two staves or two
@@ -136,7 +188,7 @@ export function extractScore(osmd: OpenSheetMusicDisplay): ScoreData {
             hand = handFromClefInEffect(timeline?.[measureIndex]);
           }
         }
-        notes.push({ midi, time, duration: noteDuration, hand });
+        notes.push({ midi, time, duration: noteDuration, hand, spelling });
         duration = Math.max(duration, time + noteDuration);
       }
     }

@@ -1,4 +1,4 @@
-import { midiToLabel, type LabelMode } from "./piano";
+import { midiToLabel, type LabelMode, type NoteSpelling } from "./piano";
 
 // Pure layout logic for the sheet note-name overlay (issue #17).
 //
@@ -19,6 +19,10 @@ export interface NotePosition {
   // Optional priority hints. active = note under the OSMD cursor (kept first
   // when space is scarce). Falsy/absent means a normal note.
   active?: boolean;
+  // The note's printed spelling from the sheet (issues #56/#58), so the overlay name
+  // matches the staff beneath it (a "Db" reads "Db"/"Reb", not "C#"/"Do#"). Absent falls
+  // back to the always-sharp MIDI name.
+  spelling?: NoteSpelling;
 }
 
 // A laid-out label ready to be positioned in the overlay.
@@ -101,8 +105,8 @@ export function layoutSheetLabels(notes: NotePosition[], mode: LabelMode): Label
   for (let i = 0; i < chords.length - 1; i++) {
     const a = chords[i];
     const b = chords[i + 1];
-    const aTopText = midiToLabel(a.notes[0].midi, mode);
-    const bTopText = midiToLabel(b.notes[0].midi, mode);
+    const aTopText = midiToLabel(a.notes[0].midi, mode, a.notes[0].spelling);
+    const bTopText = midiToLabel(b.notes[0].midi, mode, b.notes[0].spelling);
     const needed = Math.max(approxLabelWidth(aTopText), approxLabelWidth(bTopText));
     const gap = b.x - a.x;
     if (gap < needed) {
@@ -125,7 +129,7 @@ export function layoutSheetLabels(notes: NotePosition[], mode: LabelMode): Label
     const lowestBaseline = chord.topY - TOP_OFFSET;
     for (let j = 0; j < keep.length; j++) {
       const note = keep[j];
-      const text = midiToLabel(note.midi, mode);
+      const text = midiToLabel(note.midi, mode, note.spelling);
       if (!text) continue;
       // j counts from the top of the stack; the lowest label (largest j) sits
       // at lowestBaseline, each higher one is STACK_GAP further up.
