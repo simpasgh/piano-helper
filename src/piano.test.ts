@@ -793,6 +793,57 @@ describe("labelableFallingNotes (issue #42: one label per repeated run, both han
   it("handles an empty score", () => {
     expect(labelableFallingNotes([])).toEqual([]);
   });
+
+  it("labels every pitch of a chord at one onset (issue #66)", () => {
+    // C and E sound together at t=0: both are new, so both get a name.
+    const notes = [
+      ln({ midi: 60, time: 0, hand: "right" }),
+      ln({ midi: 64, time: 0, hand: "right" }),
+    ];
+    expect(labelableFallingNotes(notes)).toEqual([true, true]);
+  });
+
+  it("dedupes a repeated identical chord (issue #66 repro)", () => {
+    // [C,E] at t=0 then [C,E] again at t=1: the second chord is a held/repeated voice
+    // set, so neither of its notes is re-labeled. The old single-slot memory returned
+    // [true,true,true,true].
+    const notes = [
+      ln({ midi: 60, time: 0, hand: "right" }),
+      ln({ midi: 64, time: 0, hand: "right" }),
+      ln({ midi: 60, time: 1, hand: "right" }),
+      ln({ midi: 64, time: 1, hand: "right" }),
+    ];
+    expect(labelableFallingNotes(notes)).toEqual([true, true, false, false]);
+  });
+
+  it("labels only the genuinely new pitch when a chord partly changes", () => {
+    // [C,E] at t=0 then [C,G] at t=1: C is held (deduped), G is new (labeled).
+    const notes = [
+      ln({ midi: 60, time: 0, hand: "right" }),
+      ln({ midi: 64, time: 0, hand: "right" }),
+      ln({ midi: 60, time: 1, hand: "right" }),
+      ln({ midi: 67, time: 1, hand: "right" }),
+    ];
+    expect(labelableFallingNotes(notes)).toEqual([true, true, false, true]);
+  });
+
+  it("labels a post-chord note the same regardless of chord array order (issue #66)", () => {
+    // A chord [C,E] then a melodic E that was already in the chord. The label decision
+    // must be order-independent: it cannot depend on which chord note sorts last.
+    const chordCE = [
+      ln({ midi: 60, time: 0, hand: "right" }),
+      ln({ midi: 64, time: 0, hand: "right" }),
+      ln({ midi: 64, time: 1, hand: "right" }),
+    ];
+    const chordEC = [
+      ln({ midi: 64, time: 0, hand: "right" }),
+      ln({ midi: 60, time: 0, hand: "right" }),
+      ln({ midi: 64, time: 1, hand: "right" }),
+    ];
+    // E at t=1 is held from the chord, so it is not re-labeled in either ordering.
+    expect(labelableFallingNotes(chordCE)).toEqual([true, true, false]);
+    expect(labelableFallingNotes(chordEC)).toEqual([true, true, false]);
+  });
 });
 
 describe("approachingKeyMidis (issue #43: only label keys with an approaching note)", () => {

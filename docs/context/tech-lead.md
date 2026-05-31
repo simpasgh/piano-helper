@@ -30,6 +30,19 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-31 - #66 fix: `labelableFallingNotes` is now chord-aware (run boundary is a pitch SET per lane, not a single last-midi).**
+  The #42 helper tracked one `lastMidiByLane: Map<lane, number>`, so polyphony broke two ways: a repeated
+  identical chord (`[C,E]@0` then `[C,E]@1`) was not deduped (returned all-true), and the label of a note
+  after a chord depended on which chord note happened to sort last. Fix in `src/piano.ts`
+  (`labelableFallingNotes`): group the time-sorted notes into onsets (notes within `LABEL_TIME_EPSILON`),
+  split each onset by lane, and compare each lane's onset pitch-SET (`prevSetByLane: Map<lane, Set<number>>`)
+  against that lane's previous onset. A note is labeled iff its pitch is NOT in the lane's previous set (a
+  run start); held/repeated voices carry over unlabeled. Order-independent by construction (it is set
+  membership, never array position). Monophonic input is the one-pitch-per-onset special case, so all 7
+  prior tests stay green unchanged. Added 4 tests (chord-all-labeled, repeated-chord dedup, partial-chord
+  change labels only the new pitch, post-chord note same under both chord array orders). Suite 284 -> 288,
+  build green. Pure helper, no canvas/visualizer change, so no live QA beyond the existing label render.
+
 - **2026-05-31 - #56/#58 SHIPPED: labels now respect the sheet's printed accidentals (show flats), with always-sharp only as the no-notation fallback.**
   Closes the #40 spike's high-value slice. The fix threads each note's printed spelling alongside `midi`
   through BOTH extraction points and into a spelling-aware label function; MIDI still drives color, octave,
