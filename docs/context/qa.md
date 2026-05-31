@@ -4,6 +4,56 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-05-31: issue #123 / PR #124 (merge tied/held notes into ONE sustained falling note in
+  `src/score.ts`: a MusicXML tie is several `<note>` segments sharing one curve; pre-fix
+  `extractScore` emitted one falling bar per segment so a held note restruck once per measure.
+  New `mergeTiedNotes` helper folds continuation segments' duration into the chain-start note,
+  keyed by a per-tie id off `note.NoteTie` / `tie.StartNote`) -> **PASS** on prod
+  (https://piano-helper.pages.dev, served bundle `index-B93iGaIx.js`, which contains the
+  app-specific tie tokens `isTieStart` x3 / `tieId` x5 plus the OSMD `NoteTie`/`StartNote`
+  refs; pre-fix bundles had none). Drove live in real Chromium (Playwright 1.59.1). This is
+  the FIRST live QA that exercises the tie-merge feature.
+  - METHOD (a paired fixture is the cleanest tie proof, far easier than OMR-driving): two
+    grand-staff MusicXML fixtures IDENTICAL except the tie. `/tmp/qa-tie/tied.musicxml` = RH
+    whole notes C5/D5/E5 over a bass C3 whole note TIED across all 3 measures (`<tie
+    type="start"/>` m1, stop+start m2, stop m3 + matching `<tied>` notations).
+    `/tmp/qa-tie/untied.musicxml` = same pitches, NO tie. Loaded each via `#file-input`
+    (DataTransfer + `change`), read the EXACT `#sheet-note-count` text, then played briefly and
+    screenshotted the falling bars.
+  - THE DECISIVE SIGNAL = `#sheet-note-count`: **tied reads "4 notes", untied reads "6 notes".**
+    Same 6 source `<note>` elements both times; the tied bass C3 (3 segments) collapsed to ONE
+    VisNote (3 RH + 1 merged bass = 4), the untied kept all three (3 + 3 = 6). That delta IS the
+    fix firing on the live bundle. The count is authoritative; do NOT trust a `fillRect` column
+    count here -- the only tall rects on `#stage` are the 88 PIANO KEYS (identical 88-entry set
+    for both fixtures), the falling bars don't show up as distinct columns in that hook.
+  - VISUAL PROOF (the real QA, before/after of the same seek-0 frame): tied screenshot
+    `/tmp/qa-tie/01-tied-loaded.png` shows the bass "Do" (C3) as ONE continuous tall purple
+    falling bar; untied `/tmp/qa-tie/03-untied-loaded.png` shows the SAME left column broken into
+    SEPARATE restruck "Do" bars with a visible gap between segments. Both renders also show the
+    sheet view: the tied score draws the tie CURVES joining the bass whole notes across m1-2-3;
+    the untied score draws three independent whole notes, no curve.
+  - PLAYBACK (no regression): `02-tied-playing.png` -> Play flipped to Pause, transport advanced
+    0:00 -> 0:01 / 0:06, the sustained bass "Do" descends as one bar and lights the C3 key (held
+    lit = sounding, not restriking) while RH Do/Re/Mi fall separately; green sheet cursor +
+    highlight track. Falling-notes render, cursor sync, solfege labels all intact.
+  - REGRESSION GUARD: `#hand-mutes` VISIBLE for both grand-staff fixtures (Right/Left toggles +
+    Balance "L100 R100"), so the tie merge did not disturb hand tagging (the merged note keeps
+    its original `hand`). MusicXML load path, sheet render, falling notes, playback transport all
+    work. CONSOLE: **0 console.error, 0 pageerror** across both loads + both plays.
+  - GOTCHA (environment): Playwright is NOT a project dep and not global here; the browser
+    binaries are in `~/Library/Caches/ms-playwright` (used by prior passes via npx). Fastest path
+    this session: import chromium by ABSOLUTE path from a sibling project's install
+    (`/Users/simonepasculli/code/todeoapp/node_modules/playwright/index.mjs`, v1.59.1) rather
+    than installing into the worktree. No worktree node_modules pollution, tree stayed clean.
+  - VERDICT: **PASS.** All three gate items met: (1) app loads + interactive, (2) core flow
+    (MusicXML load, grand-staff render, falling notes, playback) works with no regression,
+    (3) the tied held note now renders as ONE sustained falling bar (count 4 vs the untied 6,
+    confirmed visually). The OMR-scan tie path (icarus.pdf bass held m25-27) was NOT driven
+    end-to-end this pass -- a paired MusicXML fixture exercises the exact same `mergeTiedNotes`
+    code with a deterministic, instant signal, so an OMR scan (~5 min, engine-recall-dependent)
+    was unnecessary to verify the fix. Artifacts persist under /tmp/qa-tie/ (tied/untied .musicxml
+    + 4 screenshots).
+
 - 2026-05-31: #118 / #112 / PR #119 (lower OMR worker `PDF_RASTER_DPI` 400 -> 350 to recover
   collapsed LH block chords WITHOUT fabricating pitches; PR merged to main, Pages app deployed
   smoke-green, LOCAL Mac OMR worker redeployed at DPI 350 and restarted via launchd
