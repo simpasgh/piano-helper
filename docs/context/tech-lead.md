@@ -30,6 +30,18 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-05-31 - #139 SHIPPED: the per-hand controls are now shown for EVERY score, reversing the `hasBothHands` gating.**
+  Old behavior (issues #37/#70/#87): `#hand-mutes` (Right/Left mute toggles + Balance) was hidden unless the score
+  had both a right- AND a left-hand note, so a single-staff MusicXML whose notes all resolved to one hand (or to
+  "unknown") never showed the controls. The user's requirement: these controls must ALWAYS be available. Fix is two
+  parts: (1) in `extractScore` (`src/score.ts`), any note left `"unknown"` after clef/staff resolution now falls back
+  to `handFromPitch(midi)` (split at middle C, `HAND_SPLIT_MIDI = 60`) - the same heuristic the audio path uses - so
+  every note lands on a real left/right hand; the fallback is gated behind `if (hand === "unknown")` so it NEVER
+  overrides a clef- or staff-resolved hand (grand staff unaffected). (2) `main.ts` sets `handMutes.hidden = false`
+  unconditionally. The `hasBothHands` helper and its tests are deleted (dead). Consequence to remember: a single-staff
+  treble melody that dips below middle C now tags those low notes "left", so they can be muted/balanced independently -
+  intended, not a bug. Note: any older context entry that says the controls "stay hidden" for single-register/audio
+  scores is now stale.
 - **2026-05-31 - #131 PRE-MERGE REVIEW: PASS. `fix/active-highlight-same-pitch` makes the brighter falling-bar "active" fill per-NOTE, fixing a same-pitch double-light. No blocking findings.**
   The bug: `drawFallingNotes` set `isActive = active.has(note.midi)` where `active` is the pitch-keyed
   `activeMidis` set, so EVERY bar of a given pitch lit at once (two stacked "La" both bright, even the

@@ -4,6 +4,44 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-05-31: PR #139 (the LH/RH mute toggles + Balance slider now show for ANY loaded score,
+  not just grand-staff: every note gets a real hand, by clef for a 2-staff grand staff,
+  otherwise a pitch split at middle C `HAND_SPLIT_MIDI=60` via `handFromPitch`; `#hand-mutes`
+  is now unconditionally un-hidden after load, main.ts:257 `handMutes.hidden=false`) ->
+  **PASS** on prod (https://piano-helper.pages.dev, served bundle `index-Btv4ZqcA.js`, which
+  contains `handFromPitch`, the `mutedHands{left,right}` state + `hand-mutes` wiring). Drove
+  live in real Chromium (Playwright 1.59.1 via the sibling todeoapp install). FIRST live QA of
+  the always-visible hand controls on a SINGLE-staff score. This CLOSES the #139 gate.
+  - FIXTURE = the shipped single-staff demo `https://piano-helper.pages.dev/demo.musicxml`
+    ("C Major Scale", 2487 bytes, ONE `<part>` / ONE treble G-clef staff, NO `<staves>2</staves>`,
+    notes C4..C5 i.e. all MIDI >= 60). Pre-#139 every note in this file tagged "unknown" and
+    `#hand-mutes` stayed hidden. Loaded via `#file-input` (File + DataTransfer + `change`).
+  - REQ 1+2 (controls visible after load): BASELINE before load `#hand-mutes` computed
+    `display:none`, hidden:true, rect 0x0 (correct, no score yet). After load ("15 notes"):
+    `#hand-mutes` computed `display:flex`, hidden:false, 458x30; `#mute-right-btn` "Right hand"
+    114x30, `#mute-left-btn` "Left hand" 105x30, `#balance-slider` display:block 96x12 val 0,
+    `#balance-readout` "L100 R100" 63x15. ALL visible on a single-staff score. Screenshot
+    /tmp/qa-hm/01-loaded.png shows the C Major Scale (single treble staff, "Piano") with the
+    Right hand / Left hand / Balance L100 R100 controls rendered in the toolbar. NOTE: this demo
+    is all RH (every pitch >= middle C), so the controls show even when one hand is empty -- the
+    point of #139.
+  - REQ 3 (exercise them): clicked Play -> `#play-label` flipped to "Pause", transport ran
+    (falling bars descend, keys light, sheet cursor advances). Toggled `#mute-left-btn`:
+    aria-pressed false->true, title "Left hand: audible. Click to mute." -> "Left hand: muted.
+    Click to unmute.", button shows the pressed/strikethrough muted state (02-left-muted.png).
+    Toggled back: aria-pressed true->false, title back to "audible". Dragged `#balance-slider`
+    (min -100 / max 100 / default 0) to -60 via an `input` event: `#balance-readout` updated
+    "L100 R100" -> "L100 R40" live (03-balance.png). Slider + readout both respond.
+  - REQ 4 (console): **0 console.error, 0 pageerror** across boot + load + play + mute toggle +
+    unmute + balance drag. Clean.
+  - VERDICT: **PASS.** On a single-staff treble-only score the Right hand / Left hand / Balance
+    controls are now all visible and fully functional (mute reflects aria-pressed + title +
+    visual state, balance readout updates live), where pre-#139 they were hidden entirely.
+    No regression: load path, sheet render, falling notes, cursor sync, play/pause all intact.
+    Artifacts under /tmp/qa-hm/ (demo.musicxml + drive.mjs + 01-loaded / 02-left-muted /
+    03-balance .png). GOTCHA: the slider drag must dispatch an `input` event (not `change`); the
+    readout is wired to `balanceSlider.addEventListener("input", ...)` (main.ts:941).
+
 - 2026-05-31: issue #127 / PR #128 (replace the generic violet/purple theme with the
   piano-inspired "Nocturne" palette: ebony chrome `#0b0a0d`, ivory text `#efe9dc`, a single
   brass accent `#d8a23a`; brass serif wordmark; filled-brass Play pill with near-black ink
