@@ -1192,17 +1192,24 @@ def reconcile(primary_bytes, secondary_bytes, input_pdf=None) -> bytes:
         # sub-gate is on; compute the gate ONCE so the matched loop just consults a bool. When
         # off (or no input_pdf), the referee branch is never entered = byte-identical to before.
         use_referee = input_pdf is not None and referee_enabled()
+        # Both gate maps below must be keyed on the SAME tick base as the matched clarity_ev they
+        # are looked up against. align() rescales matched events onto the COMMON base, but
+        # primary_events are on the primary doc base, so we rescale a copy onto the common base
+        # first (scale=1 is an identity copy, so when the bases already match this is unchanged).
+        # Without this the keys silently miss whenever oemer's divisions force a larger LCM.
+        common_scale = (common_base // base_primary) if base_primary else 1
+        primary_events_common = _rescale_stream(primary_events, common_scale)
         # Isolation map: a (measure, staff, onset) slot is "isolated" only if exactly ONE pitched
         # Clarity note sits there (no chord stack, no coincident note). The referee's validated
         # scope is isolated noteheads only; a dense/chorded slot is never refereeable.
-        isolated_slots = _isolated_slots(primary_events) if use_referee else None
+        isolated_slots = _isolated_slots(primary_events_common) if use_referee else None
         # Dense-run map: slots inside a beamed sub-quarter run. The referee's validated scope
         # EXCLUDES dense/beamed regions (Slice 5 GO/NO-GO): there the two engines often disagree
         # on note ORDER, and the position-based referee crops by oemer's order-drifted bbox and
         # confidently confirms a swapped pitch (the Reverie regression, tech-lead.md 2026-06-02).
         # Every eighth in a run passes the isolation test (one note per slot), so isolation alone
         # does NOT exclude dense runs; this map does. See _dense_run_slots.
-        dense_run_slots = _dense_run_slots(primary_events) if use_referee else None
+        dense_run_slots = _dense_run_slots(primary_events_common) if use_referee else None
 
         # oemer pitched notes that aligned to a Clarity REST (a slot Clarity heard as silence):
         # these are class-C ADD candidates too (Clarity put a rest where oemer put a note), so we

@@ -432,6 +432,31 @@ def test_dense_run_slots_flags_beamed_runs_not_quarters():
     assert reconcile._dense_run_slots([ev(0, 8)]) == set()
 
 
+def test_gate_maps_keyed_on_common_base_when_divisions_differ():
+    # Base-mismatch guard (code-review finding): Clarity divisions=4, oemer divisions=6 ->
+    # common base 12, so align()'s matched clarity_ev onsets come out on the common base (x3).
+    # The isolation/dense gate maps must be built on common-base copies (reconcile rescales
+    # primary_events before _isolated_slots/_dense_run_slots) or the slot lookups silently miss.
+    # Here we verify the rescaled dense-run keys match the onsets align() actually produces.
+    clarity = to_events(
+        _clarity_xml(4, [[_note("C", 5, 2), _note("D", 5, 2), _note("E", 5, 2), _note("F", 5, 2)]], [[]]),
+        "clarity",
+    )
+    oemer = to_events(
+        _oemer_xml(6, [[_note("C", 5, 3, staff=1), _note("D", 5, 3, staff=1),
+                        _note("E", 5, 3, staff=1), _note("F", 5, 3, staff=1)]]),
+        "oemer",
+    )
+    res = align(clarity, oemer)
+    matched_onsets = sorted(a.onset for a, _b in res["matched"])
+    base_primary = reconcile._stream_base(clarity)
+    common = reconcile._lcm(base_primary, reconcile._stream_base(oemer))
+    scaled = reconcile._rescale_stream(clarity, common // base_primary)
+    dense_onsets = sorted(on for (_m, _s, on) in reconcile._dense_run_slots(scaled))
+    # Eighths ARE a dense run, and the keys land on the SAME (common) base as the matched events.
+    assert dense_onsets and dense_onsets == matched_onsets
+
+
 # --- ties / pitch parsing ----------------------------------------------------------------
 
 
