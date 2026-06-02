@@ -186,7 +186,7 @@ describe("OMR worker Clarity-OMR tie engine (issue #135)", () => {
     // _reconcile_paths, which loads it into an array ONLY when OMR_ENSEMBLE_REFEREE is on (gate
     // off -> input_pdf None -> byte-identical to Slice 4). The referee sub-gate lives in
     // reconcile.py, default OFF, and additionally requires the parent OMR_ENSEMBLE.
-    expect(worker).toMatch(/_reconcile_paths\(clarity_path,\s*oemer_path,\s*workdir,\s*image_path\)/);
+    expect(worker).toMatch(/_reconcile_paths\(\s*clarity_path,\s*oemer_path,\s*workdir,\s*image_path,\s*bbox_sink\.get\("artifact"\)\s*\)/);
     expect(worker).toContain("def _load_referee_raster(");
     expect(worker).toMatch(/reconcile\.referee_enabled\(\)/);
     expect(reconcile).toContain("OMR_ENSEMBLE_REFEREE_ENV");
