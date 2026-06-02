@@ -38,8 +38,8 @@ async function readUpload(
     // narrows FormData.get() to string | null. Feature-detect arrayBuffer at runtime
     // instead of relying on the (overly narrow) static type.
     const entry = form.get("file") as unknown;
-    // "fast" opt-in (skip the slower second OMR engine). Any truthy form value enables it;
-    // absent/empty = the default full (most-accurate) path.
+    // "fast" opt-out of the accurate default (skip the slower second OMR engine). Set by the
+    // client only as the literal "1"; absent/empty = the default full (most-accurate) path.
     const fast = String(form.get("fast") ?? "") === "1";
     if (isFilePart(entry)) {
       return {

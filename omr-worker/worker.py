@@ -1080,7 +1080,8 @@ def job_is_fast(client, bucket, job_id):
     try:
         head = client.head_object(Bucket=bucket, Key=upload_key(job_id))
         meta = head.get("Metadata") or {}
-        # botocore lowercases user-metadata keys; accept a few truthy spellings.
+        # botocore lowercases user-metadata keys. The client only ever writes "1"; we also
+        # tolerate "true" defensively.
         return str(meta.get("fast", "")).strip().lower() in ("1", "true")
     except Exception as err:
         log("could not read fast flag for %s (%r); defaulting to accurate" % (job_id, err))
