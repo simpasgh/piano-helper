@@ -486,18 +486,18 @@ def test_class_b_range_rejects_out_of_range():
     assert _emitted_pitches(out) == [("C", 0, 5)]
 
 
-def test_class_b_voice_leading_picks_nearer_pitch():
-    # Establish a previous same-staff note (A4) both engines agree on, then a conflict where
-    # Clarity reads G5 (interval 10 from A4) and oemer reads B4 (interval 2 from A4). BOTH are
-    # diatonic (C major), in range, and within an octave of the staff tessitura, so the earlier
-    # diatonicity/range/octave priors do NOT separate them; voice-leading decides and the
-    # smaller melodic interval (oemer's B4) wins.
+def test_class_b_voice_leading_no_longer_overrides_clarity():
+    # REGRESSION (2026-06-02 QA on Icarus): the voice-leading prior was REMOVED because on clean
+    # input it overrode CORRECT Clarity readings with oemer's wrong pitch. Here a previous note
+    # (A4) is agreed, then Clarity reads G5 (interval 10 from A4) and oemer reads B4 (interval 2).
+    # The OLD code let oemer's smaller-interval B4 win; the conservative vote KEEPS Clarity's G5
+    # because both candidates are diatonic + in range (no strong positive signal for oemer).
     primary = _clarity_one_treble([_note("A", 4, 4), _note("G", 5, 4)])
     secondary = _oemer_one_treble(
         [_note("A", 4, 4, staff=1), _note("B", 4, 4, staff=1)]
     )
     out = reconcile_docs(primary, secondary)
-    assert _emitted_pitches(out) == [("A", 0, 4), ("B", 0, 4)]
+    assert _emitted_pitches(out) == [("A", 0, 4), ("G", 0, 5)]
 
 
 def test_class_b_all_else_equal_keeps_clarity():
@@ -517,6 +517,64 @@ def test_class_b_both_diatonic_in_range_keeps_clarity_safety():
     secondary = _oemer_one_treble([_note("F", 5, 4, staff=1)])
     out = reconcile_docs(primary, secondary)
     assert _emitted_pitches(out) == [("D", 0, 5)]
+
+
+def test_class_b_keeps_clarity_chord_when_both_diatonic():
+    # REGRESSION (2026-06-02 QA on Icarus, case a). Clarity reads a clean C-major chord
+    # G3 + C4 + E4 (all diatonic). oemer misreads the C4 member as B3. The OLD voice-leading
+    # prior could have flipped the C4 to oemer's B3 (B3 is a smaller step from a nearby note);
+    # the conservative vote KEEPS Clarity's C4 because both B3 and C4 are diatonic + in range, so
+    # no strong positive signal favors oemer. The chord stays {G3, C4, E4}.
+    primary = _clarity_one_treble(
+        [
+            _note("G", 3, 4),
+            _note("C", 4, 4, chord=True),
+            _note("E", 4, 4, chord=True),
+        ]
+    )
+    # oemer lists the same chord but reads the middle member as B3.
+    secondary = _oemer_one_treble(
+        [
+            _note("G", 3, 4, staff=1),
+            _note("B", 3, 4, staff=1, chord=True),
+            _note("E", 4, 4, staff=1, chord=True),
+        ]
+    )
+    out = reconcile_docs(primary, secondary)
+    assert _emitted_pitches(out) == [("G", 0, 3), ("C", 0, 4), ("E", 0, 4)]
+
+
+def test_class_b_declines_swap_that_would_duplicate_chord_pitch():
+    # REGRESSION (2026-06-02 QA on Icarus, case b - the duplicate-pitch bug). Clarity reads a
+    # 2-note chord {C2, G#2}. The G#2 member is NON-diatonic in C major, and oemer reads that
+    # member as C2 (diatonic), so the diatonicity vote WANTS to swap G#2 -> C2. But C2 already
+    # exists as the other chord member, so applying the swap would emit an invalid chord with two
+    # identical C2 pitches. The duplicate guard DECLINES the swap; the chord stays {C2, G#2}.
+    primary = _clarity_one_treble(
+        [
+            _note("C", 2, 4),
+            _note("G", 2, 4, alter=1, chord=True),  # G#2, non-diatonic
+        ]
+    )
+    secondary = _oemer_one_treble(
+        [
+            _note("C", 2, 4, staff=1),
+            _note("C", 2, 4, staff=1, chord=True),  # oemer reads the 2nd member as C2 too
+        ]
+    )
+    out = reconcile_docs(primary, secondary)
+    # No duplicate emitted: the second member stays Clarity's G#2, not a second C2.
+    assert _emitted_pitches(out) == [("C", 0, 2), ("G", 1, 2)]
+
+
+def test_class_b_genuine_diatonicity_correction_still_applies():
+    # REGRESSION (2026-06-02, case c - confirm the GOOD signal survives the conservative rewrite).
+    # C major. Clarity reads a lone F#4 (non-diatonic, no chord context); oemer reads the diatonic
+    # F4. The diatonicity vote (the one strong positive signal kept) still flips F#4 -> F4.
+    primary = _clarity_one_treble([_note("F", 4, 4, alter=1)])  # F#4 non-diatonic
+    secondary = _oemer_one_treble([_note("F", 4, 4, staff=1)])  # F4 diatonic
+    out = reconcile_docs(primary, secondary)
+    assert _emitted_pitches(out) == [("F", 0, 4)]
 
 
 # --- Class E: duration mismatch ----------------------------------------------------------
@@ -1243,13 +1301,14 @@ def test_pitch_vote_is_residual_false_when_diatonicity_decides():
     assert reconcile._pitch_vote_is_residual(c, o, dia, None) is False
 
 
-def test_pitch_vote_is_residual_false_when_voice_leading_decides():
-    # With a prev note A4 (MIDI 69), Clarity G5 (interval 10) vs oemer B4 (interval 2): voice
-    # leading SEPARATES -> not residual.
+def test_pitch_vote_is_residual_ignores_voice_leading():
+    # REGRESSION (2026-06-02): voice-leading was REMOVED from _vote_pitch, so it no longer makes a
+    # dispute non-residual. With a prev note A4 (MIDI 69), Clarity G5 vs oemer B4 (both diatonic,
+    # both in range) is now RESIDUAL despite the differing melodic intervals. prev_midi is unused.
     c = NoteEvent(measure=1, onset=4, staff=1, pitch=("G", 0, 5), duration=4, is_chord=False)
     o = NoteEvent(measure=1, onset=4, staff=1, pitch=("B", 0, 4), duration=4, is_chord=False)
     dia = reconcile._diatonic_pitch_classes(0)
-    assert reconcile._pitch_vote_is_residual(c, o, dia, 69) is False
+    assert reconcile._pitch_vote_is_residual(c, o, dia, 69) is True
 
 
 def test_isolated_slots_excludes_chord_and_coincident():

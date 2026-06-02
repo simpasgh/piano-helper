@@ -554,22 +554,30 @@ def _vote_pitch(
     diatonic_pcs: Set[int],
     prev_midi: Optional[int],
 ) -> NoteEvent:
-    """Class B: same onset/staff, DIFFERENT pitch. Vote with FREE heuristics, in order:
-      (1) key-signature diatonicity: if exactly one candidate is diatonic, it wins (a lone
-          non-diatonic alter is likely a misread accidental/ledger).
-      (2) octave/range sanity: reject a candidate outside MIDI 21..108; if exactly one is in
-          range it wins. Within range, if one is an implausible octave jump from the staff
-          tessitura while the other is plausible, prefer the plausible one.
-      (3) voice-leading: smaller melodic interval from the previous same-staff note wins.
-      (4) tie tiebreak: a Clarity tie endpoint wins (Clarity's known tie strength).
-      (5) final fallback: Clarity (primary).
-    CRITICAL: every branch that cannot SEPARATE the two tiebreaks to Clarity, so reconcile
-    never regresses a Clarity-good input.
+    """Class B: same onset/staff, DIFFERENT pitch. Vote CONSERVATIVELY: oemer may override the
+    Clarity primary ONLY on a STRONG positive signal. Everything else tiebreaks to Clarity, so
+    on a clean diatonic piece (where every candidate is in range and diatonic) class B makes ~0
+    changes, which is exactly never-worse-than-Clarity.
+
+    Strong signals (the ONLY two that can override Clarity), in order:
+      (1) range hard-reject: a candidate outside MIDI 21..108 cannot be a real piano pitch, so
+          if exactly one is in range that one wins.
+      (2) key-signature diatonicity: if oemer is diatonic AND Clarity is non-diatonic, oemer
+          wins (a lone non-diatonic alter in Clarity is likely a misread accidental/ledger).
+    Symmetrically, if Clarity is diatonic and oemer is not, Clarity wins.
+
+    DELIBERATELY REMOVED (2026-06-02, QA finding on the Icarus score): the voice-leading prior
+    ("smaller melodic interval wins") and the octave/tessitura prior. Both are SPECULATIVE and
+    on clean input where Clarity is correct they OVERRODE correct Clarity readings with oemer's
+    wrong pitch (3 regressions, 0 corrections on Icarus). The bar for any override is now: would
+    this flip a CORRECT Clarity note on clean diatonic input? If yes, it is removed.
+
+    The (4) tie tiebreak and (5) final fallback both resolve to Clarity (the primary).
     """
     c_mid = _pitch_to_midi(clarity.pitch)
     o_mid = _pitch_to_midi(oemer.pitch)
 
-    # (2a) range sanity FIRST as a hard reject: a pitch outside the piano cannot be right.
+    # (1) range sanity as a hard reject: a pitch outside the piano cannot be right.
     c_ok = c_mid is not None and MIDI_MIN <= c_mid <= MIDI_MAX
     o_ok = o_mid is not None and MIDI_MIN <= o_mid <= MIDI_MAX
     if c_ok and not o_ok:
@@ -579,7 +587,8 @@ def _vote_pitch(
     if not c_ok and not o_ok:
         return clarity  # both garbage -> keep Clarity
 
-    # (1) key-signature diatonicity: a lone non-diatonic candidate loses.
+    # (2) key-signature diatonicity: a lone non-diatonic candidate loses. This is the one
+    # positive signal strong enough to override Clarity (oemer diatonic, Clarity not -> oemer).
     c_dia = (c_mid % 12) in diatonic_pcs
     o_dia = (o_mid % 12) in diatonic_pcs
     if c_dia and not o_dia:
@@ -587,30 +596,9 @@ def _vote_pitch(
     if o_dia and not c_dia:
         return oemer
 
-    # (2b) octave/range sanity: prefer the candidate nearer the staff tessitura when one is an
-    # implausible octave jump (>= an octave) from it and the other is plausible (< an octave).
-    center = _STAFF_TESSITURA.get(clarity.staff, _STAFF_TESSITURA[1])
-    c_jump = abs(c_mid - center)
-    o_jump = abs(o_mid - center)
-    if c_jump >= 12 and o_jump < 12:
-        return oemer
-    if o_jump >= 12 and c_jump < 12:
-        return clarity
-
-    # (3) voice-leading: smaller melodic interval from the previous same-staff note wins.
-    if prev_midi is not None:
-        c_step = abs(c_mid - prev_midi)
-        o_step = abs(o_mid - prev_midi)
-        if c_step < o_step:
-            return clarity
-        if o_step < c_step:
-            return oemer
-
-    # (4) tie tiebreak -> Clarity (a tie endpoint is a deliberate Clarity signal).
-    if clarity.tie:
-        return clarity
-
-    # (5) final fallback -> Clarity.
+    # No strong positive signal separated the pair (both in range, both diatonic-or-both-not):
+    # tiebreak to Clarity (the primary). We do NOT use voice-leading or tessitura here; on clean
+    # input they regress correct Clarity notes (see the docstring).
     return clarity
 
 
@@ -621,44 +609,34 @@ def _pitch_vote_is_residual(
     prev_midi: Optional[int],
 ) -> bool:
     """True when the FREE class-B heuristics in _vote_pitch could NOT confidently SEPARATE the
-    two candidates and only fell through to the Clarity tiebreak: both in range, both diatonic
-    (or both non-diatonic), neither separated by the octave-jump prior, and voice-leading a tie
-    or absent. This is the LOW-CONFIDENCE residual the Slice-6 design routes to the visual-diff
-    referee (both candidates are plausible, so the cheap priors cannot decide). PURE; mirrors
-    the exact branch order of _vote_pitch so the two never disagree on what "residual" means.
+    two candidates and only fell through to the Clarity tiebreak: both in range AND both diatonic
+    (or both non-diatonic). This is the LOW-CONFIDENCE residual the Slice-6 design routes to the
+    visual-diff referee (both candidates are plausible, so the cheap priors cannot decide). PURE;
+    mirrors the exact branch order of _vote_pitch so the two never disagree on what "residual"
+    means.
 
-    Returns False (NOT residual) whenever any heuristic WOULD have separated the pair, so a
+    NOTE (2026-06-02): the octave-jump and voice-leading branches were REMOVED from _vote_pitch
+    (they regressed correct Clarity notes on clean input), so they are removed here too. The
+    `prev_midi` parameter is kept for signature compatibility with the caller but is unused.
+
+    Returns False (NOT residual) whenever a heuristic WOULD have separated the pair, so a
     confidently-decided dispute never reaches the referee. Never raises.
     """
     try:
         c_mid = _pitch_to_midi(clarity.pitch)
         o_mid = _pitch_to_midi(oemer.pitch)
 
-        # (2a) range: if range separates (or both garbage) it is decided, not residual.
+        # (1) range: if range separates (or both garbage) it is decided, not residual.
         c_ok = c_mid is not None and MIDI_MIN <= c_mid <= MIDI_MAX
         o_ok = o_mid is not None and MIDI_MIN <= o_mid <= MIDI_MAX
         if not (c_ok and o_ok):
             return False  # range decided it (or both garbage -> Clarity by other path).
 
-        # (1) diatonicity: if exactly one is diatonic it is decided.
+        # (2) diatonicity: if exactly one is diatonic it is decided.
         c_dia = (c_mid % 12) in diatonic_pcs
         o_dia = (o_mid % 12) in diatonic_pcs
         if c_dia != o_dia:
             return False
-
-        # (2b) octave-jump prior: if exactly one is an implausible octave jump it is decided.
-        center = _STAFF_TESSITURA.get(clarity.staff, _STAFF_TESSITURA[1])
-        c_jump = abs(c_mid - center)
-        o_jump = abs(o_mid - center)
-        if (c_jump >= 12) != (o_jump >= 12):
-            return False
-
-        # (3) voice-leading: a STRICTLY smaller interval decides; an equal interval does not.
-        if prev_midi is not None:
-            c_step = abs(c_mid - prev_midi)
-            o_step = abs(o_mid - prev_midi)
-            if c_step != o_step:
-                return False
 
         # Nothing separated them: the heuristics only had the Clarity tiebreak -> residual.
         return True
@@ -938,6 +916,9 @@ def reconcile(primary_bytes, secondary_bytes, input_pdf=None) -> bytes:
         # per-cell summed Clarity duration (non-chord) for the metric-completeness vote.
         prev_midi_by_cell = {}
         cell_dur_sum = _cell_duration_sums(primary_events)
+        # Per (measure, staff, onset) slot -> set of Clarity MIDI pitches present, for the class-B
+        # duplicate guard: a pitch swap must never create a chord with two identical pitches.
+        onset_slot_midis = _onset_slot_midis(primary_events)
 
         # The visual-diff referee fires ONLY on residual class-B disputes and ONLY when its
         # sub-gate is on; compute the gate ONCE so the matched loop just consults a bool. When
@@ -1024,11 +1005,27 @@ def reconcile(primary_bytes, secondary_bytes, input_pdf=None) -> bytes:
                         if ref_winner is not None:
                             winner = ref_winner
                     if winner is oemer_ev and target_elem is not None:
-                        # Adopt ONLY oemer's <pitch> into the Clarity element; keep Clarity's
-                        # duration, <chord/> membership, <type>, ties and staff. A pitch vote
-                        # must change pitch ONLY: swapping oemer's whole element would drag in
-                        # oemer's native duration base and chord membership and break timing.
-                        _apply_pitch(target_elem, oemer_ev.elem)
+                        # DUPLICATE GUARD: if adopting oemer's pitch would collide with ANOTHER
+                        # note already at this same (measure, staff, onset) slot (a chord member
+                        # or coincident note), DECLINE the swap and keep Clarity's original. We
+                        # must never emit a chord with two identical pitches (e.g. {C2,G2} where
+                        # the class-B path would push C2->G2, producing {G2,G2}).
+                        slot = (
+                            clarity_ev.measure,
+                            clarity_ev.staff,
+                            clarity_ev.onset,
+                        )
+                        new_midi = _pitch_to_midi(oemer_ev.pitch)
+                        own_midi = _pitch_to_midi(clarity_ev.pitch)
+                        others = onset_slot_midis.get(slot, set()) - {own_midi}
+                        if new_midi is not None and new_midi in others:
+                            pass  # decline: would duplicate a coincident pitch -> keep Clarity.
+                        else:
+                            # Adopt ONLY oemer's <pitch> into the Clarity element; keep Clarity's
+                            # duration, <chord/> membership, <type>, ties and staff. A pitch vote
+                            # must change pitch ONLY: swapping oemer's whole element would drag in
+                            # oemer's native duration base and chord membership and break timing.
+                            _apply_pitch(target_elem, oemer_ev.elem)
                 elif clarity_ev.pitch is None and oemer_ev.pitch is not None:
                     # Clarity heard a REST where oemer heard a pitched note: a class-C ADD
                     # candidate (the gated ADD resolver decides whether to fill the rest's slot).
@@ -1137,6 +1134,22 @@ def _isolated_slots(events: List[NoteEvent]) -> Set[Tuple[int, int, int]]:
         key = (e.measure, e.staff, e.onset)
         counts[key] = counts.get(key, 0) + 1
     return {key for key, n in counts.items() if n == 1}
+
+
+def _onset_slot_midis(events: List[NoteEvent]):
+    """Per (measure, staff, onset) slot, the set of MIDI pitches present in the primary (Clarity)
+    document. Used by the class-B duplicate guard: before adopting oemer's pitch onto a Clarity
+    note, we check the new pitch would not collide with ANOTHER note already at the same slot
+    (a chord member or coincident note), which would emit an invalid chord with two identical
+    pitches (e.g. {C2,G2} -> {G2,G2}). PURE; never raises in practice."""
+    slots = {}
+    for e in events:
+        midi = _pitch_to_midi(e.pitch)
+        if midi is None:
+            continue  # rests / garbage have no pitch to collide with.
+        key = (e.measure, e.staff, e.onset)
+        slots.setdefault(key, set()).add(midi)
+    return slots
 
 
 def _cell_duration_sums(events: List[NoteEvent]):
