@@ -767,34 +767,104 @@ def _apply_duration(clarity_ev: NoteEvent, oemer_ev: NoteEvent) -> bool:
 # B, or DECLINES; on decline / unavailable / ANY failure we keep the heuristic result (Clarity).
 # It NEVER introduces a third pitch, moves a note, or touches any other class.
 #
-# THE LOCALIZATION BLOCKER (honest, Slice 6b): the referee needs a pdf_crop + staff_geometry
-# for the disputed note, i.e. a mapping from (measure, staff, onset) to a pixel region in the
-# rasterized input PDF. Neither engine exposes per-note pixel geometry through the interface we
-# consume: both are black-box CLI subprocesses that return only logical MusicXML (no bboxes),
-# and that MusicXML carries no layout coordinates (no default-x/default-y/<print>). Recovering
-# oemer's internal NoteHead bboxes or Clarity's YOLO staff/system boxes would mean modifying the
-# engines themselves (separate venvs, invoked as subprocesses) = a large refactor, out of scope.
-# Building approximate geometry from scratch (detect systems, assign logical measures to visual
-# systems across the stitched multi-page raster, find barlines, derive x from onset fraction)
-# is itself a substantial layout-OMR pipeline; getting the measure-to-system assignment wrong
-# (pickup bars, multi-system pages, page breaks in the stitched image) yields a PLAUSIBLE WRONG
-# crop that could clear the 0.10 margin and mis-arbitrate, which would violate never-worse-than-
-# Clarity (the validated decline-on-bad-crop guard protects against DEGENERATE crops, not against
-# a clean crop of the WRONG note). A guess that mis-crops and mis-arbitrates is NOT shippable.
-# So _localize_dispute returns None for now: the integration is wired + tested end-to-end, the
-# referee is therefore a CORRECT NO-OP (always declines on None), and robust localization is the
-# documented remaining blocker. The full referee_pick path is exercised by tests via a stubbed
-# localizer + a mocked referee_pick, so flipping localization on later needs no plumbing change.
+# LOCALIZATION (Slice 6c, SOLVED via oemer's internal bboxes): the referee needs a pdf_crop +
+# staff_geometry for the disputed note, i.e. a mapping from (measure, staff, onset) to a pixel
+# region in the rasterized input. The Slice-6b blocker was that neither engine exposed per-note
+# pixel geometry. Slice 6c removes it for the OEMER candidate (candidate B): oemer INTERNALLY
+# detects each notehead's bbox + the staff-line geometry, and oemer_bbox.run_oemer_capture runs
+# oemer as a LIBRARY (instead of the bare CLI) to emit, alongside the MusicXML, a BBOX INDEX:
+# one row per pitched <note> in document order (parallel to to_events), keyed by
+# (measure, staff, onset), carrying the notehead bbox + the 5 staff-line y's at that note's x,
+# in oemer's WORKING-IMAGE pixel space. Validated on icarus.pdf: the library run's pitch
+# sequence is byte-identical to the CLI, the index is 1:1 with the pitched notes, and every
+# bbox overlays exactly on its glyph (see the tech-lead.md Slice 6c entry).
+#
+# `input_pdf` here is that bbox ARTIFACT (a dict {"working_gray": ndarray, "notes": [rows]}),
+# threaded from worker.run_oemer when OMR_ENSEMBLE_REFEREE is on. We localize the OEMER note
+# (oemer_ev) since the index is oemer-derived; the referee then renders BOTH candidates and
+# scores which pitch's notehead POSITION matches the crop, so a Clarity-correct dispute still
+# resolves to Clarity. If the artifact is absent, malformed, or the disputed note is not in the
+# index (e.g. a chord member, or count drift), we DECLINE (return None) -> referee no-op ->
+# Clarity stands. The validated decline-on-bad-crop guard in referee.py is the second backstop.
 
 
 def _localize_dispute(input_pdf, clarity_ev, oemer_ev, primary_root, common_base):
-    """Map a disputed NoteEvent to (pdf_crop, staff_geometry) in the rasterized input PDF, or
-    None if it cannot be localized reliably. See the BLOCKER note above: per-note pixel geometry
-    is not cheaply available, so this returns None today (the referee then declines = no-op).
-    The signature is the seam for a future robust localizer. NEVER raises (returns None)."""
+    """Map the disputed OEMER NoteEvent to (pdf_crop, staff_geometry) using oemer's bbox index,
+    or None if it cannot be localized confidently. `input_pdf` must be the bbox artifact dict
+    from oemer_bbox.run_oemer_capture; a bare raster (no index) -> None (decline). NEVER raises.
+
+    The crop is a generous neighborhood around the notehead from oemer's working-image gray
+    (0=ink, 1=white, the polarity referee.render_candidate / _original_band expect); the
+    staff_geometry's `lines` + `x_center` are translated into crop-local coordinates."""
     try:
-        # No reliable (measure, staff, onset) -> pixel mapping is available (see the module note
-        # above). Returning None makes the referee decline; the heuristic result (Clarity) stands.
+        if not isinstance(input_pdf, dict):
+            return None  # legacy bare-raster path has no per-note index -> decline.
+        working_gray = input_pdf.get("working_gray")
+        rows = input_pdf.get("notes")
+        if working_gray is None or not rows:
+            return None
+
+        row = _bbox_row_for(rows, oemer_ev, common_base)
+        if row is None:
+            return None  # disputed note not uniquely localizable in the index -> decline.
+
+        lines = [float(v) for v in row["lines"]]
+        if len(lines) < 5:
+            return None
+        sp = (lines[4] - lines[0]) / 4.0
+        if sp <= 0:
+            return None
+
+        bbox = row["bbox"]
+        x_center = float(row["x_center"])
+
+        # Crop a generous staff-relative band around the notehead: referee._original_band re-crops
+        # to its exact band from `lines` + `x_center`, so we just need a window that comfortably
+        # contains the staff + several ledger spaces and a notehead-width of horizontal context.
+        h, w = working_gray.shape
+        pad_x = int(round(sp * 3))
+        y0 = int(round(lines[0] - 8 * sp))
+        y1 = int(round(lines[4] + 8 * sp))
+        x0 = int(round(x_center - pad_x))
+        x1 = int(round(x_center + pad_x))
+        y0, y1 = max(0, y0), min(h, y1)
+        x0, x1 = max(0, x0), min(w, x1)
+        if y1 - y0 < 5 or x1 - x0 < 5:
+            return None
+
+        crop = working_gray[y0:y1, x0:x1]
+        staff_geometry = {
+            "lines": [ly - y0 for ly in lines],
+            "x_center": x_center - x0,
+        }
+        return crop, staff_geometry
+    except Exception:
+        return None
+
+
+def _bbox_row_for(rows, oemer_ev, common_base):
+    """Find the bbox-index row for the disputed oemer NoteEvent by (measure, staff, onset),
+    rescaling the row's onset (recorded on the row's own base) to the align common base so the
+    keys compare. Returns the row only if EXACTLY ONE pitched, non-chord row matches (an
+    isolated slot); otherwise None (decline). NEVER raises."""
+    try:
+        matches = []
+        for r in rows:
+            if r.get("is_chord"):
+                continue  # chords are out of the referee's isolated-notehead scope.
+            if r.get("measure") != oemer_ev.measure or r.get("staff") != oemer_ev.staff:
+                continue
+            row_base = r.get("base") or 1
+            row_onset = r.get("onset", 0)
+            if row_base != common_base and row_base > 0:
+                scaled = row_onset * common_base
+                if scaled % row_base != 0:
+                    continue
+                row_onset = scaled // row_base
+            if row_onset == oemer_ev.onset:
+                matches.append(r)
+        if len(matches) == 1:
+            return matches[0]
         return None
     except Exception:
         return None

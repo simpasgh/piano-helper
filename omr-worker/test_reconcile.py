@@ -1324,3 +1324,80 @@ def test_isolated_slots_excludes_chord_and_coincident():
     assert (1, 1, 0) in slots
     assert (1, 1, 4) not in slots  # chorded onset is not isolated
     assert (1, 1, 8) not in slots  # rest is not a notehead
+
+
+# === Slice 6c: oemer-bbox localization for the visual-diff referee ========================
+# _bbox_row_for + _localize_dispute map a disputed oemer NoteEvent to a (crop, staff_geometry)
+# using oemer's bbox artifact. Pure logic: tested with a SYNTHETIC artifact (numpy gray + index
+# rows), so these need neither oemer nor verovio. The safety contract: localize ONLY an
+# unambiguous isolated slot, else DECLINE (return None); never raise.
+import numpy as _np  # noqa: E402
+
+
+def _bbox_index_row(measure=1, staff=2, onset=0, base=4, is_chord=False,
+                    x_center=150.0, lines=(80, 85, 90, 95, 100), bbox=(145, 86, 10, 8)):
+    return {"measure": measure, "staff": staff, "onset": onset, "base": base,
+            "is_chord": is_chord, "x_center": x_center, "lines": list(lines), "bbox": list(bbox)}
+
+
+def _bbox_artifact(rows, h=200, w=300):
+    return {"working_gray": _np.ones((h, w), dtype=float), "notes": rows}
+
+
+def test_bbox_row_for_matches_unique_isolated_slot():
+    ev = NoteEvent(measure=1, onset=0, staff=2, pitch=("C", 0, 3), duration=4, is_chord=False)
+    rows = [_bbox_index_row(measure=1, onset=0), _bbox_index_row(measure=2, onset=0)]
+    r = reconcile._bbox_row_for(rows, ev, common_base=4)
+    assert r is not None and r["measure"] == 1 and r["staff"] == 2
+
+
+def test_bbox_row_for_declines_chord_member():
+    ev = NoteEvent(1, 0, 2, ("C", 0, 3), 4, False)
+    rows = [_bbox_index_row(onset=0, is_chord=True)]
+    assert reconcile._bbox_row_for(rows, ev, 4) is None
+
+
+def test_bbox_row_for_declines_ambiguous_double_match():
+    ev = NoteEvent(1, 0, 2, ("C", 0, 3), 4, False)
+    rows = [_bbox_index_row(onset=0), _bbox_index_row(onset=0)]
+    assert reconcile._bbox_row_for(rows, ev, 4) is None
+
+
+def test_bbox_row_for_rescales_row_base_to_common_base():
+    # Row recorded on base 8; common base 4. onset 4@base8 -> 4*4//8 = 2@base4, matching ev.onset.
+    ev = NoteEvent(1, 2, 2, ("C", 0, 3), 4, False)
+    rows = [_bbox_index_row(onset=4, base=8)]
+    assert reconcile._bbox_row_for(rows, ev, common_base=4) is not None
+
+
+def test_localize_dispute_returns_crop_and_translated_geometry():
+    ev = NoteEvent(1, 0, 2, ("C", 0, 3), 4, False)
+    art = _bbox_artifact([_bbox_index_row(onset=0)])
+    res = reconcile._localize_dispute(art, None, ev, None, common_base=4)
+    assert res is not None
+    crop, geom = res
+    assert crop.shape[0] >= 5 and crop.shape[1] >= 5
+    assert len(geom["lines"]) == 5
+    # lines/x_center translated to crop-local coords (>= 0, within the crop)
+    assert all(0 <= ly < crop.shape[0] + 1 for ly in geom["lines"])
+    assert 0 <= geom["x_center"] < crop.shape[1] + 1
+
+
+def test_localize_dispute_declines_on_bare_raster_no_index():
+    ev = NoteEvent(1, 0, 2, ("C", 0, 3), 4, False)
+    assert reconcile._localize_dispute(_np.ones((50, 50)), None, ev, None, 4) is None
+
+
+def test_localize_dispute_declines_when_note_not_in_index():
+    ev = NoteEvent(9, 0, 2, ("C", 0, 3), 4, False)  # measure 9 absent from the index
+    art = _bbox_artifact([_bbox_index_row(measure=1, onset=0)])
+    assert reconcile._localize_dispute(art, None, ev, None, 4) is None
+
+
+def test_localize_dispute_never_raises_on_garbage():
+    ev = NoteEvent(1, 0, 2, ("C", 0, 3), 4, False)
+    assert reconcile._localize_dispute({"working_gray": None, "notes": None}, None, ev, None, 4) is None
+    assert reconcile._localize_dispute("not-a-dict", None, ev, None, 4) is None
+    assert reconcile._localize_dispute({"working_gray": _np.ones((3, 3)),
+                                        "notes": [_bbox_index_row(lines=(1, 1, 1, 1, 1))]},
+                                       None, ev, None, 4) is None  # degenerate sp<=0 -> decline

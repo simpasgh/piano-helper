@@ -378,13 +378,37 @@ def oemer_command(image_path, out_dir, without_deskew):
     return cmd
 
 
-def run_oemer(image_path, workdir, without_deskew=False, timeout=None):
+def run_oemer(image_path, workdir, without_deskew=False, timeout=None, bbox_sink=None):
     """Run the primary raster engine. Returns the MusicXML path or None on failure.
 
     A timeout (seconds) caps the subprocess wall-clock; exceeding it is treated as a
-    FAILURE (return None) so the ensemble degrades to the surviving engine."""
+    FAILURE (return None) so the ensemble degrades to the surviving engine.
+
+    bbox_sink (Slice 6c, OPTIONAL): a one-entry dict. When provided AND the visual-diff
+    referee sub-gate is on, oemer is run IN-PROCESS as a LIBRARY (oemer_bbox.run_oemer_capture)
+    so it can also emit a per-note bbox index for the referee, stored at bbox_sink["artifact"].
+    The library run's pitch output is byte-identical to the CLI (validated), so this does NOT
+    change oemer's result; it only captures geometry. On ANY capture failure we fall back to
+    the plain CLI path below, so the referee gate can never regress the engine result. With no
+    sink or the gate off, the CLI path runs exactly as before (byte-identical to Slice 4)."""
     out_dir = os.path.join(workdir, "oemer-out")
     os.makedirs(out_dir, exist_ok=True)
+
+    if bbox_sink is not None and reconcile.referee_enabled():
+        try:
+            import oemer_bbox
+
+            if oemer_bbox.capture_available():
+                path, artifact = oemer_bbox.run_oemer_capture(
+                    image_path, out_dir, without_deskew
+                )
+                if path is not None:
+                    bbox_sink["artifact"] = artifact
+                    return path
+                # capture produced no path -> fall through to the CLI below.
+        except Exception as err:  # never let the capture path break the engine run.
+            log("oemer bbox capture failed (%r); using CLI" % err)
+
     try:
         subprocess.run(
             oemer_command(image_path, out_dir, without_deskew),
@@ -923,8 +947,14 @@ def _select_ensemble(job_id, input_path, workdir, is_pdf_input):
     # if present, else oemer; homr stays the last resort below. run_oemer is only launched when
     # a raster image exists (it always does unless a PDF raster failed above), so a missing
     # image degrades cleanly to Clarity-only.
+    # Slice 6c: when the referee sub-gate is on, capture oemer's per-note bbox index so the
+    # visual-diff referee can localize disputed notes. The sink collects the artifact out of the
+    # worker thread; with the gate off it stays empty and run_oemer takes the plain CLI path.
+    bbox_sink = {}
     oemer_fn = (
-        (lambda: run_oemer(image_path, workdir, without_deskew=is_pdf, timeout=timeout))
+        (lambda: run_oemer(
+            image_path, workdir, without_deskew=is_pdf, timeout=timeout, bbox_sink=bbox_sink
+        ))
         if image_path is not None
         else (lambda: None)
     )
@@ -958,7 +988,9 @@ def _select_ensemble(job_id, input_path, workdir, is_pdf_input):
         # ONLY when OMR_ENSEMBLE_REFEREE is on; with the sub-gate off (or image_path None) it is
         # ignored and reconcile behaves exactly as in Slice 4. image_path may be None on a PDF
         # whose rasterization failed (Clarity still ran); the referee then simply has no original.
-        reconciled = _reconcile_paths(clarity_path, oemer_path, workdir, image_path)
+        reconciled = _reconcile_paths(
+            clarity_path, oemer_path, workdir, image_path, bbox_sink.get("artifact")
+        )
         if reconciled is not None:
             result_path = reconciled
             source = "ensemble"
@@ -966,17 +998,19 @@ def _select_ensemble(job_id, input_path, workdir, is_pdf_input):
     return result_path, source
 
 
-def _reconcile_paths(primary_path, secondary_path, workdir, raster_path=None):
+def _reconcile_paths(primary_path, secondary_path, workdir, raster_path=None, bbox_artifact=None):
     """Read both engines' MusicXML and reconcile them, writing the result to a new file in
     workdir and returning its path. reconcile() never raises (returns primary bytes on any
     failure), so the worst case is the Clarity bytes written back out, never worse than
     Clarity-alone. Returns None only if reading the primary fails, in which case the caller
     keeps the original result_path.
 
-    raster_path (Slice 6b, OPTIONAL) is the rasterized original handed to reconcile as the
-    referee's input. It is loaded into a grayscale array ONLY when the referee sub-gate is on
-    (avoid a needless image decode on every job); with the gate off it stays None and reconcile
-    never touches it (byte-identical to Slice 4)."""
+    raster_path (Slice 6b, OPTIONAL) is the rasterized original; bbox_artifact (Slice 6c,
+    OPTIONAL) is oemer's per-note bbox index captured by run_oemer. When the referee sub-gate is
+    on AND a bbox_artifact is present, it is the referee's localization input (preferred: it
+    carries oemer's working-image gray + per-note geometry, so the referee can crop the disputed
+    note). The raster is only loaded as a no-index fallback that makes the referee decline. With
+    the gate off both stay None and reconcile is byte-identical to Slice 4."""
     try:
         with open(primary_path, "rb") as fh:
             primary_bytes = fh.read()
@@ -989,7 +1023,12 @@ def _reconcile_paths(primary_path, secondary_path, workdir, raster_path=None):
     except OSError:
         secondary_bytes = None  # secondary unreadable -> reconcile is a pass-through.
 
-    input_pdf = _load_referee_raster(raster_path)
+    # Prefer the bbox artifact (it can localize); else fall back to the bare raster (referee
+    # then declines for lack of an index). Loading either is gated on the referee sub-gate.
+    if bbox_artifact is not None and reconcile.referee_enabled():
+        input_pdf = bbox_artifact
+    else:
+        input_pdf = _load_referee_raster(raster_path)
     reconciled_bytes = reconcile.reconcile(primary_bytes, secondary_bytes, input_pdf=input_pdf)
     out_path = os.path.join(workdir, "reconciled.musicxml")
     with open(out_path, "wb") as fh:
