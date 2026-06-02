@@ -128,34 +128,52 @@ describe("OMR worker Clarity-OMR tie engine (issue #135)", () => {
   it("ensemble path (flag ON) runs the two primaries concurrently, keeping Clarity>oemer>homr", () => {
     // When the flag is ON, _select_ensemble runs Clarity and oemer CONCURRENTLY via a
     // ThreadPoolExecutor, but the SELECTION precedence is unchanged (Clarity wins, else oemer,
-    // else homr, else sentinel). This guard pins the precedence without pinning a sequential
-    // call order, so the concurrent scheduling is allowed while a precedence regression fails.
+    // else homr, else sentinel). Slice 3 needs BOTH engine outputs to reconcile, so the
+    // concurrent launcher is now run_primary_engines (returns both paths); select_primary_result
+    // is retained as the Slice-1 selector and still unit-tested.
     expect(worker).toContain("is_pdf_input");
+    expect(worker).toContain("def run_primary_engines(");
     expect(worker).toContain("def select_primary_result(");
     // The two primaries are launched on a thread pool (true wall-clock overlap on subprocs).
     expect(worker).toContain("import concurrent.futures");
     expect(worker).toMatch(/concurrent\.futures\.ThreadPoolExecutor/);
     // Clarity is launched ONLY for PDF input (it is PDF-only); oemer always.
     expect(worker).toMatch(/if is_pdf_input:\s*\n\s*futures\["clarity"\] = pool\.submit/);
-    // Selection precedence inside the selector: Clarity checked before oemer.
-    const selector = worker.slice(
-      worker.indexOf("def select_primary_result("),
-      worker.indexOf("def _select_legacy("),
+    // Selection precedence in the ensemble flow: Clarity checked before oemer.
+    const flow = worker.slice(
+      worker.indexOf("def _select_ensemble("),
+      worker.indexOf("def _reconcile_paths("),
     );
-    const clarityPick = selector.indexOf('return clarity_result, "clarity"');
-    const oemerPick = selector.indexOf('return oemer_result, "oemer"');
+    const clarityPick = flow.indexOf('result_path, source = clarity_path, "clarity"');
+    const oemerPick = flow.indexOf('result_path, source = oemer_path, "oemer"');
     expect(clarityPick).toBeGreaterThan(-1);
     expect(clarityPick).toBeLessThan(oemerPick);
     // homr stays the LAST resort, run in the ensemble path only after the concurrent
     // primaries both fail (result_path is None).
-    const flow = worker.slice(
-      worker.indexOf("def _select_ensemble("),
-      worker.indexOf("def process_job("),
-    );
-    const selectCall = flow.indexOf("select_primary_result(");
+    const launch = flow.indexOf("run_primary_engines(");
     const homr = flow.indexOf("run_homr(image_path");
-    expect(selectCall).toBeGreaterThan(-1);
-    expect(selectCall).toBeLessThan(homr);
+    expect(launch).toBeGreaterThan(-1);
+    expect(launch).toBeLessThan(homr);
+  });
+
+  it("reconciles both engine outputs BEFORE merge/normalize when ensemble is on", () => {
+    // Slice 3: when BOTH primaries produce output, _select_ensemble reconciles (clarity, oemer)
+    // using Clarity as the skeleton, BEFORE the shared post-transforms. New order with the flag
+    // on + both engines: reconcile -> merge_to_grand_staff -> normalize_ties -> put_object.
+    expect(worker).toContain("import reconcile");
+    expect(worker).toContain("def _reconcile_paths(");
+    expect(worker).toContain("reconcile.reconcile(primary_bytes, secondary_bytes)");
+    // Reconcile fires only when BOTH engine paths are present (single-engine = pass-through).
+    expect(worker).toMatch(
+      /clarity_path is not None and oemer_path is not None/,
+    );
+    // The reconcile call (inside _select_ensemble) precedes the post-transforms (in process_job).
+    const reconcileCall = worker.indexOf("reconciled = _reconcile_paths(");
+    const merge = worker.indexOf("body = merge_to_grand_staff(body)");
+    const ties = worker.indexOf("body = normalize_ties(body)");
+    expect(reconcileCall).toBeGreaterThan(-1);
+    expect(reconcileCall).toBeLessThan(merge);
+    expect(merge).toBeLessThan(ties);
   });
 
   it("applies a per-engine subprocess timeout so one wedged engine cannot stall the worker", () => {
