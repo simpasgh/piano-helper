@@ -4,6 +4,74 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-06-02: PRE-FLIP QA of the ENSEMBLE OMR heuristic reconciliation (OMR_ENSEMBLE=1, sub-gates
+  OMR_ENSEMBLE_TIMING / OMR_ENSEMBLE_ADD / OMR_ENSEMBLE_REFEREE all OFF = the "Slice 3" safe path:
+  reconcile resolves only class A=agree, B=pitch vote, E=duration vote; C/D are no-ops) on the LIVE
+  cx33 Hetzner worker (HEAD `03a3898` #154, .venv311). **VERDICT: FAIL.** The ensemble REGRESSES
+  Clarity on every one of the 4 real MuseScore-export PDFs tested; it violates the never-worse-than-
+  Clarity invariant. **DO NOT flip OMR_ENSEMBLE on in prod until reconcile.py's class-B vote is fixed.**
+  - METHOD (clean, did NOT touch the live service or R2): copied the 4 PDFs to the box, ran
+    worker.py's processing path DIRECTLY in .venv311 via a driver (`/tmp/qa-ensemble/qa_driver.py`,
+    now cleaned up) that mirrors process_job exactly: `_select_legacy` (ENSEMBLE off = BASELINE =
+    Clarity short-circuit, prod behavior) vs `_select_ensemble` (ENSEMBLE on), then merge_to_grand_
+    staff + normalize_ties on each. Two MusicXML per PDF. Diffed in document order (structure is
+    identical with sub-gates off: only pitch/duration of MATCHED slots can change), then ground-
+    truthed every diff against the source PDF by detecting staff-line y-positions and overlaying a
+    calibrated pitch ruler on a 250-300 DPI render (the #113 lesson: judge by eye vs the source, not
+    by count). The live prod process (MainPID 12349) was NEVER restarted; env file + live /proc
+    environ have 0 ENSEMBLE vars; confirmed active + polling (state S) at the end; test dir removed.
+  - PER-PDF RESULTS:
+
+    | PDF | baseline-vs-ensemble diffs | improvements | neutral | REGRESSIONS |
+    | --- | --- | --- | --- | --- |
+    | icarus.pdf | 6 | 1 (m7 F4->E4, verified correct) | 0 | **5** (m6/m14/m22/m24/m26) |
+    | Liminality.pdf | 11 | (not all ground-truthed) | - | >=1 (same class as icarus) |
+    | the cut that always bleeds.pdf | 40 | (not all ground-truthed) | - | **>=1 verified** (m4 C4->B3) + ~30 same-class |
+    | Reverie.pdf | 20 | (not all ground-truthed) | - | >=1 (same class; RH melody flattened to B4) |
+
+    Total 77 diffs. icarus fully ground-truthed = 5 regressions / 1 improvement -> FAIL on PDF #1
+    alone. the_cut m4 independently verified (a 2nd score, same C-major-triad C4->B3 corruption).
+  - THE REGRESSION CLASS (the headline for tech-lead): the class-B pitch vote in `reconcile._vote_
+    pitch` systematically replaces a CORRECT Clarity chord/melody note with oemer's WRONG neighbor a
+    semitone/step away. Dominant pattern: a C-major LH triad's C (C4/C3) -> B (B3/B2), wrecking the
+    triad. Pervasive: the_cut alone has ~25 instances of C4->{B3,G3,F3} in staff-2 whole-note chords.
+    TWO root causes, both reproduced exactly by tracing `_vote_pitch` with the real pitches:
+    1. **OCTAVE-JUMP PRIOR mis-fires at the boundary (`_STAFF_TESSITURA[2]=48` = C3, threshold
+       `>= 12`).** For a staff-2 vote C4(midi 60) vs B3(59): c_jump=|60-48|=12 (>=12 => "implausible
+       octave jump") while o_jump=|59-48|=11 (<12 => "plausible"), so the branch `if c_jump >= 12 and
+       o_jump < 12: return oemer` picks oemer's wrong B3. C4 is a totally normal LH note but sits
+       EXACTLY one octave from the assumed C3 center, so the prior penalizes it. Same for icarus m26
+       C2(36) vs G2(43): c_jump=12 -> picks oemer's G2. (Fix ideas: widen the threshold, or only apply
+       it when ONE candidate is a >octave outlier AND the other is clearly inside, or drop this prior.)
+    2. **VOICE-LEADING PRIOR is applied ACROSS SIMULTANEOUS CHORD MEMBERS.** In a C-major triad
+       G2-C3-E3, when the C3 member is voted, prev_midi has been set to the just-emitted G2(43); from
+       G2, B2(47, interval 4) beats C3(48, interval 5), so voice-leading picks oemer's wrong B2
+       (icarus m22/m24; many the_cut/reverie cases). Voice-leading should only compare to the previous
+       note at a DIFFERENT onset, never to a coincident chord member. (Reverie m1-4 RH shows the
+       degenerate end of this: a run of distinct melody notes G5/C5/F5/D5/E5 all collapse to a single
+       repeated B4 because each successive vote chases the previous emitted pitch.)
+  - WHY ALL THESE ARE DIATONICITY-BLIND: every test score is in C major (or near it), so the key-
+    signature diatonicity heuristic (which runs FIRST and is the one good prior here) can NEVER
+    separate two naturals (C vs B are both diatonic), leaving the two BAD priors (octave-jump,
+    voice-leading) to decide. On a C-major piece the vote has no real signal and defaults to noise.
+  - WHAT WORKED (the rare win): icarus m7 the only verified IMPROVEMENT - Clarity misread the chord
+    top as F4, oemer had the correct E4 (notehead on the E4 ledger line); the vote fell through to
+    Clarity-tiebreak... no: it was a genuine oemer win there. Net 1 good vs 5+ bad on icarus, so even
+    the wins do not pay for the damage.
+  - LATENCY (ensemble adds oemer + runs both engines concurrently, so ~max(clarity,oemer) but with
+    CPU contention on the 4-vCPU box it is ~3-5x the Clarity-only baseline): icarus baseline 79s ->
+    ensemble ~7min; Liminality 95s -> 449s; the cut 211s -> 633s (~10.5min!); Reverie 87s -> 430s.
+    Clarity inference alone jumps from ~52s to ~160s under oemer co-load. All within the app's 15-min
+    poll budget but a real UX cost, and the_cut at 10.5min is close to the edge.
+  - PASS CRITERION (zero regressions) NOT MET. The ensemble must never make a Clarity-correct note
+    wrong; it does so dozens of times per score. Box left in prod state: OMR_ENSEMBLE OFF, service
+    active + polling, do the deliberate flip later ONLY after reconcile's class-B vote is fixed and
+    re-QA'd. GOTCHA for the re-QA: use C-major scores to stress the bad path (diatonicity can't mask
+    it), detect staff lines programmatically + overlay a calibrated pitch ruler to read ledger-line
+    noteheads exactly (eyeballing C4 vs B3 on a whole-note chord is error-prone). The driver-direct
+    method (run _select_legacy vs _select_ensemble in .venv311, no R2/service touch) is the fast,
+    safe way to A/B the same input; ensemble run takes ~7-10min each so batch them serially in nohup.
+
 - 2026-05-31: PR #146 / issue #6 (FIRST slice of the OMR correction UI: a "Correct" toggle in
   the toolbar next to "Names". When enabled, playback pauses and the user selects a falling note
   and edits its pitch or deletes it; the EDIT diverges from the OSMD scan above on purpose -- the

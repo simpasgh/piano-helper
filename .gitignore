@@ -7,3 +7,7 @@ dist-ssr
 
 # Per-user Claude Code settings (machine-local, never shared)
 .claude/settings.local.json
+
+# Python
+__pycache__/
+*.pyc
