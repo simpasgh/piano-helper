@@ -539,7 +539,7 @@ def test_ensemble_both_engines_reconcile_before_merge_and_normalize(tmp_path, mo
     monkeypatch.setattr(worker, "run_oemer", lambda *a, **k: str(oemer_out))
     monkeypatch.setattr(worker, "rasterize_if_pdf", lambda *a, **k: ("/img.png", True))
 
-    def fake_reconcile(primary, secondary):
+    def fake_reconcile(primary, secondary, input_pdf=None):
         order.append("reconcile")
         return b"<reconciled/>"
 
@@ -577,7 +577,7 @@ def test_ensemble_single_engine_reconcile_is_passthrough(tmp_path, monkeypatch):
     monkeypatch.setattr(worker, "run_oemer", lambda *a, **k: str(oemer_out))
     monkeypatch.setattr(worker, "rasterize_if_pdf", lambda *a, **k: ("/img.png", True))
 
-    def fake_reconcile(primary, secondary):
+    def fake_reconcile(primary, secondary, input_pdf=None):
         called["reconcile"] = True
         return primary
 
@@ -684,6 +684,84 @@ def test_worker_reconcile_add_activates_with_subgate(tmp_path, monkeypatch):
     with open(out_path, "rb") as fh:
         steps = _steps(fh.read())
     assert steps == ["C", "E", "G"]  # E5 added into the gap
+
+
+# --- Slice 6b: referee raster plumbing through _reconcile_paths ---------------------------
+# The referee input (rasterized original) is threaded process_job -> _select_ensemble ->
+# _reconcile_paths -> reconcile(input_pdf=...). It is loaded into an array ONLY when the
+# OMR_ENSEMBLE_REFEREE sub-gate is on; with the gate off the raster is never decoded and
+# input_pdf is None (byte-identical to Slice 4). reconcile is stubbed to capture the kwarg.
+
+
+def test_reconcile_paths_passes_no_raster_when_referee_off(tmp_path, monkeypatch):
+    # Referee sub-gate OFF: _load_referee_raster returns None without decoding, and reconcile is
+    # called with input_pdf=None. A raster_path is supplied but must be IGNORED.
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    monkeypatch.delenv("OMR_ENSEMBLE_REFEREE", raising=False)
+    primary = tmp_path / "clarity.musicxml"
+    primary.write_bytes(_CLARITY_GAP)
+    secondary = tmp_path / "oemer.musicxml"
+    secondary.write_bytes(_OEMER_FILLS_GAP)
+
+    seen = {}
+
+    def fake_reconcile(p, s, input_pdf=None):
+        seen["input_pdf"] = input_pdf
+        return p
+
+    monkeypatch.setattr(worker.reconcile, "reconcile", fake_reconcile)
+    # raster_path points at a NON-image so a decode would fail loudly if it were attempted.
+    bogus = tmp_path / "raster.png"
+    bogus.write_bytes(b"not an image")
+    worker._reconcile_paths(str(primary), str(secondary), str(tmp_path), str(bogus))
+    assert seen["input_pdf"] is None  # gate off -> no decode, input_pdf None
+
+
+def test_reconcile_paths_loads_raster_when_referee_on(tmp_path, monkeypatch):
+    # Referee sub-gate ON: the raster is decoded to a grayscale ndarray and passed as input_pdf.
+    # numpy + Pillow are worker-venv deps (both engines need them); skip cleanly where absent so
+    # the suite still runs in a minimal CI/dev env, matching how the referee tests skip verovio.
+    pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    monkeypatch.setenv("OMR_ENSEMBLE_REFEREE", "1")
+    primary = tmp_path / "clarity.musicxml"
+    primary.write_bytes(_CLARITY_GAP)
+    secondary = tmp_path / "oemer.musicxml"
+    secondary.write_bytes(_OEMER_FILLS_GAP)
+
+    # Write a tiny real PNG so Pillow can decode it.
+    from PIL import Image
+
+    raster = tmp_path / "raster.png"
+    Image.new("RGB", (8, 8), "white").save(raster)
+
+    seen = {}
+
+    def fake_reconcile(p, s, input_pdf=None):
+        seen["input_pdf"] = input_pdf
+        return p
+
+    monkeypatch.setattr(worker.reconcile, "reconcile", fake_reconcile)
+    worker._reconcile_paths(str(primary), str(secondary), str(tmp_path), str(raster))
+    arr = seen["input_pdf"]
+    assert arr is not None
+    assert arr.shape == (8, 8)  # grayscale array of the raster
+
+
+def test_load_referee_raster_none_path_is_none(monkeypatch):
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    monkeypatch.setenv("OMR_ENSEMBLE_REFEREE", "1")
+    assert worker._load_referee_raster(None) is None
+
+
+def test_load_referee_raster_decode_failure_is_none(tmp_path, monkeypatch):
+    # A corrupt/non-image raster degrades to None (never raises into process_job).
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    monkeypatch.setenv("OMR_ENSEMBLE_REFEREE", "1")
+    bad = tmp_path / "bad.png"
+    bad.write_bytes(b"definitely not a png")
+    assert worker._load_referee_raster(str(bad)) is None
 
 
 # --- merge_to_grand_staff (#135) ---------------------------------------------------------

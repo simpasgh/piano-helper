@@ -953,7 +953,12 @@ def _select_ensemble(job_id, input_path, workdir, is_pdf_input):
     # path reaches here (process_job branches on the flag). When only one engine succeeded,
     # reconcile is a pass-through, so this is byte-identical to single-engine (no regression).
     if result_path is not None and clarity_path is not None and oemer_path is not None:
-        reconciled = _reconcile_paths(clarity_path, oemer_path, workdir)
+        # Pass the rasterized original (the stitched PNG oemer consumed) so the Slice-6b
+        # visual-diff referee can be consulted on residual class-B disputes. reconcile uses it
+        # ONLY when OMR_ENSEMBLE_REFEREE is on; with the sub-gate off (or image_path None) it is
+        # ignored and reconcile behaves exactly as in Slice 4. image_path may be None on a PDF
+        # whose rasterization failed (Clarity still ran); the referee then simply has no original.
+        reconciled = _reconcile_paths(clarity_path, oemer_path, workdir, image_path)
         if reconciled is not None:
             result_path = reconciled
             source = "ensemble"
@@ -961,12 +966,17 @@ def _select_ensemble(job_id, input_path, workdir, is_pdf_input):
     return result_path, source
 
 
-def _reconcile_paths(primary_path, secondary_path, workdir):
-    """Read both engines' MusicXML and reconcile them (Slice 3), writing the result to a new
-    file in workdir and returning its path. reconcile() never raises (returns primary bytes on
-    any failure), so the worst case is the Clarity bytes written back out, never worse than
+def _reconcile_paths(primary_path, secondary_path, workdir, raster_path=None):
+    """Read both engines' MusicXML and reconcile them, writing the result to a new file in
+    workdir and returning its path. reconcile() never raises (returns primary bytes on any
+    failure), so the worst case is the Clarity bytes written back out, never worse than
     Clarity-alone. Returns None only if reading the primary fails, in which case the caller
-    keeps the original result_path."""
+    keeps the original result_path.
+
+    raster_path (Slice 6b, OPTIONAL) is the rasterized original handed to reconcile as the
+    referee's input. It is loaded into a grayscale array ONLY when the referee sub-gate is on
+    (avoid a needless image decode on every job); with the gate off it stays None and reconcile
+    never touches it (byte-identical to Slice 4)."""
     try:
         with open(primary_path, "rb") as fh:
             primary_bytes = fh.read()
@@ -979,11 +989,30 @@ def _reconcile_paths(primary_path, secondary_path, workdir):
     except OSError:
         secondary_bytes = None  # secondary unreadable -> reconcile is a pass-through.
 
-    reconciled_bytes = reconcile.reconcile(primary_bytes, secondary_bytes)
+    input_pdf = _load_referee_raster(raster_path)
+    reconciled_bytes = reconcile.reconcile(primary_bytes, secondary_bytes, input_pdf=input_pdf)
     out_path = os.path.join(workdir, "reconciled.musicxml")
     with open(out_path, "wb") as fh:
         fh.write(reconciled_bytes)
     return out_path
+
+
+def _load_referee_raster(raster_path):
+    """Load the rasterized original into a float32 grayscale ndarray ([0,1], 0=ink) for the
+    visual-diff referee, ONLY when OMR_ENSEMBLE_REFEREE is on (else return None so reconcile's
+    referee path stays a no-op and no image is decoded). Never raises: any failure (no path,
+    Pillow/numpy missing, decode error) -> None, and reconcile simply has no referee input."""
+    if raster_path is None or not reconcile.referee_enabled():
+        return None
+    try:
+        import numpy as np
+        from PIL import Image
+
+        with Image.open(raster_path) as im:
+            return np.asarray(im.convert("L"), dtype=np.float32) / 255.0
+    except Exception as err:  # never raise into process_job
+        log("referee raster load skipped (%r)" % err)
+        return None
 
 
 def run_primary_engines(run_clarity_fn, run_oemer_fn, is_pdf_input):
