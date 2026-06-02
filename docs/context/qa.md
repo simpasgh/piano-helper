@@ -4,6 +4,20 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-06-03: ENSEMBLE OMR + REFEREE ENABLED in prod (#160) with a per-job "Fast scan" opt-out.
+  Live smoke via real uploads through prod `/api/omr` (icarus.pdf): DEFAULT job returned a real
+  score (200, not the failure sentinel) in ~7min, worker log `recognized via ensemble output
+  .../reconciled.musicxml` (Clarity + oemer + reconcile + referee ran). FAST job (checkbox on)
+  returned in ~2min, worker log `recognized via clarity` (single engine, no oemer). Prod HTML
+  serves the `#fast-scan` checkbox; box pytest 180 passed. **REMAINING QA (browser, owns next):**
+  drive the actual feature in a real browser on prod - upload a PDF with Fast scan OFF (confirm
+  the ~7min accurate scan loads + plays as falling notes + sheet), then ON (confirm the ~1-2min
+  fast scan), and confirm the checkbox state is respected. The smoke proves the worker paths and
+  the API chain; it does NOT click the feature. Also watch: a LARGE score on the default path may
+  approach the app's 15-min poll timeout (oemer is the bottleneck); if users hit timeouts, that is
+  the signal to make the ensemble selective (oemer only when Clarity is low-confidence) per the
+  tech-lead enablement notes.
+
 - 2026-06-03: RE-VALIDATION of the ENSEMBLE OMR referee after the align() optimal-assignment fix +
   dense-run decline-guard (PR #158, slice 6d, merged to main). Supersedes the 2026-06-02 PRE-FLIP
   FAIL below for the referee path. Same method as before (isolated `/tmp/align-val` on the cx33
