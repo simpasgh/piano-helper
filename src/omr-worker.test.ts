@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const worker = readFileSync(`${root}omr-worker/worker.py`, "utf8");
+const reconcile = readFileSync(`${root}omr-worker/reconcile.py`, "utf8");
 
 describe("OMR worker rasterization preprocessing (issue #109)", () => {
   it("keeps the rasterization DPI in the #112-swept sweet spot", () => {
@@ -162,7 +163,11 @@ describe("OMR worker Clarity-OMR tie engine (issue #135)", () => {
     // on + both engines: reconcile -> merge_to_grand_staff -> normalize_ties -> put_object.
     expect(worker).toContain("import reconcile");
     expect(worker).toContain("def _reconcile_paths(");
-    expect(worker).toContain("reconcile.reconcile(primary_bytes, secondary_bytes)");
+    // Slice 6b threaded an optional input_pdf (the referee's rasterized original) through the
+    // reconcile call; the kwarg defaults so single-engine and gate-off behavior is unchanged.
+    expect(worker).toMatch(
+      /reconcile\.reconcile\(primary_bytes,\s*secondary_bytes,\s*input_pdf=input_pdf\)/,
+    );
     // Reconcile fires only when BOTH engine paths are present (single-engine = pass-through).
     expect(worker).toMatch(
       /clarity_path is not None and oemer_path is not None/,
@@ -174,6 +179,23 @@ describe("OMR worker Clarity-OMR tie engine (issue #135)", () => {
     expect(reconcileCall).toBeGreaterThan(-1);
     expect(reconcileCall).toBeLessThan(merge);
     expect(merge).toBeLessThan(ties);
+  });
+
+  it("threads the rasterized original to reconcile only behind the referee sub-gate (Slice 6b)", () => {
+    // The visual-diff referee needs the original raster. _select_ensemble passes image_path into
+    // _reconcile_paths, which loads it into an array ONLY when OMR_ENSEMBLE_REFEREE is on (gate
+    // off -> input_pdf None -> byte-identical to Slice 4). The referee sub-gate lives in
+    // reconcile.py, default OFF, and additionally requires the parent OMR_ENSEMBLE.
+    expect(worker).toMatch(/_reconcile_paths\(clarity_path,\s*oemer_path,\s*workdir,\s*image_path\)/);
+    expect(worker).toContain("def _load_referee_raster(");
+    expect(worker).toMatch(/reconcile\.referee_enabled\(\)/);
+    expect(reconcile).toContain("OMR_ENSEMBLE_REFEREE_ENV");
+    expect(reconcile).toContain("def referee_enabled(");
+    // The referee is a residual tiebreaker: it only fires when the heuristic vote is residual.
+    expect(reconcile).toContain("def _pitch_vote_is_residual(");
+    expect(reconcile).toContain("def _maybe_referee_pitch(");
+    // Localization is the documented blocker: the localizer returns None today (no-op referee).
+    expect(reconcile).toContain("def _localize_dispute(");
   });
 
   it("applies a per-engine subprocess timeout so one wedged engine cannot stall the worker", () => {

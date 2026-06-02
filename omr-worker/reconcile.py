@@ -52,6 +52,7 @@ Pitch = Tuple[str, int, int]
 OMR_ENSEMBLE_ENV = "OMR_ENSEMBLE"
 OMR_ENSEMBLE_TIMING_ENV = "OMR_ENSEMBLE_TIMING"  # class D (timing mismatch)
 OMR_ENSEMBLE_ADD_ENV = "OMR_ENSEMBLE_ADD"  # class C oemer-only ADD
+OMR_ENSEMBLE_REFEREE_ENV = "OMR_ENSEMBLE_REFEREE"  # class B residual visual-diff referee
 
 
 def _flag_on(name: str) -> bool:
@@ -79,6 +80,14 @@ def add_enabled() -> bool:
     unless OMR_ENSEMBLE_ADD is truthy AND the parent OMR_ENSEMBLE is also on. With just
     OMR_ENSEMBLE=1 oemer-only notes stay dropped (Slice-3 behavior)."""
     return ensemble_enabled() and _flag_on(OMR_ENSEMBLE_ADD_ENV)
+
+
+def referee_enabled() -> bool:
+    """Class B residual visual-diff referee sub-gate (Slice 6b). OFF unless
+    OMR_ENSEMBLE_REFEREE is truthy AND the parent OMR_ENSEMBLE is also on. With just
+    OMR_ENSEMBLE=1 the referee is never called; class-B disputes the heuristics cannot
+    separate stay tiebroken to Clarity (Slice-3 behavior)."""
+    return ensemble_enabled() and _flag_on(OMR_ENSEMBLE_REFEREE_ENV)
 
 
 @dataclass
@@ -605,6 +614,58 @@ def _vote_pitch(
     return clarity
 
 
+def _pitch_vote_is_residual(
+    clarity: NoteEvent,
+    oemer: NoteEvent,
+    diatonic_pcs: Set[int],
+    prev_midi: Optional[int],
+) -> bool:
+    """True when the FREE class-B heuristics in _vote_pitch could NOT confidently SEPARATE the
+    two candidates and only fell through to the Clarity tiebreak: both in range, both diatonic
+    (or both non-diatonic), neither separated by the octave-jump prior, and voice-leading a tie
+    or absent. This is the LOW-CONFIDENCE residual the Slice-6 design routes to the visual-diff
+    referee (both candidates are plausible, so the cheap priors cannot decide). PURE; mirrors
+    the exact branch order of _vote_pitch so the two never disagree on what "residual" means.
+
+    Returns False (NOT residual) whenever any heuristic WOULD have separated the pair, so a
+    confidently-decided dispute never reaches the referee. Never raises.
+    """
+    try:
+        c_mid = _pitch_to_midi(clarity.pitch)
+        o_mid = _pitch_to_midi(oemer.pitch)
+
+        # (2a) range: if range separates (or both garbage) it is decided, not residual.
+        c_ok = c_mid is not None and MIDI_MIN <= c_mid <= MIDI_MAX
+        o_ok = o_mid is not None and MIDI_MIN <= o_mid <= MIDI_MAX
+        if not (c_ok and o_ok):
+            return False  # range decided it (or both garbage -> Clarity by other path).
+
+        # (1) diatonicity: if exactly one is diatonic it is decided.
+        c_dia = (c_mid % 12) in diatonic_pcs
+        o_dia = (o_mid % 12) in diatonic_pcs
+        if c_dia != o_dia:
+            return False
+
+        # (2b) octave-jump prior: if exactly one is an implausible octave jump it is decided.
+        center = _STAFF_TESSITURA.get(clarity.staff, _STAFF_TESSITURA[1])
+        c_jump = abs(c_mid - center)
+        o_jump = abs(o_mid - center)
+        if (c_jump >= 12) != (o_jump >= 12):
+            return False
+
+        # (3) voice-leading: a STRICTLY smaller interval decides; an equal interval does not.
+        if prev_midi is not None:
+            c_step = abs(c_mid - prev_midi)
+            o_step = abs(o_mid - prev_midi)
+            if c_step != o_step:
+                return False
+
+        # Nothing separated them: the heuristics only had the Clarity tiebreak -> residual.
+        return True
+    except Exception:
+        return False
+
+
 def _vote_duration(
     clarity: NoteEvent,
     oemer: NoteEvent,
@@ -717,12 +778,123 @@ def _apply_duration(clarity_ev: NoteEvent, oemer_ev: NoteEvent) -> bool:
     return True
 
 
-def reconcile(primary_bytes, secondary_bytes) -> bytes:
+# --- Class B residual: visual-diff referee (Slice 6b, gated by referee_enabled) ----------
+# When the FREE heuristics in _vote_pitch cannot confidently separate a class-B pitch dispute
+# (the LOW-CONFIDENCE residual: both candidates diatonic + in range, so the cheap priors do
+# not decide) AND the dispute is in the referee's PROVEN scope (isolated notehead, interval
+# >= a third), consult the visual-diff referee on the ORIGINAL input PDF to break the tie.
+# Heuristics FIRST; the referee is a residual tiebreaker only. Behind OMR_ENSEMBLE_REFEREE,
+# default OFF (and requires OMR_ENSEMBLE). Never-worse-than-Clarity is preserved: the referee
+# only ADJUDICATES between the two existing candidates (Clarity=A, oemer=B). It picks A, picks
+# B, or DECLINES; on decline / unavailable / ANY failure we keep the heuristic result (Clarity).
+# It NEVER introduces a third pitch, moves a note, or touches any other class.
+#
+# THE LOCALIZATION BLOCKER (honest, Slice 6b): the referee needs a pdf_crop + staff_geometry
+# for the disputed note, i.e. a mapping from (measure, staff, onset) to a pixel region in the
+# rasterized input PDF. Neither engine exposes per-note pixel geometry through the interface we
+# consume: both are black-box CLI subprocesses that return only logical MusicXML (no bboxes),
+# and that MusicXML carries no layout coordinates (no default-x/default-y/<print>). Recovering
+# oemer's internal NoteHead bboxes or Clarity's YOLO staff/system boxes would mean modifying the
+# engines themselves (separate venvs, invoked as subprocesses) = a large refactor, out of scope.
+# Building approximate geometry from scratch (detect systems, assign logical measures to visual
+# systems across the stitched multi-page raster, find barlines, derive x from onset fraction)
+# is itself a substantial layout-OMR pipeline; getting the measure-to-system assignment wrong
+# (pickup bars, multi-system pages, page breaks in the stitched image) yields a PLAUSIBLE WRONG
+# crop that could clear the 0.10 margin and mis-arbitrate, which would violate never-worse-than-
+# Clarity (the validated decline-on-bad-crop guard protects against DEGENERATE crops, not against
+# a clean crop of the WRONG note). A guess that mis-crops and mis-arbitrates is NOT shippable.
+# So _localize_dispute returns None for now: the integration is wired + tested end-to-end, the
+# referee is therefore a CORRECT NO-OP (always declines on None), and robust localization is the
+# documented remaining blocker. The full referee_pick path is exercised by tests via a stubbed
+# localizer + a mocked referee_pick, so flipping localization on later needs no plumbing change.
+
+
+def _localize_dispute(input_pdf, clarity_ev, oemer_ev, primary_root, common_base):
+    """Map a disputed NoteEvent to (pdf_crop, staff_geometry) in the rasterized input PDF, or
+    None if it cannot be localized reliably. See the BLOCKER note above: per-note pixel geometry
+    is not cheaply available, so this returns None today (the referee then declines = no-op).
+    The signature is the seam for a future robust localizer. NEVER raises (returns None)."""
+    try:
+        # No reliable (measure, staff, onset) -> pixel mapping is available (see the module note
+        # above). Returning None makes the referee decline; the heuristic result (Clarity) stands.
+        return None
+    except Exception:
+        return None
+
+
+def _maybe_referee_pitch(
+    input_pdf,
+    clarity_ev,
+    oemer_ev,
+    primary_root,
+    common_base,
+    is_isolated,
+) -> Optional[NoteEvent]:
+    """Consult the visual-diff referee on a residual class-B pitch dispute. Returns the WINNING
+    NoteEvent (clarity_ev or oemer_ev) only if the referee makes a confident pick; returns None
+    to DECLINE (keep the heuristic result) on out-of-scope, unavailable, no-localization, or ANY
+    failure. NEVER raises.
+
+    Safety: the referee only chooses between the two EXISTING candidates. candidate A = Clarity,
+    candidate B = oemer (the validated referee_pick contract: 'a'->A, 'b'->B, None->decline).
+    """
+    if input_pdf is None:
+        return None
+    try:
+        # Lazy, guarded import: referee.py guards its own verovio/cairosvg deps and exposes
+        # REFEREE_AVAILABLE. reconcile.py stays stdlib-only when the referee is never imported
+        # (the pure path), so the pure tests need no verovio. A failed import -> decline.
+        import referee  # noqa: E402
+    except Exception:
+        return None
+    try:
+        if not getattr(referee, "REFEREE_AVAILABLE", False):
+            return None  # verovio/cairosvg absent on this worker -> referee is a no-op.
+
+        # Scope gate (PURE, cheap, BEFORE any render/localization): isolated-notehead pitch
+        # dispute of an octave or a third-or-larger interval. Out of scope -> never call referee.
+        interval = referee.pitch_interval_semitones(clarity_ev.pitch, oemer_ev.pitch)
+        if not referee.is_refereeable_dispute(
+            interval, is_isolated=is_isolated, is_pitch_dispute=True
+        ):
+            return None
+
+        localized = _localize_dispute(
+            input_pdf, clarity_ev, oemer_ev, primary_root, common_base
+        )
+        if localized is None:
+            return None  # cannot localize the note in the original raster -> decline.
+        pdf_crop, staff_geometry = localized
+
+        clef = "F" if clarity_ev.staff == 2 else "G"
+
+        def _render(ev):
+            step, alter, octave = ev.pitch
+            return referee.render_candidate(step, octave, clef=clef, alter=alter)
+
+        candidate_a = _render(clarity_ev)  # A = Clarity
+        candidate_b = _render(oemer_ev)  # B = oemer
+        pick = referee.referee_pick(pdf_crop, staff_geometry, candidate_a, candidate_b)
+        if pick == "a":
+            return clarity_ev
+        if pick == "b":
+            return oemer_ev
+        return None  # decline -> keep the heuristic result (Clarity).
+    except Exception:
+        return None
+
+
+def reconcile(primary_bytes, secondary_bytes, input_pdf=None) -> bytes:
     """Reconcile two engines' MusicXML into one, using the PRIMARY (Clarity) document as the
     skeleton and resolving ONLY the safe conflict classes A/B/E with FREE heuristics. The
     winner's REAL <note> element is emitted per matched slot so Clarity's tie/spelling markup
     is preserved. Classes C (one-engine-only) and D (timing mismatch) are NOT touched here
     (Slice 4); Clarity's notes are kept as-is and oemer-only notes are ignored.
+
+    `input_pdf` (Slice 6b, OPTIONAL, default None) is the rasterized original input passed to the
+    visual-diff referee for residual class-B disputes. It is used ONLY when OMR_ENSEMBLE_REFEREE
+    is on; when the arg is None or the sub-gate is off, behavior is byte-identical to before (the
+    referee path is never entered). Current callers that pass nothing get exactly the old behavior.
 
     Robustness: NEVER raises. Returns primary_bytes unchanged on ANY failure or when there is
     no secondary (single-engine pass-through = no regression vs Slice 1).
@@ -767,6 +939,15 @@ def reconcile(primary_bytes, secondary_bytes) -> bytes:
         prev_midi_by_cell = {}
         cell_dur_sum = _cell_duration_sums(primary_events)
 
+        # The visual-diff referee fires ONLY on residual class-B disputes and ONLY when its
+        # sub-gate is on; compute the gate ONCE so the matched loop just consults a bool. When
+        # off (or no input_pdf), the referee branch is never entered = byte-identical to before.
+        use_referee = input_pdf is not None and referee_enabled()
+        # Isolation map: a (measure, staff, onset) slot is "isolated" only if exactly ONE pitched
+        # Clarity note sits there (no chord stack, no coincident note). The referee's validated
+        # scope is isolated noteheads only; a dense/chorded slot is never refereeable.
+        isolated_slots = _isolated_slots(primary_events) if use_referee else None
+
         # oemer pitched notes that aligned to a Clarity REST (a slot Clarity heard as silence):
         # these are class-C ADD candidates too (Clarity put a rest where oemer put a note), so we
         # route them to the gated ADD resolver alongside only_b. Collected during the matched loop.
@@ -810,6 +991,38 @@ def reconcile(primary_bytes, secondary_bytes) -> bytes:
                 # rest has pitch None and would only "agree" with another rest above).
                 if clarity_ev.pitch is not None and oemer_ev.pitch is not None:
                     winner = _vote_pitch(clarity_ev, oemer_ev, diatonic_pcs, prev_midi)
+                    # RESIDUAL REFEREE (Slice 6b): the heuristics ran FIRST. Only when they could
+                    # NOT confidently separate the pair (winner fell through to the Clarity
+                    # tiebreak) do we consult the visual-diff referee, and only when its sub-gate
+                    # is on and the dispute is in its proven scope (isolated notehead, interval
+                    # >= a third). A referee pick of oemer overrides the Clarity tiebreak; a
+                    # decline / unavailable / failure keeps the heuristic result (Clarity).
+                    if (
+                        use_referee
+                        and winner is clarity_ev
+                        and _pitch_vote_is_residual(
+                            clarity_ev, oemer_ev, diatonic_pcs, prev_midi
+                        )
+                    ):
+                        is_isolated = bool(
+                            isolated_slots
+                            and (
+                                clarity_ev.measure,
+                                clarity_ev.staff,
+                                clarity_ev.onset,
+                            )
+                            in isolated_slots
+                        )
+                        ref_winner = _maybe_referee_pitch(
+                            input_pdf,
+                            clarity_ev,
+                            oemer_ev,
+                            primary_root,
+                            common_base,
+                            is_isolated,
+                        )
+                        if ref_winner is not None:
+                            winner = ref_winner
                     if winner is oemer_ev and target_elem is not None:
                         # Adopt ONLY oemer's <pitch> into the Clarity element; keep Clarity's
                         # duration, <chord/> membership, <type>, ties and staff. A pitch vote
@@ -909,6 +1122,21 @@ def _measure_capacity_ticks(root: ET.Element, common_base: int) -> Optional[int]
     if num % beat_type != 0:
         return None  # non-integer tick capacity: skip the completeness vote rather than guess.
     return num // beat_type
+
+
+def _isolated_slots(events: List[NoteEvent]) -> Set[Tuple[int, int, int]]:
+    """Return the set of (measure, staff, onset) slots that hold EXACTLY ONE pitched note in
+    the primary (Clarity) document. The visual-diff referee's validated scope is isolated
+    noteheads only: a chord stack or two coincident notes share an onset and would confuse the
+    notehead localization, so any slot with >1 pitched note is NOT isolated. Rests do not count
+    (a rest is not a notehead). PURE; never raises in practice (plain dict counting)."""
+    counts = {}
+    for e in events:
+        if e.pitch is None:
+            continue  # rests are not noteheads.
+        key = (e.measure, e.staff, e.onset)
+        counts[key] = counts.get(key, 0) + 1
+    return {key for key, n in counts.items() if n == 1}
 
 
 def _cell_duration_sums(events: List[NoteEvent]):

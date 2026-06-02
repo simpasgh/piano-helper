@@ -984,3 +984,284 @@ def test_class_c_add_robust_on_malformed_secondary(ensemble_on):
     primary = _clarity_one_treble([_note("C", 5, 4)])
     out = reconcile_docs(primary, b"<broken<<<")
     assert out == primary
+
+
+# === Slice 6b: class B residual visual-diff referee (gated by OMR_ENSEMBLE_REFEREE) =======
+# The referee is consulted ONLY for residual class-B pitch disputes the FREE heuristics could
+# not separate, ONLY in its proven scope (isolated notehead, interval >= a third), and ONLY when
+# the OMR_ENSEMBLE_REFEREE sub-gate (+ parent OMR_ENSEMBLE) is on AND an input_pdf is supplied.
+# It ADJUDICATES between the two existing candidates (A=Clarity, B=oemer): a pick of oemer wins,
+# a decline/None/failure keeps the heuristic result (Clarity). Never introduces a third pitch.
+# These tests stub referee_pick (and the localizer) so they need NO verovio.
+
+import referee as _referee_mod  # noqa: E402
+
+
+@pytest.fixture
+def referee_on(monkeypatch):
+    """OMR_ENSEMBLE + OMR_ENSEMBLE_REFEREE on, referee.REFEREE_AVAILABLE forced True, and the
+    localizer stubbed to a non-None crop so the referee path is reached without verovio. The
+    individual test sets referee.referee_pick to control the verdict."""
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    monkeypatch.setenv("OMR_ENSEMBLE_REFEREE", "1")
+    monkeypatch.setattr(_referee_mod, "REFEREE_AVAILABLE", True)
+    # render_candidate would need verovio; stub it to a harmless sentinel (the stubbed
+    # referee_pick ignores it anyway).
+    monkeypatch.setattr(_referee_mod, "render_candidate", lambda *a, **k: object())
+    # Localizer returns a non-None (crop, geometry) so the referee_pick branch is exercised.
+    monkeypatch.setattr(
+        reconcile,
+        "_localize_dispute",
+        lambda *a, **k: ("CROP", {"lines": [0, 1, 2, 3, 4], "x_center": 2}),
+    )
+    return monkeypatch
+
+
+# A residual, in-scope class-B fixture: C major, Clarity E5 vs oemer G5 (interval 3 = a minor
+# third), both diatonic, both in range, no previous note, ISOLATED. The heuristics fall through
+# to the Clarity tiebreak, so this is exactly the residual the referee arbitrates.
+def _residual_third_dispute():
+    primary = _clarity_one_treble([_note("E", 5, 4)])
+    secondary = _oemer_one_treble([_note("G", 5, 4, staff=1)])
+    return primary, secondary
+
+
+def test_referee_subgate_off_never_calls_referee(monkeypatch):
+    # OMR_ENSEMBLE on but OMR_ENSEMBLE_REFEREE unset: the referee is NEVER consulted; the residual
+    # class-B dispute tiebreaks to Clarity (Slice-3 behavior), byte-identical to no referee.
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    monkeypatch.delenv("OMR_ENSEMBLE_REFEREE", raising=False)
+    monkeypatch.setattr(_referee_mod, "REFEREE_AVAILABLE", True)
+    called = {"localize": False, "pick": False}
+    monkeypatch.setattr(
+        reconcile, "_localize_dispute",
+        lambda *a, **k: called.__setitem__("localize", True) or ("CROP", {}),
+    )
+    monkeypatch.setattr(
+        _referee_mod, "referee_pick",
+        lambda *a, **k: called.__setitem__("pick", True) or "b",
+    )
+    primary, secondary = _residual_third_dispute()
+    out = reconcile_docs(primary, secondary, input_pdf="RASTER")
+    assert _emitted_pitches(out) == [("E", 0, 5)]  # Clarity kept
+    assert called == {"localize": False, "pick": False}  # referee never touched
+
+
+def test_referee_no_input_pdf_never_calls_referee(monkeypatch):
+    # Sub-gate ON but NO input_pdf passed (e.g. raster failed): referee path is never entered.
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    monkeypatch.setenv("OMR_ENSEMBLE_REFEREE", "1")
+    monkeypatch.setattr(_referee_mod, "REFEREE_AVAILABLE", True)
+    called = {"pick": False}
+    monkeypatch.setattr(
+        _referee_mod, "referee_pick",
+        lambda *a, **k: called.__setitem__("pick", True) or "b",
+    )
+    primary, secondary = _residual_third_dispute()
+    out = reconcile_docs(primary, secondary)  # input_pdf defaults to None
+    assert _emitted_pitches(out) == [("E", 0, 5)]  # Clarity kept
+    assert called["pick"] is False
+
+
+def test_referee_unavailable_is_noop(monkeypatch):
+    # Sub-gate ON, input_pdf supplied, but REFEREE_AVAILABLE False (verovio absent on the worker):
+    # the referee path short-circuits to decline; the residual dispute keeps Clarity.
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    monkeypatch.setenv("OMR_ENSEMBLE_REFEREE", "1")
+    monkeypatch.setattr(_referee_mod, "REFEREE_AVAILABLE", False)
+    called = {"pick": False}
+    monkeypatch.setattr(
+        _referee_mod, "referee_pick",
+        lambda *a, **k: called.__setitem__("pick", True) or "b",
+    )
+    primary, secondary = _residual_third_dispute()
+    out = reconcile_docs(primary, secondary, input_pdf="RASTER")
+    assert _emitted_pitches(out) == [("E", 0, 5)]  # Clarity kept
+    assert called["pick"] is False  # never reached referee_pick
+
+
+def test_referee_pick_oemer_wins_on_residual_in_scope(referee_on):
+    # The residual, in-scope dispute routes to the referee, and the referee's pick of 'b' (oemer)
+    # OVERRIDES the Clarity tiebreak. The output adopts oemer's G5 (only the pitch; class B).
+    referee_on.setattr(_referee_mod, "referee_pick", lambda *a, **k: "b")
+    primary, secondary = _residual_third_dispute()
+    out = reconcile_docs(primary, secondary, input_pdf="RASTER")
+    assert _emitted_pitches(out) == [("G", 0, 5)]  # oemer's pick adopted
+
+
+def test_referee_pick_clarity_keeps_clarity(referee_on):
+    # The referee explicitly picks 'a' (Clarity): Clarity stays. (Same result as the tiebreak,
+    # but confirms an 'a' verdict is honored and never swaps.)
+    referee_on.setattr(_referee_mod, "referee_pick", lambda *a, **k: "a")
+    primary, secondary = _residual_third_dispute()
+    out = reconcile_docs(primary, secondary, input_pdf="RASTER")
+    assert _emitted_pitches(out) == [("E", 0, 5)]
+
+
+def test_referee_decline_keeps_clarity(referee_on):
+    # The referee DECLINES (None, e.g. below the confidence margin): keep the heuristic result.
+    referee_on.setattr(_referee_mod, "referee_pick", lambda *a, **k: None)
+    primary, secondary = _residual_third_dispute()
+    out = reconcile_docs(primary, secondary, input_pdf="RASTER")
+    assert _emitted_pitches(out) == [("E", 0, 5)]  # Clarity kept on decline
+
+
+def test_referee_out_of_scope_step_never_calls_referee(referee_on):
+    # A residual class-B dispute of a STEP (2nd, interval 2) is OUT of the referee's scope:
+    # is_refereeable_dispute returns False, so referee_pick is NEVER called and Clarity is kept.
+    called = {"pick": False}
+    referee_on.setattr(
+        _referee_mod, "referee_pick",
+        lambda *a, **k: called.__setitem__("pick", True) or "b",
+    )
+    # C major; Clarity D5 vs oemer E5 (interval 2 = a 2nd), both diatonic + in range, no prev.
+    primary = _clarity_one_treble([_note("D", 5, 4)])
+    secondary = _oemer_one_treble([_note("E", 5, 4, staff=1)])
+    out = reconcile_docs(primary, secondary, input_pdf="RASTER")
+    assert _emitted_pitches(out) == [("D", 0, 5)]  # Clarity kept
+    assert called["pick"] is False  # step dispute never reaches the referee
+
+
+def test_referee_not_called_when_heuristics_already_decided(referee_on):
+    # When the FREE heuristics ALREADY separated the pair (here: diatonicity picks oemer's C5 over
+    # Clarity's non-diatonic C#5), the dispute is NOT residual, so the referee is not consulted -
+    # the heuristic decision stands on its own.
+    called = {"pick": False}
+    referee_on.setattr(
+        _referee_mod, "referee_pick",
+        lambda *a, **k: called.__setitem__("pick", True) or "a",  # would pick Clarity
+    )
+    primary = _clarity_one_treble([_note("C", 5, 4, alter=1)], fifths=0)  # C#5 non-diatonic
+    secondary = _oemer_one_treble([_note("C", 5, 4, staff=1)])  # C5 diatonic
+    out = reconcile_docs(primary, secondary, input_pdf="RASTER")
+    assert _emitted_pitches(out) == [("C", 0, 5)]  # heuristic (diatonicity) result, not referee
+    assert called["pick"] is False
+
+
+def test_referee_localization_none_keeps_clarity(referee_on):
+    # The localizer cannot place the note (returns None): the referee declines (no crop). This is
+    # the SHIPPED state (robust localization is the remaining blocker) - a correct no-op.
+    referee_on.setattr(reconcile, "_localize_dispute", lambda *a, **k: None)
+    referee_on.setattr(_referee_mod, "referee_pick", lambda *a, **k: "b")  # would pick oemer
+    primary, secondary = _residual_third_dispute()
+    out = reconcile_docs(primary, secondary, input_pdf="RASTER")
+    assert _emitted_pitches(out) == [("E", 0, 5)]  # localization None -> Clarity kept
+
+
+def test_referee_pick_raising_keeps_clarity(referee_on):
+    # referee_pick raising must NEVER propagate: _maybe_referee_pitch swallows it and declines,
+    # keeping the heuristic result (Clarity). Preserves the never-raise contract.
+    def _boom(*a, **k):
+        raise RuntimeError("referee blew up")
+
+    referee_on.setattr(_referee_mod, "referee_pick", _boom)
+    primary, secondary = _residual_third_dispute()
+    out = reconcile_docs(primary, secondary, input_pdf="RASTER")  # must not raise
+    assert _emitted_pitches(out) == [("E", 0, 5)]  # Clarity kept
+
+
+def test_referee_localization_raising_keeps_clarity(referee_on):
+    # Localization raising is also swallowed -> decline -> Clarity. Never propagates.
+    def _boom(*a, **k):
+        raise RuntimeError("localize blew up")
+
+    referee_on.setattr(reconcile, "_localize_dispute", _boom)
+    referee_on.setattr(_referee_mod, "referee_pick", lambda *a, **k: "b")
+    primary, secondary = _residual_third_dispute()
+    out = reconcile_docs(primary, secondary, input_pdf="RASTER")  # must not raise
+    assert _emitted_pitches(out) == [("E", 0, 5)]  # Clarity kept
+
+
+def test_referee_chorded_slot_not_isolated_never_picks(referee_on):
+    # A class-B dispute inside a CHORD (the disputed note shares its onset with a chord member) is
+    # NOT an isolated notehead, so is_refereeable_dispute(is_isolated=False) declines and the
+    # referee is not consulted. Clarity chord: [G5, C6(chord member)] at onset 0; oemer reads the
+    # G5 as E5 (interval 3 = a third, residual + in scope BY INTERVAL, but NOT isolated because
+    # the slot holds two pitched notes). Must keep Clarity without consulting the referee.
+    called = {"pick": False}
+    referee_on.setattr(
+        _referee_mod, "referee_pick",
+        lambda *a, **k: called.__setitem__("pick", True) or "b",
+    )
+    primary = _clarity_one_treble([_note("G", 5, 4), _note("C", 6, 4, chord=True)])
+    secondary = _oemer_one_treble([_note("E", 5, 4, staff=1), _note("C", 6, 4, staff=1, chord=True)])
+    out = reconcile_docs(primary, secondary, input_pdf="RASTER")
+    # The disputed G5-vs-E5 is at a chorded onset -> not isolated -> referee not consulted; the
+    # heuristic tiebreak keeps Clarity's G5. C6 agrees, stays.
+    assert ("G", 0, 5) in _emitted_pitches(out)
+    assert called["pick"] is False
+
+
+def test_referee_scope_predicate_called_with_real_referee_when_available(referee_on):
+    # Sanity: with REFEREE_AVAILABLE True and the real scope predicates (not stubbed), an in-scope
+    # third dispute reaches referee_pick. We stub ONLY referee_pick; pitch_interval_semitones and
+    # is_refereeable_dispute run for real, confirming the wiring uses them correctly.
+    seen = {}
+
+    def _pick(pdf_crop, staff_geometry, cand_a, cand_b):
+        seen["called"] = True
+        return None  # decline so the result stays Clarity regardless.
+
+    referee_on.setattr(_referee_mod, "referee_pick", _pick)
+    primary, secondary = _residual_third_dispute()
+    out = reconcile_docs(primary, secondary, input_pdf="RASTER")
+    assert seen.get("called") is True  # the real scope predicates admitted this dispute
+    assert _emitted_pitches(out) == [("E", 0, 5)]
+
+
+# --- Sub-gate + pure-helper unit tests (Slice 6b) ----------------------------------------
+
+
+def test_referee_subgate_requires_parent(monkeypatch):
+    # OMR_ENSEMBLE_REFEREE on but parent OMR_ENSEMBLE off -> referee_enabled() is False.
+    monkeypatch.delenv("OMR_ENSEMBLE", raising=False)
+    monkeypatch.setenv("OMR_ENSEMBLE_REFEREE", "1")
+    assert reconcile.referee_enabled() is False
+
+
+def test_referee_subgate_truthy_parsing(monkeypatch):
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    monkeypatch.setenv("OMR_ENSEMBLE_REFEREE", "true")
+    assert reconcile.referee_enabled() is True
+    monkeypatch.setenv("OMR_ENSEMBLE_REFEREE", "0")
+    assert reconcile.referee_enabled() is False
+
+
+def test_pitch_vote_is_residual_true_when_unseparated():
+    # Both diatonic + in range, no octave-jump split, no prev note: nothing separates -> residual.
+    c = NoteEvent(measure=1, onset=0, staff=1, pitch=("E", 0, 5), duration=4, is_chord=False)
+    o = NoteEvent(measure=1, onset=0, staff=1, pitch=("G", 0, 5), duration=4, is_chord=False)
+    dia = reconcile._diatonic_pitch_classes(0)
+    assert reconcile._pitch_vote_is_residual(c, o, dia, None) is True
+
+
+def test_pitch_vote_is_residual_false_when_diatonicity_decides():
+    # Clarity C#5 (non-diatonic) vs oemer C5 (diatonic): diatonicity SEPARATES -> not residual.
+    c = NoteEvent(measure=1, onset=0, staff=1, pitch=("C", 1, 5), duration=4, is_chord=False)
+    o = NoteEvent(measure=1, onset=0, staff=1, pitch=("C", 0, 5), duration=4, is_chord=False)
+    dia = reconcile._diatonic_pitch_classes(0)
+    assert reconcile._pitch_vote_is_residual(c, o, dia, None) is False
+
+
+def test_pitch_vote_is_residual_false_when_voice_leading_decides():
+    # With a prev note A4 (MIDI 69), Clarity G5 (interval 10) vs oemer B4 (interval 2): voice
+    # leading SEPARATES -> not residual.
+    c = NoteEvent(measure=1, onset=4, staff=1, pitch=("G", 0, 5), duration=4, is_chord=False)
+    o = NoteEvent(measure=1, onset=4, staff=1, pitch=("B", 0, 4), duration=4, is_chord=False)
+    dia = reconcile._diatonic_pitch_classes(0)
+    assert reconcile._pitch_vote_is_residual(c, o, dia, 69) is False
+
+
+def test_isolated_slots_excludes_chord_and_coincident():
+    # One isolated note (m1 onset 0), a chord stack (m1 onset 4 has two pitched notes) -> only the
+    # isolated slot is returned; rests are ignored.
+    events = [
+        NoteEvent(measure=1, onset=0, staff=1, pitch=("C", 0, 5), duration=4, is_chord=False),
+        NoteEvent(measure=1, onset=4, staff=1, pitch=("E", 0, 5), duration=4, is_chord=False),
+        NoteEvent(measure=1, onset=4, staff=1, pitch=("G", 0, 5), duration=4, is_chord=True),
+        NoteEvent(measure=1, onset=8, staff=1, pitch=None, duration=4, is_chord=False),
+    ]
+    slots = reconcile._isolated_slots(events)
+    assert (1, 1, 0) in slots
+    assert (1, 1, 4) not in slots  # chorded onset is not isolated
+    assert (1, 1, 8) not in slots  # rest is not a notehead
