@@ -18,7 +18,7 @@ Run locally with: python3 -m pytest omr-worker/test_reconcile.py
 import xml.etree.ElementTree as ET
 
 import reconcile  # noqa: E402
-from reconcile import NoteEvent, align, to_events
+from reconcile import NoteEvent, align, reconcile as reconcile_docs, to_events
 
 
 # --- Fixture builders --------------------------------------------------------------------
@@ -387,3 +387,235 @@ def test_noteevent_equality_ignores_elem():
     e1 = NoteEvent(1, 0, 1, ("C", 0, 5), 4, False, set(), "a", ET.Element("note"))
     e2 = NoteEvent(1, 0, 1, ("C", 0, 5), 4, False, set(), "a", ET.Element("note"))
     assert e1 == e2
+
+
+# === Reconciliation (Slice 3) ============================================================
+# reconcile(primary=Clarity, secondary=oemer) takes Clarity as the SKELETON and emits the
+# winner's REAL <note> per matched slot, resolving ONLY safe classes A/B/E. Classes C/D are
+# no-ops this slice. Every heuristic tiebreaks to Clarity; the output must never be worse than
+# Clarity-alone. Robustness: never raises, returns primary on any failure / empty secondary.
+
+
+def _emitted_pitches(xml_bytes, staff=None):
+    """Parse a reconciled doc and return [(step, alter, octave), ...] of its real notes, in
+    document order, optionally filtered to a staff (1/2)."""
+    root = ET.fromstring(xml_bytes)
+    out = []
+    for part in root.findall("part"):
+        # A reconciled Clarity skeleton stays 2-part: derive staff from the part clef.
+        part_staff = 2 if part.find(".//clef/sign") is not None and (
+            part.findtext(".//clef/sign") or ""
+        ).strip().upper() == "F" else 1
+        for note in part.iter("note"):
+            if staff is not None and part_staff != staff:
+                continue
+            pitch = note.find("pitch")
+            if pitch is None:
+                continue
+            step = pitch.findtext("step")
+            octave = int(pitch.findtext("octave"))
+            alter = int(pitch.findtext("alter") or "0")
+            out.append((step, alter, octave))
+    return out
+
+
+def _clarity_one_treble(notes, fifths=0):
+    """A Clarity-shape doc with ONE treble (G-clef) part, given fifths. notes = list of
+    note-XML strings for measure 1."""
+    attrs = (
+        "<attributes><divisions>4</divisions>"
+        "<key><fifths>%d</fifths></key>"
+        "<time><beats>4</beats><beat-type>4</beat-type></time>"
+        "<clef><sign>G</sign><line>2</line></clef>"
+        "</attributes>" % fifths
+    )
+    return (
+        '<?xml version="1.0"?><score-partwise version="4.0">'
+        '<part-list><score-part id="P1"><part-name>RH</part-name></score-part></part-list>'
+        '<part id="P1"><measure number="1">%s%s</measure></part>'
+        "</score-partwise>" % (attrs, "".join(notes))
+    ).encode("utf-8")
+
+
+def _oemer_one_treble(notes):
+    """An oemer-shape doc, one part, notes carry <staff>1, divisions=4, one measure."""
+    attrs = (
+        "<attributes><divisions>4</divisions>"
+        "<key><fifths>0</fifths></key>"
+        "<time><beats>4</beats><beat-type>4</beat-type></time>"
+        '<clef number="1"><sign>G</sign><line>2</line></clef>'
+        "</attributes>"
+    )
+    return (
+        '<?xml version="1.0"?><score-partwise version="4.0">'
+        '<part-list><score-part id="P1"><part-name>M</part-name></score-part></part-list>'
+        '<part id="P1"><measure number="1">%s%s</measure></part>'
+        "</score-partwise>" % (attrs, "".join(notes))
+    ).encode("utf-8")
+
+
+# --- Class A: agree -> Clarity passthrough -----------------------------------------------
+
+
+def test_class_a_agree_keeps_clarity():
+    # Both engines read C5 quarter at onset 0. No conflict: Clarity's element is emitted as-is.
+    primary = _clarity_one_treble([_note("C", 5, 4)])
+    secondary = _oemer_one_treble([_note("C", 5, 4, staff=1)])
+    out = reconcile_docs(primary, secondary)
+    assert _emitted_pitches(out) == [("C", 0, 5)]
+
+
+# --- Class B: pitch mismatch votes -------------------------------------------------------
+
+
+def test_class_b_diatonicity_picks_diatonic_candidate():
+    # C major (fifths 0). Clarity read C#5 (non-diatonic, pc 1); oemer read C5 (diatonic). A
+    # lone non-diatonic alter is the likely misread -> oemer's diatonic C5 wins.
+    primary = _clarity_one_treble([_note("C", 5, 4, alter=1)], fifths=0)
+    secondary = _oemer_one_treble([_note("C", 5, 4, staff=1)])
+    out = reconcile_docs(primary, secondary)
+    assert _emitted_pitches(out) == [("C", 0, 5)]
+
+
+def test_class_b_range_rejects_out_of_range():
+    # Clarity read an absurd octave (C12 -> MIDI 156, out of range); oemer read C5 (in range).
+    # Range sanity rejects the out-of-range candidate even though Clarity is primary.
+    primary = _clarity_one_treble([_note("C", 12, 4)])
+    secondary = _oemer_one_treble([_note("C", 5, 4, staff=1)])
+    out = reconcile_docs(primary, secondary)
+    assert _emitted_pitches(out) == [("C", 0, 5)]
+
+
+def test_class_b_voice_leading_picks_nearer_pitch():
+    # Establish a previous same-staff note (A4) both engines agree on, then a conflict where
+    # Clarity reads G5 (interval 10 from A4) and oemer reads B4 (interval 2 from A4). BOTH are
+    # diatonic (C major), in range, and within an octave of the staff tessitura, so the earlier
+    # diatonicity/range/octave priors do NOT separate them; voice-leading decides and the
+    # smaller melodic interval (oemer's B4) wins.
+    primary = _clarity_one_treble([_note("A", 4, 4), _note("G", 5, 4)])
+    secondary = _oemer_one_treble(
+        [_note("A", 4, 4, staff=1), _note("B", 4, 4, staff=1)]
+    )
+    out = reconcile_docs(primary, secondary)
+    assert _emitted_pitches(out) == [("A", 0, 4), ("B", 0, 4)]
+
+
+def test_class_b_all_else_equal_keeps_clarity():
+    # Two candidates that no heuristic can separate: both diatonic, both in range, both an
+    # equal interval from no-previous-note context, no tie. Must tiebreak to Clarity.
+    # C major; clarity E5 vs oemer G5 (both diatonic, both near tessitura, no prev note).
+    # With no previous note the voice-leading prior cannot fire, so Clarity wins.
+    primary = _clarity_one_treble([_note("E", 5, 4)])
+    secondary = _oemer_one_treble([_note("G", 5, 4, staff=1)])
+    out = reconcile_docs(primary, secondary)
+    assert _emitted_pitches(out) == [("E", 0, 5)]
+
+
+def test_class_b_both_diatonic_in_range_keeps_clarity_safety():
+    # Safety net: when both candidates are plausible Clarity must not be overridden by oemer.
+    primary = _clarity_one_treble([_note("D", 5, 4)])
+    secondary = _oemer_one_treble([_note("F", 5, 4, staff=1)])
+    out = reconcile_docs(primary, secondary)
+    assert _emitted_pitches(out) == [("D", 0, 5)]
+
+
+# --- Class E: duration mismatch ----------------------------------------------------------
+
+
+def test_class_e_metric_completeness_vote():
+    # 4/4, divisions=4 -> a full bar is 16 ticks. Clarity read the note as a quarter (dur 4)
+    # which UNDER-fills the bar; oemer read it as a whole note (dur 16) which EXACTLY completes
+    # the bar. Metric-completeness picks oemer's whole note.
+    primary = _clarity_one_treble([_note("C", 5, 4)])
+    secondary = _oemer_one_treble([_note("C", 5, 16, staff=1)])
+    out = reconcile_docs(primary, secondary)
+    root = ET.fromstring(out)
+    durs = [int(n.findtext("duration")) for n in root.iter("note") if n.find("pitch") is not None]
+    assert durs == [16]
+
+
+def test_class_e_clarity_tie_chain_wins():
+    # Same pitch, different duration, BUT Clarity's note carries a tie start: a tie is a
+    # deliberate duration signal, so Clarity ALWAYS wins regardless of the metric vote.
+    primary = _clarity_one_treble([_note("C", 5, 4, tie=["start"])])
+    secondary = _oemer_one_treble([_note("C", 5, 16, staff=1)])
+    out = reconcile_docs(primary, secondary)
+    root = ET.fromstring(out)
+    note = next(n for n in root.iter("note") if n.find("pitch") is not None)
+    assert int(note.findtext("duration")) == 4
+    assert any(t.get("type") == "start" for t in note.findall("tie"))
+
+
+# --- Class C / D: no-ops this slice ------------------------------------------------------
+
+
+def test_class_c_oemer_only_note_is_ignored():
+    # oemer has an EXTRA note (D5) Clarity lacks. Slice 3 does NOT add oemer-only notes, so the
+    # reconciled output keeps ONLY Clarity's C5; D5 is dropped (TODO slice4).
+    primary = _clarity_one_treble([_note("C", 5, 4)])
+    secondary = _oemer_one_treble(
+        [_note("C", 5, 4, staff=1), _note("D", 5, 4, staff=1)]
+    )
+    out = reconcile_docs(primary, secondary)
+    assert _emitted_pitches(out) == [("C", 0, 5)]
+
+
+def test_class_c_clarity_only_note_is_kept():
+    # Clarity has a note oemer lacks (D5). Clarity is the skeleton, so its note is KEPT as-is.
+    primary = _clarity_one_treble([_note("C", 5, 4), _note("D", 5, 4)])
+    secondary = _oemer_one_treble([_note("C", 5, 4, staff=1)])
+    out = reconcile_docs(primary, secondary)
+    assert _emitted_pitches(out) == [("C", 0, 5), ("D", 0, 5)]
+
+
+def test_class_d_timing_mismatch_keeps_clarity_ignores_oemer():
+    # Same pitch but onsets differ beyond eps (Clarity at 0, oemer half a bar late at 8). They
+    # do NOT align as a matched pair, so it is class D: Clarity's note is kept, oemer's ignored.
+    primary = _clarity_one_treble([_note("C", 5, 4)])
+    secondary = _oemer_one_treble(
+        [_rest(8, staff=1), _note("C", 5, 4, staff=1)]
+    )
+    out = reconcile_docs(primary, secondary)
+    assert _emitted_pitches(out) == [("C", 0, 5)]
+
+
+# --- markup preservation + robustness ----------------------------------------------------
+
+
+def test_clarity_tie_and_spelling_markup_survives_reconciliation():
+    # Clarity's element carries a tie start AND an explicit alter (spelling). On a class-A
+    # agreement the REAL Clarity element is emitted, so its tie + alter survive untouched.
+    primary = _clarity_one_treble([_note("B", 4, 4, alter=-1, tie=["start"])])
+    secondary = _oemer_one_treble([_note("B", 4, 4, staff=1, alter=-1)])
+    out = reconcile_docs(primary, secondary)
+    root = ET.fromstring(out)
+    note = next(n for n in root.iter("note") if n.find("pitch") is not None)
+    assert note.findtext("pitch/step") == "B"
+    assert note.findtext("pitch/alter") == "-1"
+    assert any(t.get("type") == "start" for t in note.findall("tie"))
+
+
+def test_reconcile_returns_primary_on_malformed_secondary():
+    primary = _clarity_one_treble([_note("C", 5, 4)])
+    out = reconcile_docs(primary, b"<not-valid<<<")
+    assert out == primary  # secondary unparseable -> Clarity unchanged, byte-identical.
+
+
+def test_reconcile_empty_secondary_passthrough():
+    primary = _clarity_one_treble([_note("C", 5, 4)])
+    assert reconcile_docs(primary, b"") == primary
+    assert reconcile_docs(primary, None) == primary
+
+
+def test_reconcile_returns_primary_on_malformed_primary():
+    # A malformed PRIMARY cannot be a skeleton: return it unchanged (never raise).
+    bad = b"<broken<<<"
+    assert reconcile_docs(bad, _oemer_one_treble([_note("C", 5, 4, staff=1)])) == bad
+
+
+def test_reconcile_no_matches_returns_primary():
+    # Disjoint material (different staves entirely) -> no matched pairs -> Clarity unchanged.
+    primary = _clarity_one_treble([_note("C", 5, 4)])
+    secondary = _oemer_one_treble([_rest(16, staff=1)])  # only a rest, no pitched match
+    out = reconcile_docs(primary, secondary)
+    assert _emitted_pitches(out) == [("C", 0, 5)]

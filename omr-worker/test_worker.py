@@ -432,10 +432,13 @@ def test_legacy_png_skips_clarity_runs_oemer(tmp_path, monkeypatch):
 
 def test_ensemble_pdf_runs_both_engines(tmp_path, monkeypatch):
     # FLAG ON: BOTH primaries run for a PDF (oemer is launched even though Clarity wins), so
-    # oemer's output is available for the later reconciliation slices. Records each call.
+    # oemer's output is available for reconciliation (Slice 3). Records each call. When both
+    # succeed reconcile fires and the source is "ensemble"; the result is the reconciled file.
     monkeypatch.setenv("OMR_ENSEMBLE", "1")
     clarity_out = tmp_path / "clarity.musicxml"
     clarity_out.write_text("<score/>")
+    oemer_out = tmp_path / "oemer.musicxml"
+    oemer_out.write_text("<score/>")
     calls = []
 
     def fake_clarity(*a, **k):
@@ -444,7 +447,7 @@ def test_ensemble_pdf_runs_both_engines(tmp_path, monkeypatch):
 
     def fake_oemer(*a, **k):
         calls.append("oemer")
-        return "/oemer.musicxml"
+        return str(oemer_out)
 
     monkeypatch.setattr(worker, "run_clarity", fake_clarity)
     monkeypatch.setattr(worker, "run_oemer", fake_oemer)
@@ -453,8 +456,10 @@ def test_ensemble_pdf_runs_both_engines(tmp_path, monkeypatch):
     result, source = worker._select_ensemble(
         "job", str(tmp_path / "input.bin"), str(tmp_path), is_pdf_input=True
     )
-    # Selection precedence unchanged (Clarity wins), but oemer ALSO ran (the ensemble cost).
-    assert (result, source) == (str(clarity_out), "clarity")
+    # Both engines ran, so reconcile fired: source is "ensemble" and the result is the new
+    # reconciled file (not either engine's raw output).
+    assert source == "ensemble"
+    assert result == str(tmp_path / "reconciled.musicxml")
     assert set(calls) == {"clarity", "oemer"}, "both engines must run under the flag"
 
 
@@ -480,6 +485,130 @@ def test_ensemble_pdf_raster_failure_still_runs_clarity(tmp_path, monkeypatch):
         "job", str(tmp_path / "input.bin"), str(tmp_path), is_pdf_input=True
     )
     assert (result, source) == (str(clarity_out), "clarity")
+
+
+# --- reconcile wiring (Slice 3) ----------------------------------------------------------
+
+_JOB_ID = "12345678-1234-1234-1234-123456789abc"
+
+
+class _FakeClient:
+    """Minimal S3 stand-in for driving process_job end-to-end in-process: download_file writes
+    the canned input bytes, put_object captures the written body, delete_object is a no-op.
+    result_exists is monkeypatched to False so the job always processes."""
+
+    def __init__(self, input_bytes=b"", is_pdf=False):
+        self._input_bytes = input_bytes
+        self._is_pdf = is_pdf
+        self.put_body = None
+
+    def download_file(self, Bucket, Key, dest):
+        with open(dest, "wb") as fh:
+            fh.write(self._input_bytes)
+
+    def put_object(self, Bucket, Key, Body, ContentType):
+        self.put_body = Body
+
+    def delete_object(self, Bucket, Key):
+        pass
+
+
+def _drive_process_job(monkeypatch, client, is_pdf=True):
+    """Run process_job against a _FakeClient, stubbing result_exists (no real head_object) and
+    sniff_mime (no real `file` binary). is_pdf controls the sniffed mime."""
+    monkeypatch.setattr(worker, "result_exists", lambda *a, **k: False)
+    monkeypatch.setattr(
+        worker, "sniff_mime", lambda p: "application/pdf" if is_pdf else "image/png"
+    )
+    worker.process_job(client, "bucket", _JOB_ID)
+
+
+def test_ensemble_both_engines_reconcile_before_merge_and_normalize(tmp_path, monkeypatch):
+    # FLAG ON + BOTH engines succeed: reconcile MUST run on (clarity, oemer) BEFORE the shared
+    # merge_to_grand_staff -> normalize_ties post-transforms. Order guard: record the call
+    # sequence and assert reconcile precedes both post-transforms.
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    clarity_out = tmp_path / "clarity.musicxml"
+    clarity_out.write_text("<score/>")
+    oemer_out = tmp_path / "oemer.musicxml"
+    oemer_out.write_text("<score/>")
+
+    order = []
+
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clarity_out))
+    monkeypatch.setattr(worker, "run_oemer", lambda *a, **k: str(oemer_out))
+    monkeypatch.setattr(worker, "rasterize_if_pdf", lambda *a, **k: ("/img.png", True))
+
+    def fake_reconcile(primary, secondary):
+        order.append("reconcile")
+        return b"<reconciled/>"
+
+    def fake_merge(body):
+        order.append("merge")
+        return body
+
+    def fake_normalize(body):
+        order.append("normalize")
+        return body
+
+    monkeypatch.setattr(worker.reconcile, "reconcile", fake_reconcile)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", fake_merge)
+    monkeypatch.setattr(worker, "normalize_ties", fake_normalize)
+
+    client = _FakeClient(input_bytes=b"%PDF-1.4 fake")
+    _drive_process_job(monkeypatch, client, is_pdf=True)
+
+    assert order == ["reconcile", "merge", "normalize"], order
+    # The reconciled bytes (post both no-op transforms) are what gets written.
+    assert client.put_body == b"<reconciled/>"
+
+
+def test_ensemble_single_engine_reconcile_is_passthrough(tmp_path, monkeypatch):
+    # FLAG ON but only ONE engine (oemer) succeeds: reconcile is NOT called (it would be a
+    # pass-through anyway). The survivor's bytes flow straight to the post-transforms, so this
+    # is byte-identical to single-engine = no regression vs Slice 1.
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    oemer_out = tmp_path / "oemer.musicxml"
+    oemer_out.write_text("<score/>")
+
+    called = {"reconcile": False}
+
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: None)
+    monkeypatch.setattr(worker, "run_oemer", lambda *a, **k: str(oemer_out))
+    monkeypatch.setattr(worker, "rasterize_if_pdf", lambda *a, **k: ("/img.png", True))
+
+    def fake_reconcile(primary, secondary):
+        called["reconcile"] = True
+        return primary
+
+    monkeypatch.setattr(worker.reconcile, "reconcile", fake_reconcile)
+
+    result, source = worker._select_ensemble(
+        "job", str(tmp_path / "input.bin"), str(tmp_path), is_pdf_input=True
+    )
+    assert (result, source) == (str(oemer_out), "oemer")
+    assert called["reconcile"] is False, "reconcile must not run with only one engine"
+
+
+def test_flag_off_never_calls_reconcile(tmp_path, monkeypatch):
+    # FLAG OFF (prod default): the legacy path runs and reconcile is NEVER called.
+    monkeypatch.delenv("OMR_ENSEMBLE", raising=False)
+    clarity_out = tmp_path / "clarity.musicxml"
+    clarity_out.write_text("<score/>")
+
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clarity_out))
+
+    def reconcile_must_not_run(*a, **k):
+        raise AssertionError("reconcile must not run when OMR_ENSEMBLE is OFF")
+
+    monkeypatch.setattr(worker.reconcile, "reconcile", reconcile_must_not_run)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"%PDF-1.4 fake")
+    _drive_process_job(monkeypatch, client, is_pdf=True)
+    # Legacy Clarity short-circuit produced the result; reconcile was never invoked.
+    assert client.put_body is not None
 
 
 # --- merge_to_grand_staff (#135) ---------------------------------------------------------

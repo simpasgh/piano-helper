@@ -43,6 +43,12 @@ import boto3
 from botocore.client import Config
 from botocore.exceptions import ClientError
 
+# reconcile.py is PURE stdlib (no boto3), so worker.py imports FROM it (never the reverse),
+# keeping reconcile importable/testable without the S3 stack. _clef_sign is the shared
+# treble/bass helper; reconcile() is the ensemble Slice-3 conflict resolver.
+import reconcile
+from reconcile import _clef_sign
+
 UPLOAD_PREFIX = "uploads/"
 RESULT_SUFFIX = ".musicxml"
 RESULT_CONTENT_TYPE = "application/vnd.recordare.musicxml+xml"
@@ -487,11 +493,10 @@ _MUSICXML_NS = ""  # MusicXML partwise documents are not namespaced.
 
 
 def _clef_sign_of_part(part):
-    """First clef <sign> text in a <part>, or None. Decides treble (G) vs bass (F)."""
-    sign = part.find(".//clef/sign")
-    if sign is not None and sign.text:
-        return sign.text.strip().upper()
-    return None
+    """First clef <sign> text in a <part>, or None. Decides treble (G) vs bass (F).
+    Delegates to reconcile._clef_sign so the treble/bass logic lives in exactly one place
+    (the DRY direction: reconcile is the stdlib-only owner, worker imports it)."""
+    return _clef_sign(part)
 
 
 def _measure_duration(measure):
@@ -913,28 +918,89 @@ def _select_ensemble(job_id, input_path, workdir, is_pdf_input):
         log("rasterization failed for %s (%r); raster engines disabled, trying Clarity"
             % (job_id, err))
 
-    # Run the two PRIMARY engines concurrently, keep the same selection. Clarity (PDF-only)
-    # wins if present, else oemer; homr stays the last resort below. run_oemer is only
-    # launched when a raster image exists (it always does unless a PDF raster failed above),
-    # so a missing image degrades cleanly to Clarity-only.
+    # Run the two PRIMARY engines concurrently, capturing BOTH results so reconciliation
+    # (Slice 3) can vote on conflicts when both succeed. Clarity (PDF-only) wins the SELECTION
+    # if present, else oemer; homr stays the last resort below. run_oemer is only launched when
+    # a raster image exists (it always does unless a PDF raster failed above), so a missing
+    # image degrades cleanly to Clarity-only.
     oemer_fn = (
         (lambda: run_oemer(image_path, workdir, without_deskew=is_pdf, timeout=timeout))
         if image_path is not None
         else (lambda: None)
     )
-    result_path, source = select_primary_result(
+    clarity_path, oemer_path = run_primary_engines(
         lambda: run_clarity(input_path, workdir, timeout=timeout),
         oemer_fn,
         is_pdf_input,
-        timeout=timeout,
     )
+    # Selection precedence UNCHANGED: Clarity, else oemer.
+    if clarity_path is not None:
+        result_path, source = clarity_path, "clarity"
+    elif oemer_path is not None:
+        result_path, source = oemer_path, "oemer"
+    else:
+        result_path, source = None, None
+
     if result_path is None and image_path is not None:
         log("clarity+oemer produced nothing for %s; trying homr" % job_id)
         result_path = run_homr(image_path, workdir, timeout=timeout)
         if result_path is not None:
             source = "homr"
 
+    # RECONCILE (Slice 3): when BOTH primary engines produced output, vote on the safe
+    # conflict classes (pitch/duration) using Clarity as the skeleton, BEFORE the shared
+    # merge_to_grand_staff -> normalize_ties post-transforms in process_job. Only the ENSEMBLE
+    # path reaches here (process_job branches on the flag). When only one engine succeeded,
+    # reconcile is a pass-through, so this is byte-identical to single-engine (no regression).
+    if result_path is not None and clarity_path is not None and oemer_path is not None:
+        reconciled = _reconcile_paths(clarity_path, oemer_path, workdir)
+        if reconciled is not None:
+            result_path = reconciled
+            source = "ensemble"
+
     return result_path, source
+
+
+def _reconcile_paths(primary_path, secondary_path, workdir):
+    """Read both engines' MusicXML and reconcile them (Slice 3), writing the result to a new
+    file in workdir and returning its path. reconcile() never raises (returns primary bytes on
+    any failure), so the worst case is the Clarity bytes written back out, never worse than
+    Clarity-alone. Returns None only if reading the primary fails, in which case the caller
+    keeps the original result_path."""
+    try:
+        with open(primary_path, "rb") as fh:
+            primary_bytes = fh.read()
+    except OSError as err:
+        log("reconcile skipped: cannot read primary %r (%r)" % (primary_path, err))
+        return None
+    try:
+        with open(secondary_path, "rb") as fh:
+            secondary_bytes = fh.read()
+    except OSError:
+        secondary_bytes = None  # secondary unreadable -> reconcile is a pass-through.
+
+    reconciled_bytes = reconcile.reconcile(primary_bytes, secondary_bytes)
+    out_path = os.path.join(workdir, "reconciled.musicxml")
+    with open(out_path, "wb") as fh:
+        fh.write(reconciled_bytes)
+    return out_path
+
+
+def run_primary_engines(run_clarity_fn, run_oemer_fn, is_pdf_input):
+    """Run the two PRIMARY engines CONCURRENTLY and return (clarity_path, oemer_path), each
+    None on that engine's failure. This is the Slice-1 concurrency of select_primary_result
+    but it exposes BOTH results (not just the winner) so Slice 3 can reconcile them. Selection
+    precedence is applied by the caller. Clarity is PDF-only: not launched for PNG/JPEG.
+
+    Concurrency model is unchanged: each engine is a subprocess, so a ThreadPoolExecutor gives
+    true wall-clock overlap (GIL released during the OS wait). max_workers=2 caps it."""
+    futures = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        if is_pdf_input:
+            futures["clarity"] = pool.submit(run_clarity_fn)
+        futures["oemer"] = pool.submit(run_oemer_fn)
+        results = {name: fut.result() for name, fut in futures.items()}
+    return results.get("clarity"), results.get("oemer")
 
 
 def process_job(client, bucket, job_id):

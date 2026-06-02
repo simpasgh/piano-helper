@@ -427,3 +427,369 @@ def _match_cell(list_a, list_b, eps):
 
     only_b = [b for bi, b in enumerate(list_b) if bi not in used_b]
     return matched, only_a, only_b
+
+
+# --- Reconciliation (Slice 3) ------------------------------------------------------------
+# Wire reconcile() into worker.process_job BEHIND the OMR_ENSEMBLE flag, ONLY when both
+# engines produced output. It takes the PRIMARY (Clarity) document as the SKELETON and, per
+# matched (measure,staff) slot, emits the winner's REAL <note> element so Clarity's
+# tie/spelling markup survives. ONLY the safe conflict classes are resolved here:
+#   A (agree): keep Clarity.
+#   B (pitch mismatch, same onset/staff): vote with FREE heuristics, tiebreak Clarity.
+#   E (duration mismatch on a matched onset+pitch): metric-completeness vote, tiebreak Clarity.
+#   C (note in one engine only) and D (timing mismatch): DO NOTHING this slice. See TODO(slice4).
+#
+# CRITICAL SAFETY: every heuristic tiebreaks to Clarity. The reconciled output must never be
+# WORSE than Clarity-alone on Clarity-good inputs. When in doubt, keep Clarity.
+#
+# Robustness contract (the #113 rule): NEVER raise. On ANY failure (parse, align, vote) return
+# primary_bytes unchanged. Empty/None secondary -> primary_bytes (single-engine pass-through).
+
+MIDI_MIN = 21  # A0, lowest piano key
+MIDI_MAX = 108  # C8, highest piano key
+
+# Expected tessitura center per staff, as a MIDI note. Used only as a tiebreak prior when one
+# class-B candidate is an implausible octave jump: RH/staff1 ~C5 (72), LH/staff2 ~C3 (48).
+_STAFF_TESSITURA = {1: 72, 2: 48}
+
+_STEP_SEMITONE = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
+
+# Major-key diatonic pitch classes by <fifths>. Index by fifths (-7..7) -> set of the 7
+# diatonic pitch classes (0..11). A note whose pitch class is in the set is diatonic to the
+# key; a lone non-diatonic alter is more likely an OMR misread than a real chromatic note.
+_MAJOR_SCALE = [0, 2, 4, 5, 7, 9, 11]  # C major pitch classes
+
+
+def _pitch_to_midi(pitch: Optional[Pitch]) -> Optional[int]:
+    """MIDI number for a (step, alter, octave) pitch, or None for a rest/garbage."""
+    if pitch is None:
+        return None
+    step, alter, octave = pitch
+    base = _STEP_SEMITONE.get((step or "").upper())
+    if base is None:
+        return None
+    return (octave + 1) * 12 + base + (alter or 0)
+
+
+def _fifths_of(root: ET.Element) -> int:
+    """The score's first <key><fifths>, or 0 (C major / no key) on missing/garbage. A single
+    free prior: which pitch classes are diatonic. We do not model per-measure key changes
+    (a later refinement); the first key is a good-enough prior for the diatonicity vote."""
+    f = root.find(".//key/fifths")
+    v = _int_text(f, 0)
+    return v if v is not None else 0
+
+
+def _diatonic_pitch_classes(fifths: int) -> Set[int]:
+    """The 7 diatonic pitch classes (0..11) of the MAJOR key with this <fifths>. The major
+    tonic pitch class is (fifths * 7) mod 12 (a fifth = 7 semitones up per sharp)."""
+    tonic = (fifths * 7) % 12
+    return {(tonic + d) % 12 for d in _MAJOR_SCALE}
+
+
+def _is_diatonic(pitch: Optional[Pitch], diatonic_pcs: Set[int]) -> bool:
+    midi = _pitch_to_midi(pitch)
+    if midi is None:
+        return False
+    return (midi % 12) in diatonic_pcs
+
+
+def _in_range(pitch: Optional[Pitch]) -> bool:
+    midi = _pitch_to_midi(pitch)
+    return midi is not None and MIDI_MIN <= midi <= MIDI_MAX
+
+
+def _vote_pitch(
+    clarity: NoteEvent,
+    oemer: NoteEvent,
+    diatonic_pcs: Set[int],
+    prev_midi: Optional[int],
+) -> NoteEvent:
+    """Class B: same onset/staff, DIFFERENT pitch. Vote with FREE heuristics, in order:
+      (1) key-signature diatonicity: if exactly one candidate is diatonic, it wins (a lone
+          non-diatonic alter is likely a misread accidental/ledger).
+      (2) octave/range sanity: reject a candidate outside MIDI 21..108; if exactly one is in
+          range it wins. Within range, if one is an implausible octave jump from the staff
+          tessitura while the other is plausible, prefer the plausible one.
+      (3) voice-leading: smaller melodic interval from the previous same-staff note wins.
+      (4) tie tiebreak: a Clarity tie endpoint wins (Clarity's known tie strength).
+      (5) final fallback: Clarity (primary).
+    CRITICAL: every branch that cannot SEPARATE the two tiebreaks to Clarity, so reconcile
+    never regresses a Clarity-good input.
+    """
+    c_mid = _pitch_to_midi(clarity.pitch)
+    o_mid = _pitch_to_midi(oemer.pitch)
+
+    # (2a) range sanity FIRST as a hard reject: a pitch outside the piano cannot be right.
+    c_ok = c_mid is not None and MIDI_MIN <= c_mid <= MIDI_MAX
+    o_ok = o_mid is not None and MIDI_MIN <= o_mid <= MIDI_MAX
+    if c_ok and not o_ok:
+        return clarity
+    if o_ok and not c_ok:
+        return oemer
+    if not c_ok and not o_ok:
+        return clarity  # both garbage -> keep Clarity
+
+    # (1) key-signature diatonicity: a lone non-diatonic candidate loses.
+    c_dia = (c_mid % 12) in diatonic_pcs
+    o_dia = (o_mid % 12) in diatonic_pcs
+    if c_dia and not o_dia:
+        return clarity
+    if o_dia and not c_dia:
+        return oemer
+
+    # (2b) octave/range sanity: prefer the candidate nearer the staff tessitura when one is an
+    # implausible octave jump (>= an octave) from it and the other is plausible (< an octave).
+    center = _STAFF_TESSITURA.get(clarity.staff, _STAFF_TESSITURA[1])
+    c_jump = abs(c_mid - center)
+    o_jump = abs(o_mid - center)
+    if c_jump >= 12 and o_jump < 12:
+        return oemer
+    if o_jump >= 12 and c_jump < 12:
+        return clarity
+
+    # (3) voice-leading: smaller melodic interval from the previous same-staff note wins.
+    if prev_midi is not None:
+        c_step = abs(c_mid - prev_midi)
+        o_step = abs(o_mid - prev_midi)
+        if c_step < o_step:
+            return clarity
+        if o_step < c_step:
+            return oemer
+
+    # (4) tie tiebreak -> Clarity (a tie endpoint is a deliberate Clarity signal).
+    if clarity.tie:
+        return clarity
+
+    # (5) final fallback -> Clarity.
+    return clarity
+
+
+def _vote_duration(
+    clarity: NoteEvent,
+    oemer: NoteEvent,
+    measure_capacity_ticks: Optional[int],
+    clarity_cell_sum: int,
+) -> NoteEvent:
+    """Class E: matched onset+pitch, DIFFERENT duration. Prefer the duration that keeps the
+    bar metrically complete vs <time>; tiebreak the LONGER one IF it does not overflow the
+    measure; Clarity tie-chains ALWAYS win. Every uncertain branch tiebreaks to Clarity.
+
+    clarity_cell_sum is the summed duration of the OTHER non-chord Clarity notes in this cell
+    (excluding this note), so completeness is judged with each candidate substituted in.
+    """
+    # Clarity tie-chains always win (a tie is a deliberate duration signal).
+    if clarity.tie:
+        return clarity
+
+    c_dur = clarity.duration
+    o_dur = oemer.duration
+    if c_dur == o_dur:
+        return clarity
+
+    if measure_capacity_ticks is not None and measure_capacity_ticks > 0:
+        c_total = clarity_cell_sum + c_dur
+        o_total = clarity_cell_sum + o_dur
+        c_complete = c_total == measure_capacity_ticks
+        o_complete = o_total == measure_capacity_ticks
+        # Prefer the candidate that makes the bar EXACTLY complete.
+        if c_complete and not o_complete:
+            return clarity
+        if o_complete and not c_complete:
+            return oemer
+        # Neither (or both) hits exact completeness: prefer the LONGER duration only if it
+        # does not OVERFLOW the measure (held notes are under-read more often than over-read).
+        longer = clarity if c_dur >= o_dur else oemer
+        longer_total = clarity_cell_sum + longer.duration
+        if longer_total <= measure_capacity_ticks:
+            return longer
+        # The longer one overflows -> keep Clarity (do not introduce an overflow).
+        return clarity
+
+    # No usable <time>: tiebreak Clarity.
+    return clarity
+
+
+def _replace_element(parent_map, old_elem: ET.Element, new_elem: ET.Element) -> bool:
+    """Swap old_elem for a DEEP COPY of new_elem in old_elem's parent (so the winner's real
+    markup is emitted into the Clarity skeleton). Returns True on success. parent_map maps a
+    child Element -> its parent (ElementTree has no .getparent())."""
+    parent = parent_map.get(old_elem)
+    if parent is None:
+        return False
+    children = list(parent)
+    try:
+        idx = children.index(old_elem)
+    except ValueError:
+        return False
+    import copy
+
+    parent.remove(old_elem)
+    parent.insert(idx, copy.deepcopy(new_elem))
+    return True
+
+
+def _build_parent_map(root: ET.Element):
+    """child Element -> parent Element for the whole tree (ElementTree lacks getparent())."""
+    return {child: parent for parent in root.iter() for child in parent}
+
+
+def reconcile(primary_bytes, secondary_bytes) -> bytes:
+    """Reconcile two engines' MusicXML into one, using the PRIMARY (Clarity) document as the
+    skeleton and resolving ONLY the safe conflict classes A/B/E with FREE heuristics. The
+    winner's REAL <note> element is emitted per matched slot so Clarity's tie/spelling markup
+    is preserved. Classes C (one-engine-only) and D (timing mismatch) are NOT touched here
+    (Slice 4); Clarity's notes are kept as-is and oemer-only notes are ignored.
+
+    Robustness: NEVER raises. Returns primary_bytes unchanged on ANY failure or when there is
+    no secondary (single-engine pass-through = no regression vs Slice 1).
+    """
+    if not secondary_bytes:
+        # Single-engine pass-through: feed Clarity straight to the post-transforms.
+        return primary_bytes
+
+    try:
+        # Parse the PRIMARY into the tree we will serialize. to_events(primary) returns events
+        # whose .elem refs point into THIS root, so swapping an element in-place changes the
+        # serialized output. We re-parse here (not reuse to_events' internal root) so we own
+        # the exact root object whose children the primary events reference.
+        primary_root = ET.fromstring(primary_bytes)
+    except Exception:
+        return primary_bytes
+
+    try:
+        primary_events = _events_from_root(primary_root, "clarity")
+        secondary_events = to_events(secondary_bytes, "oemer")
+        if not primary_events or not secondary_events:
+            # Nothing comparable on one side -> keep Clarity untouched.
+            return primary_bytes
+
+        result = align(primary_events, secondary_events)
+        matched = result["matched"]
+        if not matched:
+            return primary_bytes
+
+        parent_map = _build_parent_map(primary_root)
+        diatonic_pcs = _diatonic_pitch_classes(_fifths_of(primary_root))
+
+        # Common base used by align() to scale onsets/durations: lcm of the two stream bases.
+        # The matched events are align()'s rescaled COPIES, so their durations are already on
+        # this common base; we derive the measure capacity in the same base for the class-E vote.
+        base_primary = _stream_base(primary_events)
+        base_secondary = _stream_base(secondary_events)
+        common_base = _lcm(base_primary, base_secondary)
+        capacity_ticks = _measure_capacity_ticks(primary_root, common_base)
+
+        # Track previous same-staff Clarity MIDI per cell for the voice-leading prior, and the
+        # per-cell summed Clarity duration (non-chord) for the metric-completeness vote.
+        prev_midi_by_cell = {}
+        cell_dur_sum = _cell_duration_sums(primary_events)
+
+        # Process matched pairs in (measure, staff, onset) order so voice-leading sees the
+        # previous note. matched pairs are (clarity_event, oemer_event).
+        ordered = sorted(
+            matched,
+            key=lambda pair: (pair[0].measure, pair[0].staff, pair[0].onset),
+        )
+        for clarity_ev, oemer_ev in ordered:
+            cell = (clarity_ev.measure, clarity_ev.staff)
+            prev_midi = prev_midi_by_cell.get(cell)
+            # The Clarity element we may replace.
+            target_elem = clarity_ev.elem
+
+            if clarity_ev.pitch == oemer_ev.pitch:
+                # Class A (agree on pitch) OR class E (same pitch, different duration).
+                if (
+                    clarity_ev.pitch is not None
+                    and clarity_ev.duration != oemer_ev.duration
+                ):
+                    # Class E: duration vote (rests excluded; a rest pitch is None).
+                    other_sum = cell_dur_sum.get(cell, 0)
+                    if not clarity_ev.is_chord:
+                        other_sum -= clarity_ev.duration
+                    winner = _vote_duration(
+                        clarity_ev, oemer_ev, capacity_ticks, other_sum
+                    )
+                    if winner is oemer_ev and target_elem is not None:
+                        _replace_element(parent_map, target_elem, oemer_ev.elem)
+                # Class A: no change (keep Clarity's element).
+            else:
+                # Class B: pitch mismatch -> vote (rests never reach here as a "pitch" since a
+                # rest has pitch None and would only "agree" with another rest above).
+                if clarity_ev.pitch is not None and oemer_ev.pitch is not None:
+                    winner = _vote_pitch(clarity_ev, oemer_ev, diatonic_pcs, prev_midi)
+                    if winner is oemer_ev and target_elem is not None:
+                        _replace_element(parent_map, target_elem, oemer_ev.elem)
+                # If one side is a rest vs a note, keep Clarity (do not silence/add this slice).
+
+            # Update the voice-leading anchor with the pitch we ENDED UP emitting.
+            emitted_pitch = clarity_ev.pitch
+            # (We only ever emit Clarity's pitch as the anchor approximation; using the chosen
+            # pitch would require re-reading the swapped element. Clarity is primary and the
+            # anchor is a heuristic prior, so this is a safe approximation.)
+            emitted_midi = _pitch_to_midi(emitted_pitch)
+            if emitted_midi is not None:
+                prev_midi_by_cell[cell] = emitted_midi
+
+        # TODO(slice4): class C = oemer-only notes (result["only_b"]) are IGNORED here; adding
+        # them is the hard-gated ADD of Slice 4. Class C Clarity-only notes (result["only_a"])
+        # are KEPT as-is (they are already in the skeleton, untouched).
+        # TODO(slice4): class D = timing/onset mismatch beyond eps is NOT reconciled here; such
+        # notes fall into only_a/only_b and are left as Clarity-has-it / oemer-ignored.
+
+        return ET.tostring(primary_root, encoding="utf-8", xml_declaration=True)
+    except Exception:
+        # Robustness contract: any failure -> Clarity unchanged, never worse than Clarity-alone.
+        return primary_bytes
+
+
+def _events_from_root(root: ET.Element, src: str) -> List[NoteEvent]:
+    """Like to_events but from an ALREADY-PARSED root, so the returned events' .elem refs
+    point into THAT root (the one reconcile will serialize). Mirrors to_events' scaling."""
+    doc_divs = _all_divisions(root) or [1]
+    seed = doc_divs[0]
+    raw: List[Tuple[NoteEvent, int]] = []
+    for part in root.findall("part"):
+        raw.extend(_events_for_part(part, src, seed))
+    if not raw:
+        return []
+    per_event_divs = [d for _, d in raw if d and d > 0] or [1]
+    doc_base = _lcm_all(set(per_event_divs))
+    events: List[NoteEvent] = []
+    for event, own_div in raw:
+        own = own_div if own_div and own_div > 0 else 1
+        scale = doc_base // own
+        event.onset *= scale
+        event.duration *= scale
+        event.base = doc_base
+        events.append(event)
+    return events
+
+
+def _measure_capacity_ticks(root: ET.Element, common_base: int) -> Optional[int]:
+    """The measure capacity in COMMON-base ticks from the first <time>, or None. A bar of
+    `beats`/`beat-type` holds beats * (4 / beat-type) quarter notes; in common-base ticks
+    that is beats * 4 * common_base / beat_type (common_base = ticks per quarter note)."""
+    time = root.find(".//time")
+    if time is None:
+        return None
+    beats = _int_text(time.find("beats"))
+    beat_type = _int_text(time.find("beat-type"))
+    if not beats or not beat_type or beat_type <= 0:
+        return None
+    num = beats * 4 * common_base
+    if num % beat_type != 0:
+        return None  # non-integer tick capacity: skip the completeness vote rather than guess.
+    return num // beat_type
+
+
+def _cell_duration_sums(events: List[NoteEvent]):
+    """Per (measure, staff) cell, the summed duration of NON-chord notes (the cursor advance).
+    Used by the class-E metric-completeness vote to judge bar fill with a candidate swapped in."""
+    sums = {}
+    for e in events:
+        if e.is_chord:
+            continue
+        cell = (e.measure, e.staff)
+        sums[cell] = sums.get(cell, 0) + e.duration
+    return sums
