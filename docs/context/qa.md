@@ -4,6 +4,23 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-06-03: RE-VALIDATION of the ENSEMBLE OMR referee after the align() optimal-assignment fix +
+  dense-run decline-guard (PR #158, slice 6d, merged to main). Supersedes the 2026-06-02 PRE-FLIP
+  FAIL below for the referee path. Same method as before (isolated `/tmp/align-val` on the cx33
+  .venv311, `OMR_ENSEMBLE=1 OMR_ENSEMBLE_REFEREE=1` vs Clarity baseline, diff in document order,
+  live systemd service + R2 env UNTOUCHED + confirmed still polling afterward). **VERDICT for the
+  REFEREE path: 0 regressions on all 4 PDFs.** Per-PDF: icarus 1 change (m15 E6->C6, a CORRECTION
+  ground-truthed against the composer's icarus.mscz: m15 treble = C6 E6 F6 E6, first note IS C6);
+  Liminality 2 changes (m31/m32 staff-2 4-note chord, the pre-existing class-B DIATONICITY heuristic
+  Eb->E / F#->G, NOT the referee - chords fail isolation - in a region where Clarity is already
+  wrong, so neutral); Reverie 0 (was 13 swap-pair regressions); the_cut 0 (was 1, now declined as a
+  dense pocket). NO notes lost. The dense-run guard implements Slice 5's "decline dense/beamed
+  regions" scope the wiring had never enforced. **STILL TO DO before any prod flip:** this is an
+  XML-diff validation, NOT the live browser feature gate. The flag-flip (OMR_ENSEMBLE +
+  OMR_ENSEMBLE_REFEREE in /etc/piano-helper-omr.env on the cx33) is a separate slice; it also turns
+  on the full ensemble for EVERY OMR upload (~3-5x latency, up to ~10min, per the entry below), so
+  it needs a deliberate go + a real-PDF-upload browser QA pass on main before enabling.
+
 - 2026-06-02: PRE-FLIP QA of the ENSEMBLE OMR heuristic reconciliation (OMR_ENSEMBLE=1, sub-gates
   OMR_ENSEMBLE_TIMING / OMR_ENSEMBLE_ADD / OMR_ENSEMBLE_REFEREE all OFF = the "Slice 3" safe path:
   reconcile resolves only class A=agree, B=pitch vote, E=duration vote; C/D are no-ops) on the LIVE
