@@ -611,6 +611,81 @@ def test_flag_off_never_calls_reconcile(tmp_path, monkeypatch):
     assert client.put_body is not None
 
 
+# --- reconcile Slice-4 sub-gates at the worker boundary ----------------------------------
+# Class C/D live entirely in reconcile.py (self-gated by OMR_ENSEMBLE_TIMING / OMR_ENSEMBLE_ADD),
+# so the worker flow is UNCHANGED. These drive the REAL reconcile through _reconcile_paths to
+# confirm that with only OMR_ENSEMBLE on the riskier classes stay no-ops, and activate per sub-gate.
+
+_CLARITY_GAP = (
+    '<?xml version="1.0"?><score-partwise version="4.0">'
+    '<part-list><score-part id="P1"><part-name>RH</part-name></score-part></part-list>'
+    '<part id="P1"><measure number="1">'
+    "<attributes><divisions>4</divisions><key><fifths>0</fifths></key>"
+    "<time><beats>4</beats><beat-type>4</beat-type></time>"
+    "<clef><sign>G</sign><line>2</line></clef></attributes>"
+    "<note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration></note>"
+    "<note><rest/><duration>4</duration></note>"
+    "<note><pitch><step>G</step><octave>5</octave></pitch><duration>4</duration></note>"
+    "<note><rest/><duration>4</duration></note>"
+    "</measure></part></score-partwise>"
+).encode("utf-8")
+
+_OEMER_FILLS_GAP = (
+    '<?xml version="1.0"?><score-partwise version="4.0">'
+    '<part-list><score-part id="P1"><part-name>M</part-name></score-part></part-list>'
+    '<part id="P1"><measure number="1">'
+    "<attributes><divisions>4</divisions><key><fifths>0</fifths></key>"
+    "<time><beats>4</beats><beat-type>4</beat-type></time>"
+    '<clef number="1"><sign>G</sign><line>2</line></clef></attributes>'
+    "<note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><staff>1</staff></note>"
+    "<note><pitch><step>E</step><octave>5</octave></pitch><duration>4</duration><staff>1</staff></note>"
+    "<note><pitch><step>G</step><octave>5</octave></pitch><duration>4</duration><staff>1</staff></note>"
+    "<note><rest/><duration>4</duration><staff>1</staff></note>"
+    "</measure></part></score-partwise>"
+).encode("utf-8")
+
+
+def _steps(xml_bytes):
+    import xml.etree.ElementTree as ET
+
+    root = ET.fromstring(xml_bytes)
+    return [
+        n.findtext("pitch/step")
+        for n in root.iter("note")
+        if n.find("pitch") is not None
+    ]
+
+
+def test_worker_reconcile_add_noop_with_only_ensemble_flag(tmp_path, monkeypatch):
+    # OMR_ENSEMBLE on, ADD sub-gate OFF: the oemer-only E5 is NOT added (Slice-3 behavior).
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    monkeypatch.delenv("OMR_ENSEMBLE_ADD", raising=False)
+    primary = tmp_path / "clarity.musicxml"
+    primary.write_bytes(_CLARITY_GAP)
+    secondary = tmp_path / "oemer.musicxml"
+    secondary.write_bytes(_OEMER_FILLS_GAP)
+
+    out_path = worker._reconcile_paths(str(primary), str(secondary), str(tmp_path))
+    with open(out_path, "rb") as fh:
+        steps = _steps(fh.read())
+    assert steps == ["C", "G"]  # E5 NOT added
+
+
+def test_worker_reconcile_add_activates_with_subgate(tmp_path, monkeypatch):
+    # OMR_ENSEMBLE on AND OMR_ENSEMBLE_ADD on: the corroborated oemer-only E5 is added.
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    monkeypatch.setenv("OMR_ENSEMBLE_ADD", "1")
+    primary = tmp_path / "clarity.musicxml"
+    primary.write_bytes(_CLARITY_GAP)
+    secondary = tmp_path / "oemer.musicxml"
+    secondary.write_bytes(_OEMER_FILLS_GAP)
+
+    out_path = worker._reconcile_paths(str(primary), str(secondary), str(tmp_path))
+    with open(out_path, "rb") as fh:
+        steps = _steps(fh.read())
+    assert steps == ["C", "E", "G"]  # E5 added into the gap
+
+
 # --- merge_to_grand_staff (#135) ---------------------------------------------------------
 
 TWO_PART_XML = b"""<?xml version="1.0" encoding="UTF-8"?>

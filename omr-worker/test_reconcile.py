@@ -699,3 +699,288 @@ def test_class_e_swap_writes_duration_in_clarity_base_across_divisions():
     )
     assert note.findtext("pitch/step") == "C"
     assert note.findtext("duration") == "16"  # whole note in div=4, not oemer's 64
+
+
+# === Slice 4: class D (timing) + class C (one-engine-only), each behind its sub-gate ======
+# Both sub-gates default OFF and additionally require OMR_ENSEMBLE. With ONLY OMR_ENSEMBLE on
+# (the Slice-3 behavior) classes C/D stay no-ops; they activate only when their own sub-gate
+# is also set. Every correction tiebreaks to Clarity; a declined correction is always OK.
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture
+def ensemble_on(monkeypatch):
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    return monkeypatch
+
+
+def _clarity_one_treble_rest_then_note(rest_dur, note, fifths=0):
+    """A Clarity treble part whose measure is [rest, note] (the safe class-D shape)."""
+    attrs = (
+        "<attributes><divisions>4</divisions>"
+        "<key><fifths>%d</fifths></key>"
+        "<time><beats>4</beats><beat-type>4</beat-type></time>"
+        "<clef><sign>G</sign><line>2</line></clef>"
+        "</attributes>" % fifths
+    )
+    body = _rest(rest_dur) + note
+    return (
+        '<?xml version="1.0"?><score-partwise version="4.0">'
+        '<part-list><score-part id="P1"><part-name>RH</part-name></score-part></part-list>'
+        '<part id="P1"><measure number="1">%s%s</measure></part>'
+        "</score-partwise>" % (attrs, body)
+    ).encode("utf-8")
+
+
+# --- Sub-gate behavior: C/D are no-ops with only OMR_ENSEMBLE on -------------------------
+
+
+def test_timing_disabled_by_default_is_noop(monkeypatch):
+    # OMR_ENSEMBLE on but OMR_ENSEMBLE_TIMING unset: class D stays the Slice-3 no-op (Clarity
+    # note kept at its onset, oemer's timing ignored).
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    monkeypatch.delenv("OMR_ENSEMBLE_TIMING", raising=False)
+    # Clarity: [rest dur 4, C5 quarter] -> note onset 4, bar ends at 8 (INCOMPLETE, cap 16).
+    primary = _clarity_one_treble_rest_then_note(4, _note("C", 5, 4))
+    # oemer places the SAME C5 at onset 12 (bar would complete: 12+4==16).
+    secondary = _oemer_one_treble([_rest(12, staff=1), _note("C", 5, 4, staff=1)])
+    out = reconcile_docs(primary, secondary)
+    root = ET.fromstring(out)
+    rest = next(n for n in root.iter("note") if n.find("rest") is not None)
+    assert rest.findtext("duration") == "4"  # leading rest UNCHANGED -> D was a no-op
+
+
+def test_add_disabled_by_default_is_noop(monkeypatch):
+    # OMR_ENSEMBLE on but OMR_ENSEMBLE_ADD unset: an oemer-only note is DROPPED (Slice-3 no-op).
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    monkeypatch.delenv("OMR_ENSEMBLE_ADD", raising=False)
+    primary = _clarity_one_treble([_note("C", 5, 4)])
+    secondary = _oemer_one_treble(
+        [_note("C", 5, 4, staff=1), _note("E", 5, 4, staff=1)]
+    )
+    out = reconcile_docs(primary, secondary)
+    assert _emitted_pitches(out) == [("C", 0, 5)]  # E5 NOT added
+
+
+def test_subgate_requires_parent_ensemble(monkeypatch):
+    # The sub-gate is ON but the PARENT OMR_ENSEMBLE is OFF: still a no-op (sub-gates AND the
+    # parent flag must both be set). reconcile.add_enabled() must be False here.
+    monkeypatch.delenv("OMR_ENSEMBLE", raising=False)
+    monkeypatch.setenv("OMR_ENSEMBLE_ADD", "1")
+    monkeypatch.setenv("OMR_ENSEMBLE_TIMING", "1")
+    assert reconcile.add_enabled() is False
+    assert reconcile.timing_enabled() is False
+
+
+def test_subgate_helpers_truthy_parsing(monkeypatch):
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    monkeypatch.setenv("OMR_ENSEMBLE_TIMING", "true")
+    monkeypatch.setenv("OMR_ENSEMBLE_ADD", "0")
+    assert reconcile.timing_enabled() is True
+    assert reconcile.add_enabled() is False
+
+
+# --- Class D: timing mismatch (gated by OMR_ENSEMBLE_TIMING) -----------------------------
+
+
+def test_class_d_metric_completeness_shifts_note(ensemble_on):
+    # Clarity: [rest dur 4, C5 quarter] -> note at onset 4, bar ends at 8 (INCOMPLETE; cap 16).
+    # oemer reads the SAME C5 at onset 12, which makes the bar EXACTLY complete (12+4==16). The
+    # metric-completeness vote picks oemer's onset; the safe shape (note is last, preceded by a
+    # rest) lets us resize ONLY the leading rest, so the note moves to onset 12.
+    ensemble_on.setenv("OMR_ENSEMBLE_TIMING", "1")
+    primary = _clarity_one_treble_rest_then_note(4, _note("C", 5, 4))
+    secondary = _oemer_one_treble([_rest(12, staff=1), _note("C", 5, 4, staff=1)])
+    out = reconcile_docs(primary, secondary)
+    root = ET.fromstring(out)
+    rest = next(n for n in root.iter("note") if n.find("rest") is not None)
+    assert rest.findtext("duration") == "12"  # leading rest grown 4 -> 12, note now at onset 12
+    note = next(n for n in root.iter("note") if n.find("pitch") is not None)
+    assert note.findtext("duration") == "4"  # the note's OWN duration is untouched
+
+
+def test_class_d_ambiguous_keeps_clarity(ensemble_on):
+    # Clarity's bar is ALREADY complete ([rest dur 12, C5 quarter] -> 12+4==16). oemer reads the
+    # note earlier (onset 4) which would NOT complete the bar. Ambiguous/Clarity-complete -> keep.
+    ensemble_on.setenv("OMR_ENSEMBLE_TIMING", "1")
+    primary = _clarity_one_treble_rest_then_note(12, _note("C", 5, 4))
+    secondary = _oemer_one_treble([_rest(4, staff=1), _note("C", 5, 4, staff=1)])
+    out = reconcile_docs(primary, secondary)
+    root = ET.fromstring(out)
+    rest = next(n for n in root.iter("note") if n.find("rest") is not None)
+    assert rest.findtext("duration") == "12"  # unchanged -> Clarity kept
+
+
+def test_class_d_unsafe_shape_is_declined(ensemble_on):
+    # NOT the safe shape: the disputed Clarity note is FOLLOWED by another note (not last in the
+    # cell), so shifting it would move the following note. We must DECLINE (keep Clarity) rather
+    # than corrupt the measure. Clarity: [rest 4, C5 quarter, G5 quarter]; oemer puts C5 at 12.
+    ensemble_on.setenv("OMR_ENSEMBLE_TIMING", "1")
+    attrs = (
+        "<attributes><divisions>4</divisions>"
+        "<key><fifths>0</fifths></key>"
+        "<time><beats>4</beats><beat-type>4</beat-type></time>"
+        "<clef><sign>G</sign><line>2</line></clef>"
+        "</attributes>"
+    )
+    body = _rest(4) + _note("C", 5, 4) + _note("G", 5, 4)
+    primary = (
+        '<?xml version="1.0"?><score-partwise version="4.0">'
+        '<part-list><score-part id="P1"><part-name>RH</part-name></score-part></part-list>'
+        '<part id="P1"><measure number="1">%s%s</measure></part>'
+        "</score-partwise>" % (attrs, body)
+    ).encode("utf-8")
+    secondary = _oemer_one_treble([_rest(12, staff=1), _note("C", 5, 4, staff=1)])
+    out = reconcile_docs(primary, secondary)
+    root = ET.fromstring(out)
+    rest = next(n for n in root.iter("note") if n.find("rest") is not None)
+    assert rest.findtext("duration") == "4"  # leading rest UNCHANGED -> declined
+
+
+def test_class_d_does_not_shift_later_notes(ensemble_on):
+    # A D correction must never shift the rest of the measure. In the safe shape the corrected
+    # note is the LAST note, so by construction nothing follows it. Verify the only mutation is
+    # the leading rest's duration: the note's onset moves but no extra elements appear/disappear.
+    ensemble_on.setenv("OMR_ENSEMBLE_TIMING", "1")
+    primary = _clarity_one_treble_rest_then_note(4, _note("C", 5, 4))
+    secondary = _oemer_one_treble([_rest(12, staff=1), _note("C", 5, 4, staff=1)])
+    out = reconcile_docs(primary, secondary)
+    root = ET.fromstring(out)
+    notes = list(root.iter("note"))
+    assert len(notes) == 2  # still exactly [rest, note], no inserted/removed elements
+    assert notes[0].find("rest") is not None
+    assert notes[1].find("pitch") is not None
+
+
+# --- Class C: oemer-only ADD (gated by OMR_ENSEMBLE_ADD) ---------------------------------
+
+
+def _clarity_treble_gap():
+    """Clarity treble measure [C5 quarter @0, <gap @4>, G5 quarter @8, rest 4 @12] in 4/4,
+    div=4 -> a genuine empty onset slot at 4."""
+    attrs = (
+        "<attributes><divisions>4</divisions>"
+        "<key><fifths>0</fifths></key>"
+        "<time><beats>4</beats><beat-type>4</beat-type></time>"
+        "<clef><sign>G</sign><line>2</line></clef>"
+        "</attributes>"
+    )
+    body = _note("C", 5, 4) + _rest(4) + _note("G", 5, 4) + _rest(4)
+    return (
+        '<?xml version="1.0"?><score-partwise version="4.0">'
+        '<part-list><score-part id="P1"><part-name>RH</part-name></score-part></part-list>'
+        '<part id="P1"><measure number="1">%s%s</measure></part>'
+        "</score-partwise>" % (attrs, body)
+    ).encode("utf-8")
+
+
+def test_class_c_add_when_diatonic_fills_gap_in_range(ensemble_on):
+    # oemer has an E5 at onset 4 where Clarity has a gap (an empty slot). E5 is diatonic (C major),
+    # in range, and adding it (dur 4) does not overflow. ALL gates pass -> ADD at the right slot.
+    ensemble_on.setenv("OMR_ENSEMBLE_ADD", "1")
+    primary = _clarity_treble_gap()
+    secondary = _oemer_one_treble(
+        [
+            _note("C", 5, 4, staff=1),
+            _note("E", 5, 4, staff=1),
+            _note("G", 5, 4, staff=1),
+            _rest(4, staff=1),
+        ]
+    )
+    out = reconcile_docs(primary, secondary)
+    # The added E5 lands BETWEEN C5 and G5 (onset 4), in document order.
+    assert _emitted_pitches(out) == [("C", 0, 5), ("E", 0, 5), ("G", 0, 5)]
+    # And it carries the CLARITY-base duration (4), not oemer's native ticks.
+    root = ET.fromstring(out)
+    e5 = next(
+        n for n in root.iter("note")
+        if n.find("pitch") is not None and n.findtext("pitch/step") == "E"
+    )
+    assert e5.findtext("duration") == "4"
+
+
+def test_class_c_add_dropped_when_non_diatonic(ensemble_on):
+    # oemer's gap note is C#5 (non-diatonic in C major). The diatonicity gate fails -> DROP.
+    ensemble_on.setenv("OMR_ENSEMBLE_ADD", "1")
+    primary = _clarity_treble_gap()
+    secondary = _oemer_one_treble(
+        [
+            _note("C", 5, 4, staff=1),
+            _note("C", 5, 4, staff=1, alter=1),
+            _note("G", 5, 4, staff=1),
+            _rest(4, staff=1),
+        ]
+    )
+    out = reconcile_docs(primary, secondary)
+    assert _emitted_pitches(out) == [("C", 0, 5), ("G", 0, 5)]  # C#5 NOT added
+
+
+def test_class_c_add_dropped_when_out_of_range(ensemble_on):
+    # oemer's gap note is an absurd C12 (out of MIDI range). The range gate fails -> DROP.
+    ensemble_on.setenv("OMR_ENSEMBLE_ADD", "1")
+    primary = _clarity_treble_gap()
+    secondary = _oemer_one_treble(
+        [
+            _note("C", 5, 4, staff=1),
+            _note("C", 12, 4, staff=1),
+            _note("G", 5, 4, staff=1),
+            _rest(4, staff=1),
+        ]
+    )
+    out = reconcile_docs(primary, secondary)
+    assert _emitted_pitches(out) == [("C", 0, 5), ("G", 0, 5)]  # C12 NOT added
+
+
+def test_class_c_add_dropped_when_would_overflow(ensemble_on):
+    # Clarity already fills the whole bar (4 quarters, no gap). oemer has an EXTRA diatonic E5 in
+    # an occupied slot; adding it would overflow the bar. The gap/overflow gate fails -> DROP.
+    ensemble_on.setenv("OMR_ENSEMBLE_ADD", "1")
+    primary = _clarity_one_treble(
+        [_note("C", 5, 4), _note("D", 5, 4), _note("E", 5, 4), _note("F", 5, 4)]
+    )
+    secondary = _oemer_one_treble(
+        [
+            _note("C", 5, 4, staff=1),
+            _note("D", 5, 4, staff=1),
+            _note("E", 5, 4, staff=1),
+            _note("F", 5, 4, staff=1),
+            _note("G", 5, 4, staff=1),
+        ]
+    )
+    out = reconcile_docs(primary, secondary)
+    assert _emitted_pitches(out) == [
+        ("C", 0, 5),
+        ("D", 0, 5),
+        ("E", 0, 5),
+        ("F", 0, 5),
+    ]  # G5 NOT added (would overflow)
+
+
+def test_class_c_clarity_only_kept_by_default(ensemble_on):
+    # A Clarity-only note oemer lacks is KEPT (Clarity has better recall). Even with ADD on.
+    ensemble_on.setenv("OMR_ENSEMBLE_ADD", "1")
+    ensemble_on.setenv("OMR_ENSEMBLE_TIMING", "1")
+    primary = _clarity_one_treble([_note("C", 5, 4), _note("D", 5, 4)])
+    secondary = _oemer_one_treble([_note("C", 5, 4, staff=1)])
+    out = reconcile_docs(primary, secondary)
+    assert _emitted_pitches(out) == [("C", 0, 5), ("D", 0, 5)]  # D5 kept
+
+
+def test_class_c_clarity_only_kept_even_when_suspicious(ensemble_on):
+    # A slightly suspicious Clarity-only note (non-diatonic C#5) is STILL kept by default: we
+    # never drop a Clarity note (better recall). Default = keep.
+    ensemble_on.setenv("OMR_ENSEMBLE_ADD", "1")
+    primary = _clarity_one_treble([_note("C", 5, 4), _note("C", 5, 4, alter=1)])
+    secondary = _oemer_one_treble([_note("C", 5, 4, staff=1)])
+    out = reconcile_docs(primary, secondary)
+    assert _emitted_pitches(out) == [("C", 0, 5), ("C", 1, 5)]  # C#5 kept
+
+
+def test_class_c_add_robust_on_malformed_secondary(ensemble_on):
+    # Robustness: even with the ADD gate on, a malformed secondary returns the primary unchanged.
+    ensemble_on.setenv("OMR_ENSEMBLE_ADD", "1")
+    primary = _clarity_one_treble([_note("C", 5, 4)])
+    out = reconcile_docs(primary, b"<broken<<<")
+    assert out == primary
