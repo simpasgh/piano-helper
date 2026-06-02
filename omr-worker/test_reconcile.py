@@ -619,3 +619,83 @@ def test_reconcile_no_matches_returns_primary():
     secondary = _oemer_one_treble([_rest(16, staff=1)])  # only a rest, no pitched match
     out = reconcile_docs(primary, secondary)
     assert _emitted_pitches(out) == [("C", 0, 5)]
+
+
+# --- swap fidelity: a vote-for-oemer must change ONLY the voted field --------------------
+# Regression guards for two bugs where emitting oemer's WHOLE element corrupted the Clarity
+# skeleton: (1) it dropped/added a <chord/> member, turning a chord into a sequence (or vice
+# versa) and overflowing the bar; (2) it carried oemer's NATIVE <duration> in oemer's own
+# <divisions> base into the Clarity document, multiplying the note's length. A pitch vote must
+# change pitch ONLY; a duration vote must write the duration in the CLARITY document's base.
+
+
+def _oemer_div(divisions, notes, fifths=0):
+    """An oemer-shape doc with a CUSTOM <divisions> (so we can exercise a base mismatch vs the
+    div=4 Clarity skeleton). notes = note-XML strings already sized for `divisions`."""
+    attrs = (
+        "<attributes><divisions>%d</divisions>"
+        "<key><fifths>%d</fifths></key>"
+        "<time><beats>4</beats><beat-type>4</beat-type></time>"
+        '<clef number="1"><sign>G</sign><line>2</line></clef>'
+        "</attributes>" % (divisions, fifths)
+    )
+    return (
+        '<?xml version="1.0"?><score-partwise version="4.0">'
+        '<part-list><score-part id="P1"><part-name>M</part-name></score-part></part-list>'
+        '<part id="P1"><measure number="1">%s%s</measure></part>'
+        "</score-partwise>" % (attrs, "".join(notes))
+    ).encode("utf-8")
+
+
+def test_class_b_swap_preserves_clarity_chord_membership():
+    # Clarity reads a 2-note chord: C5 (root) + F#5 (<chord/> member, NON-diatonic in C major).
+    # oemer reads the same chord but lists it E5 (root) + C5 (<chord/> member): the matched
+    # disagreeing pair is Clarity's F#5 chord-member vs oemer's E5 chord-ROOT (no <chord/>).
+    # The diatonicity vote picks oemer's E5. The swap must keep the note a <chord/> MEMBER:
+    # dropping the marker would turn the chord into two sequential quarters and overflow the bar.
+    primary = _clarity_one_treble(
+        [_note("C", 5, 4), _note("F", 5, 4, alter=1, chord=True)]
+    )
+    secondary = _oemer_one_treble(
+        [_note("E", 5, 4, staff=1), _note("C", 5, 4, staff=1, chord=True)]
+    )
+    out = reconcile_docs(primary, secondary)
+    root = ET.fromstring(out)
+    notes = [n for n in root.iter("note") if n.find("pitch") is not None]
+    assert [n.findtext("pitch/step") for n in notes] == ["C", "E"]  # F#5 corrected to E5
+    # The corrected note is STILL a chord member (shares C5's onset); membership preserved.
+    assert notes[0].find("chord") is None
+    assert notes[1].find("chord") is not None
+    # Durations untouched (a pitch vote changes pitch only): both still quarter (dur 4).
+    assert [n.findtext("duration") for n in notes] == ["4", "4"]
+
+
+def test_class_b_swap_keeps_clarity_duration_across_divisions():
+    # Clarity divisions=4 reads C#5 quarter (dur 4, non-diatonic). oemer divisions=16 reads the
+    # same slot as C5 quarter (dur 16 in ITS base). The diatonicity vote picks oemer's C5. The
+    # emitted note must keep CLARITY's duration (4), NOT oemer's native 16 (which in the div=4
+    # document would be a quadruple-length note that overflows the bar).
+    primary = _clarity_one_treble([_note("C", 5, 4, alter=1)], fifths=0)
+    secondary = _oemer_div(16, [_note("C", 5, 16, staff=1)])
+    out = reconcile_docs(primary, secondary)
+    note = next(
+        n for n in ET.fromstring(out).iter("note") if n.find("pitch") is not None
+    )
+    assert note.findtext("pitch/step") == "C"
+    assert note.find("pitch/alter") is None  # C natural now
+    assert note.findtext("duration") == "4"  # CLARITY's base, not oemer's 16
+
+
+def test_class_e_swap_writes_duration_in_clarity_base_across_divisions():
+    # Class E across DIFFERENT divisions: Clarity div=4 reads C5 as a quarter (dur 4, under-fills
+    # the 4/4 bar); oemer div=16 reads the same C5 as a whole note (dur 64 in its base) which
+    # completes the bar. Metric-completeness picks oemer's whole note, BUT the written duration
+    # must be in CLARITY's base: a whole note at div=4 is 16 ticks, NOT oemer's raw 64.
+    primary = _clarity_one_treble([_note("C", 5, 4)])
+    secondary = _oemer_div(16, [_note("C", 5, 64, staff=1)])
+    out = reconcile_docs(primary, secondary)
+    note = next(
+        n for n in ET.fromstring(out).iter("note") if n.find("pitch") is not None
+    )
+    assert note.findtext("pitch/step") == "C"
+    assert note.findtext("duration") == "16"  # whole note in div=4, not oemer's 64

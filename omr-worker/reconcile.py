@@ -610,28 +610,71 @@ def _vote_duration(
     return clarity
 
 
-def _replace_element(parent_map, old_elem: ET.Element, new_elem: ET.Element) -> bool:
-    """Swap old_elem for a DEEP COPY of new_elem in old_elem's parent (so the winner's real
-    markup is emitted into the Clarity skeleton). Returns True on success. parent_map maps a
-    child Element -> its parent (ElementTree has no .getparent())."""
-    parent = parent_map.get(old_elem)
-    if parent is None:
-        return False
-    children = list(parent)
-    try:
-        idx = children.index(old_elem)
-    except ValueError:
-        return False
+def _apply_pitch(clarity_elem: ET.Element, oemer_elem: ET.Element) -> bool:
+    """Class-B winner = oemer: adopt ONLY oemer's <pitch> into the Clarity element, in place.
+
+    We deliberately do NOT swap the whole oemer element. Doing so would drag in oemer's native
+    <duration> (a different <divisions> base than the Clarity document we are serializing) and
+    oemer's <chord/> membership (oemer may list the same chord's notes in a different order, so
+    the matched member can be oemer's chord ROOT with no <chord/>). Either corrupts the Clarity
+    skeleton's timing and can make the output WORSE than Clarity-alone. A pitch vote must change
+    pitch ONLY, so we replace just the <pitch> child and leave duration/chord/type/ties/staff.
+
+    Returns True if the pitch was replaced. Falls back to no-op (keep Clarity) if either element
+    lacks a <pitch> (e.g. a rest), which the caller already guards against."""
     import copy
 
-    parent.remove(old_elem)
-    parent.insert(idx, copy.deepcopy(new_elem))
+    new_pitch = oemer_elem.find("pitch")
+    old_pitch = clarity_elem.find("pitch")
+    if new_pitch is None or old_pitch is None:
+        return False
+    children = list(clarity_elem)
+    idx = children.index(old_pitch)
+    clarity_elem.remove(old_pitch)
+    clarity_elem.insert(idx, copy.deepcopy(new_pitch))
+    # A pitch correction can invalidate Clarity's printed accidental hint, but <accidental> is a
+    # display-only courtesy element; leaving it would show the wrong glyph. Drop a stale one so
+    # the renderer derives the accidental from the new <pitch>/<alter> instead.
+    stale = clarity_elem.find("accidental")
+    if stale is not None:
+        clarity_elem.remove(stale)
     return True
 
 
-def _build_parent_map(root: ET.Element):
-    """child Element -> parent Element for the whole tree (ElementTree lacks getparent())."""
-    return {child: parent for parent in root.iter() for child in parent}
+def _apply_duration(clarity_ev: NoteEvent, oemer_ev: NoteEvent) -> bool:
+    """Class-E winner = oemer: set the Clarity element's <duration> to oemer's WINNING duration,
+    expressed in the CLARITY DOCUMENT's own tick base (not oemer's, not the common align base).
+
+    clarity_ev.duration / oemer_ev.duration are align()'s COMMON-base values; the Clarity
+    element's text is in the Clarity document's native base. We scale by the Clarity element's
+    native-to-common ratio so the written tick count is correct for THIS document. <type> is the
+    visual note shape; once the tick duration changes it would be stale, so we drop it and let
+    the renderer derive the note shape from <duration> + <divisions>.
+
+    Returns True if the duration was rewritten; no-op (keep Clarity) on any degenerate ratio."""
+    elem = clarity_ev.elem
+    if elem is None:
+        return False
+    dur_el = elem.find("duration")
+    native_clarity = _int_text(dur_el)
+    if dur_el is None or native_clarity is None or native_clarity <= 0:
+        return False
+    common_clarity = clarity_ev.duration
+    if common_clarity <= 0:
+        return False
+    # native_winner = oemer_common * (native_clarity / common_clarity). Require an exact integer
+    # so we never write a fractional/rounded tick count that would desync the bar.
+    numerator = oemer_ev.duration * native_clarity
+    if numerator % common_clarity != 0:
+        return False
+    native_winner = numerator // common_clarity
+    if native_winner <= 0:
+        return False
+    dur_el.text = str(native_winner)
+    stale_type = elem.find("type")
+    if stale_type is not None:
+        elem.remove(stale_type)
+    return True
 
 
 def reconcile(primary_bytes, secondary_bytes) -> bytes:
@@ -669,7 +712,6 @@ def reconcile(primary_bytes, secondary_bytes) -> bytes:
         if not matched:
             return primary_bytes
 
-        parent_map = _build_parent_map(primary_root)
         diatonic_pcs = _diatonic_pitch_classes(_fifths_of(primary_root))
 
         # Common base used by align() to scale onsets/durations: lcm of the two stream bases.
@@ -711,7 +753,12 @@ def reconcile(primary_bytes, secondary_bytes) -> bytes:
                         clarity_ev, oemer_ev, capacity_ticks, other_sum
                     )
                     if winner is oemer_ev and target_elem is not None:
-                        _replace_element(parent_map, target_elem, oemer_ev.elem)
+                        # Adopt ONLY oemer's duration, expressed in the Clarity document's own
+                        # tick base. We must NOT copy oemer's whole element: it carries oemer's
+                        # native <duration> (a different <divisions> base) and could flip the
+                        # note's <chord/> membership, both of which would corrupt the Clarity
+                        # skeleton's timing.
+                        _apply_duration(clarity_ev, oemer_ev)
                 # Class A: no change (keep Clarity's element).
             else:
                 # Class B: pitch mismatch -> vote (rests never reach here as a "pitch" since a
@@ -719,14 +766,20 @@ def reconcile(primary_bytes, secondary_bytes) -> bytes:
                 if clarity_ev.pitch is not None and oemer_ev.pitch is not None:
                     winner = _vote_pitch(clarity_ev, oemer_ev, diatonic_pcs, prev_midi)
                     if winner is oemer_ev and target_elem is not None:
-                        _replace_element(parent_map, target_elem, oemer_ev.elem)
+                        # Adopt ONLY oemer's <pitch> into the Clarity element; keep Clarity's
+                        # duration, <chord/> membership, <type>, ties and staff. A pitch vote
+                        # must change pitch ONLY: swapping oemer's whole element would drag in
+                        # oemer's native duration base and chord membership and break timing.
+                        _apply_pitch(target_elem, oemer_ev.elem)
                 # If one side is a rest vs a note, keep Clarity (do not silence/add this slice).
 
-            # Update the voice-leading anchor with the pitch we ENDED UP emitting.
-            emitted_pitch = clarity_ev.pitch
-            # (We only ever emit Clarity's pitch as the anchor approximation; using the chosen
-            # pitch would require re-reading the swapped element. Clarity is primary and the
-            # anchor is a heuristic prior, so this is a safe approximation.)
+            # Update the voice-leading anchor with the pitch we ENDED UP emitting. Re-read the
+            # Clarity element so a class-B swap (which mutated its <pitch> in place) advances the
+            # anchor to the pitch we actually emitted; on a Clarity win this reads back Clarity's
+            # own pitch unchanged.
+            emitted_pitch = (
+                _pitch_of(target_elem) if target_elem is not None else clarity_ev.pitch
+            )
             emitted_midi = _pitch_to_midi(emitted_pitch)
             if emitted_midi is not None:
                 prev_midi_by_cell[cell] = emitted_midi
