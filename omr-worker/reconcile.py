@@ -24,6 +24,7 @@ stdlib only: xml.etree.ElementTree, math, dataclasses. NO new dependencies.
 from __future__ import annotations
 
 import math
+import os
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import List, Optional, Set, Tuple
@@ -39,6 +40,45 @@ EPS_BEATS = 0.125
 # Pitch reference for tuple comparison: a NoteEvent's pitch is (step, alter, octave) with
 # alter an int (0 for natural) so "C natural" and "C" with an absent <alter> compare equal.
 Pitch = Tuple[str, int, int]
+
+
+# --- Sub-gates (Slice 4) -----------------------------------------------------------------
+# The two RISKIEST conflict classes ship behind their OWN env flags so each can be disabled
+# independently if QA shows a regression, WITHOUT touching the safe A/B/E path. Both default
+# OFF and both ALSO require OMR_ENSEMBLE to be on (reconcile is only ever called when ensemble
+# is enabled, but we re-check here so the helpers are honest on their own and a stray
+# OMR_ENSEMBLE_TIMING=1 with OMR_ENSEMBLE unset is a no-op). Same truthy parsing as
+# worker.ensemble_enabled ("1"/"true", case-insensitive, whitespace-tolerant).
+OMR_ENSEMBLE_ENV = "OMR_ENSEMBLE"
+OMR_ENSEMBLE_TIMING_ENV = "OMR_ENSEMBLE_TIMING"  # class D (timing mismatch)
+OMR_ENSEMBLE_ADD_ENV = "OMR_ENSEMBLE_ADD"  # class C oemer-only ADD
+
+
+def _flag_on(name: str) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return False
+    return raw.strip().lower() in ("1", "true")
+
+
+def ensemble_enabled() -> bool:
+    """True when OMR_ENSEMBLE is truthy. Mirrors worker.ensemble_enabled so reconcile can
+    self-gate the Slice-4 sub-classes without importing worker (which pulls in boto3)."""
+    return _flag_on(OMR_ENSEMBLE_ENV)
+
+
+def timing_enabled() -> bool:
+    """Class D (timing mismatch) sub-gate. OFF unless OMR_ENSEMBLE_TIMING is truthy AND the
+    parent OMR_ENSEMBLE is also on. With just OMR_ENSEMBLE=1 (Slice-3 behavior) class D stays
+    a no-op; it activates only when this specific sub-gate is also set."""
+    return ensemble_enabled() and _flag_on(OMR_ENSEMBLE_TIMING_ENV)
+
+
+def add_enabled() -> bool:
+    """Class C oemer-only ADD sub-gate (the closest thing to fabrication, gated hardest). OFF
+    unless OMR_ENSEMBLE_ADD is truthy AND the parent OMR_ENSEMBLE is also on. With just
+    OMR_ENSEMBLE=1 oemer-only notes stay dropped (Slice-3 behavior)."""
+    return ensemble_enabled() and _flag_on(OMR_ENSEMBLE_ADD_ENV)
 
 
 @dataclass
@@ -727,6 +767,11 @@ def reconcile(primary_bytes, secondary_bytes) -> bytes:
         prev_midi_by_cell = {}
         cell_dur_sum = _cell_duration_sums(primary_events)
 
+        # oemer pitched notes that aligned to a Clarity REST (a slot Clarity heard as silence):
+        # these are class-C ADD candidates too (Clarity put a rest where oemer put a note), so we
+        # route them to the gated ADD resolver alongside only_b. Collected during the matched loop.
+        rest_slot_adds: List[NoteEvent] = []
+
         # Process matched pairs in (measure, staff, onset) order so voice-leading sees the
         # previous note. matched pairs are (clarity_event, oemer_event).
         ordered = sorted(
@@ -771,7 +816,12 @@ def reconcile(primary_bytes, secondary_bytes) -> bytes:
                         # must change pitch ONLY: swapping oemer's whole element would drag in
                         # oemer's native duration base and chord membership and break timing.
                         _apply_pitch(target_elem, oemer_ev.elem)
-                # If one side is a rest vs a note, keep Clarity (do not silence/add this slice).
+                elif clarity_ev.pitch is None and oemer_ev.pitch is not None:
+                    # Clarity heard a REST where oemer heard a pitched note: a class-C ADD
+                    # candidate (the gated ADD resolver decides whether to fill the rest's slot).
+                    # We do NOT silence/add inline here; only the OMR_ENSEMBLE_ADD path may add.
+                    rest_slot_adds.append(oemer_ev)
+                # An oemer rest vs a Clarity note keeps Clarity (never silence a Clarity note).
 
             # Update the voice-leading anchor with the pitch we ENDED UP emitting. Re-read the
             # Clarity element so a class-B swap (which mutated its <pitch> in place) advances the
@@ -784,11 +834,36 @@ def reconcile(primary_bytes, secondary_bytes) -> bytes:
             if emitted_midi is not None:
                 prev_midi_by_cell[cell] = emitted_midi
 
-        # TODO(slice4): class C = oemer-only notes (result["only_b"]) are IGNORED here; adding
-        # them is the hard-gated ADD of Slice 4. Class C Clarity-only notes (result["only_a"])
-        # are KEPT as-is (they are already in the skeleton, untouched).
-        # TODO(slice4): class D = timing/onset mismatch beyond eps is NOT reconciled here; such
-        # notes fall into only_a/only_b and are left as Clarity-has-it / oemer-ignored.
+        # CLASS D (timing mismatch) + CLASS C (one-engine-only): the two RISKIEST classes, each
+        # behind its OWN sub-gate (timing_enabled / add_enabled), both default OFF and both also
+        # requiring OMR_ENSEMBLE. With just OMR_ENSEMBLE on they stay no-ops (Slice-3 behavior).
+        # Class D is handled FIRST: a D pair is a same-pitch, same-cell note whose onsets differ
+        # beyond eps, which align() bucketed into only_a (Clarity) + only_b (oemer). We must
+        # consume those before the class-C ADD so a D-paired oemer note is NOT re-added as a
+        # fabricated extra. _resolve_timing returns the oemer events it consumed (whether it
+        # applied a shift or declined) so they are excluded from the class-C ADD set below.
+        only_a = result["only_a"]
+        only_b = result["only_b"]
+        consumed_b = set()
+        if timing_enabled():
+            consumed_b = _resolve_timing(
+                primary_root, only_a, only_b, capacity_ticks, common_base, base_primary
+            )
+
+        # CLASS C oemer-only ADD: bias HARD toward NOT adding. Add an only_b note to the Clarity
+        # skeleton ONLY if ALL of: diatonic vs <fifths>, fills a genuine empty onset slot without
+        # overflowing the bar, and in MIDI 21..108. Otherwise DROP (keep Clarity as-is). Clarity-
+        # only notes (only_a) are KEPT by default (Clarity has better recall); we never drop them.
+        if add_enabled():
+            _resolve_oemer_only_adds(
+                primary_root,
+                only_b + rest_slot_adds,
+                consumed_b,
+                diatonic_pcs,
+                capacity_ticks,
+                common_base,
+                base_primary,
+            )
 
         return ET.tostring(primary_root, encoding="utf-8", xml_declaration=True)
     except Exception:
@@ -846,3 +921,356 @@ def _cell_duration_sums(events: List[NoteEvent]):
         cell = (e.measure, e.staff)
         sums[cell] = sums.get(cell, 0) + e.duration
     return sums
+
+
+# --- Class D: timing mismatch (Slice 4, gated by timing_enabled) -------------------------
+# A class-D pair is a SAME-pitch, SAME-cell note the two engines placed at DIFFERENT onsets
+# (beyond eps), so align() did not match them: Clarity's copy is in only_a, oemer's in only_b.
+# We pick the onset that makes the measure metrically complete vs <time>, tiebreak Clarity,
+# and apply ONLY when the correction is surgical (no later note shifts) - otherwise DECLINE.
+#
+# The single safe, surgical shape we apply: the Clarity note is the LAST event in its cell and
+# is preceded by a REST. Moving its onset = resizing that one leading rest; nothing follows it,
+# so NO later onset shifts. We apply this only when the current bar is INCOMPLETE and oemer's
+# onset makes it EXACTLY complete (note ends at capacity). Any other shape -> decline (keep
+# Clarity). A declined correction is always acceptable; a corrupted measure is not.
+
+
+def _resolve_timing(primary_root, only_a, only_b, capacity_ticks, common_base, base_primary):
+    """Resolve class-D timing pairs in place on the Clarity skeleton. Returns the set of id()s
+    of the only_b (oemer) events CONSUMED as D pairs (whether applied or declined) so the
+    class-C ADD does not re-add them as fabricated extras. NEVER raises into the caller (the
+    outer reconcile try/except is the backstop, but we also guard each pair)."""
+    consumed_b = set()
+    if capacity_ticks is None or capacity_ticks <= 0:
+        return consumed_b
+
+    # Map each <note> element to its containing <measure> (ElementTree has no getparent), so
+    # _apply_timing can resize the note's sibling rest in the correct measure.
+    note_to_measure = {}
+    for part in primary_root.findall("part"):
+        for measure in part.findall("measure"):
+            for note in measure.findall("note"):
+                note_to_measure[id(note)] = measure
+
+    # Index oemer-only notes by (measure, staff) for quick same-cell, same-pitch lookup.
+    b_by_cell = {}
+    for b in only_b:
+        b_by_cell.setdefault((b.measure, b.staff), []).append(b)
+
+    for a in only_a:
+        if a.pitch is None:
+            continue
+        cell = (a.measure, a.staff)
+        candidates = b_by_cell.get(cell, [])
+        partner = None
+        for b in candidates:
+            if id(b) in consumed_b:
+                continue
+            if b.pitch == a.pitch and b.onset != a.onset:
+                partner = b
+                break
+        if partner is None:
+            continue
+
+        # This is a class-D pair: consume the oemer note regardless of whether we apply, so the
+        # class-C ADD never treats a D-paired note as a new fabrication.
+        consumed_b.add(id(partner))
+
+        measure = note_to_measure.get(id(a.elem)) if a.elem is not None else None
+        try:
+            _apply_timing(a, partner, measure, capacity_ticks, common_base, base_primary)
+        except Exception:
+            # Any trouble applying -> decline (keep Clarity). Never raise.
+            pass
+
+    return consumed_b
+
+
+def _apply_timing(clarity_ev, oemer_ev, measure, capacity_ticks, common_base, base_primary):
+    """Apply ONE class-D correction surgically, or DECLINE. Returns True if applied.
+
+    Safe shape only: clarity_ev is the LAST <note> in its cell and is immediately preceded by a
+    <rest>. Moving the note to oemer's onset = resizing that leading rest, which shifts nothing
+    after it. We apply ONLY when (a) the metric-completeness vote picks oemer's onset (oemer's
+    placement makes the bar exactly complete and Clarity's does not), and (b) the resized rest
+    stays positive and the note then ends exactly at capacity. Otherwise decline."""
+    note_elem = clarity_ev.elem
+    if note_elem is None or measure is None:
+        return False
+
+    # The safe shape requires the Clarity note to be the LAST note element in the cell and to be
+    # immediately preceded (in document order) by a <rest>. The cell is then [rest, note]: moving
+    # the note = resizing that one leading rest, which shifts NOTHING after it.
+    raw = list(measure)
+    note_children = [c for c in raw if c.tag == "note"]
+    if not note_children or note_children[-1] is not note_elem:
+        return False
+    try:
+        idx = raw.index(note_elem)
+    except ValueError:
+        return False
+    if idx == 0:
+        return False
+    prev = raw[idx - 1]
+    if prev.tag != "note" or prev.find("rest") is None:
+        return False
+
+    # Convert the common-base onsets/durations to the Clarity document's NATIVE tick base.
+    if common_base <= 0 or base_primary <= 0:
+        return False
+    if (oemer_ev.onset * base_primary) % common_base != 0:
+        return False
+    target_onset_native = (oemer_ev.onset * base_primary) // common_base
+    note_dur_native = _int_text(note_elem.find("duration"))
+    if note_dur_native is None or note_dur_native <= 0:
+        return False
+    if (capacity_ticks * base_primary) % common_base != 0:
+        return False
+    capacity_native = (capacity_ticks * base_primary) // common_base
+
+    # Metric-completeness vote: oemer's onset must make the bar EXACTLY complete (note ends at
+    # capacity) AND Clarity's current onset must NOT (otherwise ambiguous -> keep Clarity).
+    cur_rest = _int_text(prev.find("duration"))
+    if cur_rest is None or cur_rest < 0:
+        return False
+    # In the [rest, note] shape the note's current onset == the leading rest; current bar end =
+    # cur_rest + note_dur_native.
+    cur_end = cur_rest + note_dur_native
+    new_end = target_onset_native + note_dur_native
+    if new_end != capacity_native:
+        return False  # oemer's onset does not complete the bar -> decline.
+    if cur_end == capacity_native:
+        return False  # bar already complete at Clarity's onset -> ambiguous, keep Clarity.
+
+    new_rest = target_onset_native  # the resized leading rest = the note's new onset
+    if new_rest <= 0:
+        return False  # would delete/invert the rest -> decline rather than restructure.
+
+    prev.find("duration").text = str(new_rest)
+    # The rest's <type> (if any) is now stale; drop it so the renderer derives the shape.
+    stale = prev.find("type")
+    if stale is not None:
+        prev.remove(stale)
+    return True
+
+
+# --- Class C: oemer-only ADD (Slice 4, gated by add_enabled) -----------------------------
+# The closest thing to fabrication, gated HARDEST. Add an only_b (oemer-only) note ONLY if ALL
+# of: diatonic vs <fifths>, fills a genuine empty onset slot without overflowing the bar, and
+# in MIDI 21..108. Otherwise DROP. Bias hard toward NOT adding. Clarity-only notes are kept.
+
+
+def _resolve_oemer_only_adds(
+    primary_root,
+    only_b,
+    consumed_b,
+    diatonic_pcs,
+    capacity_ticks,
+    common_base,
+    base_primary,
+):
+    """Insert strongly-corroborated oemer-only notes into the Clarity skeleton, in place.
+    Skips any note already consumed as a class-D pair. NEVER raises (each add is guarded)."""
+    if capacity_ticks is None or capacity_ticks <= 0:
+        return
+
+    # Per (measure, staff) Clarity occupancy + fill, rebuilt from the ACTUAL primary tree (not
+    # just only_a) so we never add into a slot a MATCHED Clarity note already holds. occupied =
+    # onsets a PITCHED Clarity note sits on (a rest leaves the slot musically EMPTY = fillable).
+    # pitched_fill = summed non-chord PITCHED duration (the bar's real note content); a gap is the
+    # difference up to capacity, whether it shows as a rest or as trailing slack.
+    prim_events = _events_from_root(primary_root, "clarity")
+    base = _stream_base(prim_events)
+    scale = (common_base // base) if base else 1
+    occupied = {}
+    pitched_fill = {}
+    for e in prim_events:
+        cell = (e.measure, e.staff)
+        if e.pitch is None:
+            continue  # rests do not occupy a slot for the ADD; they ARE the fillable gap.
+        occupied.setdefault(cell, set()).add(e.onset * scale)
+        if not e.is_chord:
+            pitched_fill[cell] = pitched_fill.get(cell, 0) + e.duration * scale
+
+    for b in only_b:
+        if id(b) in consumed_b:
+            continue
+        try:
+            _maybe_add_oemer_note(
+                primary_root,
+                b,
+                occupied,
+                pitched_fill,
+                diatonic_pcs,
+                capacity_ticks,
+                common_base,
+                base_primary,
+            )
+        except Exception:
+            # Any trouble -> drop (keep Clarity). Never raise.
+            pass
+
+
+def _maybe_add_oemer_note(
+    primary_root,
+    b,
+    occupied,
+    pitched_fill,
+    diatonic_pcs,
+    capacity_ticks,
+    common_base,
+    base_primary,
+):
+    """Decide + apply a single oemer-only ADD. ALL gates must pass; bias hard toward dropping.
+
+    SAFE INSERTION: we add a note ONLY where its onset slot is currently silence (a Clarity
+    <rest>, or trailing slack at end-of-content). We CONSUME that silence so following content
+    never shifts: the inserted note takes a rest's place (shrinking/removing the rest) or fills
+    trailing space. If the target onset is not a clean silence boundary, we DROP."""
+    if b.pitch is None:
+        return  # never add a rest
+    midi = _pitch_to_midi(b.pitch)
+    if midi is None or not (MIDI_MIN <= midi <= MIDI_MAX):
+        return  # gate: in MIDI range
+    if (midi % 12) not in diatonic_pcs:
+        return  # gate: diatonic to the key
+
+    cell = (b.measure, b.staff)
+    # gate: fills a genuine gap -> the onset slot must hold no PITCHED Clarity note.
+    if b.onset in occupied.get(cell, set()):
+        return
+    # gate: adding it must NOT overflow the bar's PITCHED content.
+    if pitched_fill.get(cell, 0) + b.duration > capacity_ticks:
+        return
+
+    part, measure, part_base = _find_part_measure_for_cell(primary_root, b.measure, b.staff)
+    if measure is None or part_base is None or part_base <= 0 or common_base <= 0:
+        return
+
+    # Convert the common-base onset/duration to the Clarity document's NATIVE base.
+    if (b.onset * part_base) % common_base != 0 or (b.duration * part_base) % common_base != 0:
+        return  # not exactly representable in the Clarity base -> drop rather than round.
+    onset_native = (b.onset * part_base) // common_base
+    dur_native = (b.duration * part_base) // common_base
+    if dur_native <= 0:
+        return
+
+    if not _insert_into_silence(measure, onset_native, dur_native, b):
+        return  # not a clean silence slot -> drop (bias against adding).
+
+    # Update occupancy + fill so a second add in the same cell sees this one.
+    occupied.setdefault(cell, set()).add(b.onset)
+    pitched_fill[cell] = pitched_fill.get(cell, 0) + b.duration
+
+
+def _insert_into_silence(measure, onset_native, dur_native, b) -> bool:
+    """Place a new note of dur_native at onset_native WITHOUT shifting following content, by
+    consuming silence (a <rest> or trailing slack). Returns True if placed, False to DROP.
+
+    Cases handled (all preserve every following onset):
+      - the onset lands exactly on an existing <rest> whose duration >= dur_native: shrink the
+        rest by dur_native (remove it if it becomes 0) and insert the note in its place;
+      - the onset lands at end-of-content (append) with no following element: just append.
+    Any other shape (onset mid-note, no rest, rest too short) -> DROP."""
+    raw = list(measure)
+    first_note_idx = None
+    for i, child in enumerate(raw):
+        if child.tag in ("note", "backup", "forward"):
+            first_note_idx = i
+            break
+    if first_note_idx is None:
+        # No content yet: only onset 0 is a clean boundary (append after attributes).
+        if onset_native != 0:
+            return False
+        measure.append(_build_clarity_note(b, dur_native))
+        return True
+
+    cursor = 0
+    for i in range(first_note_idx, len(raw)):
+        child = raw[i]
+        if cursor == onset_native:
+            if child.tag == "note" and child.find("rest") is not None:
+                rest_dur = _int_text(child.find("duration"))
+                if rest_dur is None or rest_dur < dur_native:
+                    return False  # rest too short -> dropping (don't overflow following content).
+                new_note = _build_clarity_note(b, dur_native)
+                measure.insert(i, new_note)
+                if rest_dur == dur_native:
+                    measure.remove(child)  # note exactly replaces the rest.
+                else:
+                    child.find("duration").text = str(rest_dur - dur_native)
+                    stale = child.find("type")
+                    if stale is not None:
+                        child.remove(stale)
+                return True
+            return False  # onset sits on a pitched note / non-rest boundary -> drop.
+        if child.tag == "backup":
+            cursor -= _int_text(child.find("duration"), 0) or 0
+            if cursor < 0:
+                cursor = 0
+            continue
+        if child.tag == "forward":
+            cursor += _int_text(child.find("duration"), 0) or 0
+            continue
+        if child.tag != "note":
+            continue
+        if child.find("chord") is None:
+            cursor += _int_text(child.find("duration"), 0) or 0
+
+    # End-of-content: append into trailing slack (capacity already checked by the caller).
+    if cursor == onset_native:
+        measure.append(_build_clarity_note(b, dur_native))
+        return True
+    return False
+
+
+def _build_clarity_note(b, dur_native):
+    """Build a NEW <note> for the Clarity document from oemer's event: oemer's pitch plus the
+    duration scaled into the Clarity base. We SYNTHESIZE a minimal element rather than deep-copying
+    oemer's whole <note> (which carries oemer's native duration base, <staff>, and shape markup);
+    only the <pitch> is copied. Clarity's 2-part shape decides the hand by part clef, so we emit
+    NO <staff>."""
+    import copy
+
+    note = ET.Element("note")
+    src_pitch = b.elem.find("pitch") if b.elem is not None else None
+    if src_pitch is not None:
+        note.append(copy.deepcopy(src_pitch))
+    else:
+        step, alter, octave = b.pitch
+        pitch = ET.SubElement(note, "pitch")
+        ET.SubElement(pitch, "step").text = step
+        if alter:
+            ET.SubElement(pitch, "alter").text = str(alter)
+        ET.SubElement(pitch, "octave").text = str(octave)
+    ET.SubElement(note, "duration").text = str(dur_native)
+    return note
+
+
+def _find_part_measure_for_cell(root, measure_number, staff):
+    """Return (part, measure_elem, part_native_base) for the (measure_number, staff) cell, or
+    (None, None, None). For Clarity's 2-part shape the staff maps to the part whose first clef
+    sign is G (staff 1) or F (staff 2). part_native_base is the part's lcm-of-divisions base."""
+    chosen = None
+    for part in root.findall("part"):
+        sign = _clef_sign(part)
+        part_staff = 2 if sign == "F" else 1
+        if part_staff == staff:
+            chosen = part
+            break
+    if chosen is None:
+        # Single-part (oemer-style) doc: notes carry <staff>; just use the only part.
+        parts = root.findall("part")
+        chosen = parts[0] if parts else None
+    if chosen is None:
+        return None, None, None
+
+    # part native base = lcm of divisions declared in this part (mirrors to_events scaling).
+    divs = [v for v in (_int_text(d) for d in chosen.iter("divisions")) if v and v > 0]
+    part_base = _lcm_all(set(divs)) if divs else 1
+
+    for running_index, measure in enumerate(chosen.findall("measure"), start=1):
+        if _measure_number(measure, running_index) == measure_number:
+            return chosen, measure, part_base
+    return chosen, None, part_base
