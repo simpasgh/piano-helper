@@ -497,14 +497,18 @@ class _FakeClient:
     the canned input bytes, put_object captures the written body, delete_object is a no-op.
     result_exists is monkeypatched to False so the job always processes."""
 
-    def __init__(self, input_bytes=b"", is_pdf=False):
+    def __init__(self, input_bytes=b"", is_pdf=False, metadata=None):
         self._input_bytes = input_bytes
         self._is_pdf = is_pdf
+        self._metadata = metadata or {}
         self.put_body = None
 
     def download_file(self, Bucket, Key, dest):
         with open(dest, "wb") as fh:
             fh.write(self._input_bytes)
+
+    def head_object(self, Bucket, Key):
+        return {"Metadata": dict(self._metadata)}
 
     def put_object(self, Bucket, Key, Body, ContentType):
         self.put_body = Body
@@ -588,6 +592,60 @@ def test_ensemble_single_engine_reconcile_is_passthrough(tmp_path, monkeypatch):
     )
     assert (result, source) == (str(oemer_out), "oemer")
     assert called["reconcile"] is False, "reconcile must not run with only one engine"
+
+
+def test_job_is_fast_reads_metadata_and_never_raises():
+    # Truthy spellings of the fast flag -> True; absent/empty/missing -> False (accurate).
+    assert worker.job_is_fast(_FakeClient(metadata={"fast": "1"}), "b", "j") is True
+    assert worker.job_is_fast(_FakeClient(metadata={"fast": "true"}), "b", "j") is True
+    assert worker.job_is_fast(_FakeClient(metadata={"fast": "0"}), "b", "j") is False
+    assert worker.job_is_fast(_FakeClient(metadata={}), "b", "j") is False
+    assert worker.job_is_fast(_FakeClient(), "b", "j") is False
+
+    class _Boom:
+        def head_object(self, Bucket, Key):
+            raise RuntimeError("metadata read failed")
+
+    # A read failure must default to accurate (False), never raise.
+    assert worker.job_is_fast(_Boom(), "b", "j") is False
+
+
+def test_fast_flag_takes_legacy_path_even_when_ensemble_on(tmp_path, monkeypatch):
+    # FLAG ON but the upload is tagged fast=1: the worker takes the single-engine legacy path
+    # and NEVER runs the ensemble (no oemer, no reconcile), trading accuracy for ~5x latency.
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    clarity_out = tmp_path / "clarity.musicxml"
+    clarity_out.write_text("<score/>")
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clarity_out))
+
+    def ensemble_must_not_run(*a, **k):
+        raise AssertionError("ensemble must not run for a fast-tagged job")
+
+    monkeypatch.setattr(worker, "_select_ensemble", ensemble_must_not_run)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"%PDF-1.4 fake", metadata={"fast": "1"})
+    _drive_process_job(monkeypatch, client, is_pdf=True)
+    assert client.put_body is not None  # the legacy Clarity path produced the result
+
+
+def test_default_job_with_ensemble_on_runs_ensemble(tmp_path, monkeypatch):
+    # FLAG ON and NO fast flag: the ensemble runs (the default accurate path).
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    ran = {"ensemble": False}
+
+    def fake_ensemble(*a, **k):
+        ran["ensemble"] = True
+        return None, None
+
+    monkeypatch.setattr(worker, "_select_ensemble", fake_ensemble)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"%PDF-1.4 fake")  # no fast metadata
+    _drive_process_job(monkeypatch, client, is_pdf=True)
+    assert ran["ensemble"] is True
 
 
 def test_flag_off_never_calls_reconcile(tmp_path, monkeypatch):

@@ -390,6 +390,24 @@ body {
   transform: translateY(1px);
 }
 
+/* Fast-scan opt-out: a compact checkbox sitting beside the Scan button. Muted so the
+   default (accurate) path reads as the norm and "fast" is a deliberate trade-off. */
+.fast-scan-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  color: var(--text-muted, #b8b2a4);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.fast-scan-toggle input {
+  cursor: pointer;
+  margin: 0;
+}
+
 /* Hide the native file input without display:none. Several mobile browsers
    (iOS Safari, in-app webviews) refuse to forward a label tap to a
    display:none input, so the picker never opens. Keeping a 1px input in the

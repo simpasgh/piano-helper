@@ -1071,6 +1071,23 @@ def run_primary_engines(run_clarity_fn, run_oemer_fn, is_pdf_input):
     return results.get("clarity"), results.get("oemer")
 
 
+def job_is_fast(client, bucket, job_id):
+    """True when the upload was tagged "fast scan" (R2 customMetadata fast=1, surfaced as the
+    S3 user-metadata key 'fast'). A fast job skips the ensemble's second engine and takes the
+    single-engine legacy path, trading accuracy for ~5x lower latency. Defaults to False (the
+    full, most-accurate path) on any read failure or absent flag, so a metadata hiccup never
+    silently downgrades quality. Never raises."""
+    try:
+        head = client.head_object(Bucket=bucket, Key=upload_key(job_id))
+        meta = head.get("Metadata") or {}
+        # botocore lowercases user-metadata keys. The client only ever writes "1"; we also
+        # tolerate "true" defensively.
+        return str(meta.get("fast", "")).strip().lower() in ("1", "true")
+    except Exception as err:
+        log("could not read fast flag for %s (%r); defaulting to accurate" % (job_id, err))
+        return False
+
+
 def process_job(client, bucket, job_id):
     """Convert one upload. Always leaves exactly one object at the result key
     (real score or sentinel) and deletes the upload so it is not reprocessed."""
@@ -1087,7 +1104,11 @@ def process_job(client, bucket, job_id):
         # original PDF path stays available for Clarity, which reads the PDF directly.
         is_pdf_input = sniff_mime(input_path) == "application/pdf"
 
-        if ensemble_enabled():
+        # Per-job "fast scan" opt-out: the user asked to skip the slower second engine, so
+        # take the single-engine legacy path regardless of the ensemble flag. Otherwise the
+        # ensemble runs when enabled. (fast + ensemble-off both resolve to the same legacy path.)
+        fast = job_is_fast(client, bucket, job_id)
+        if ensemble_enabled() and not fast:
             result_path, source = _select_ensemble(job_id, input_path, workdir, is_pdf_input)
         else:
             result_path, source = _select_legacy(job_id, input_path, workdir, is_pdf_input)
