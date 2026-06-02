@@ -36,7 +36,7 @@ describe("submitOmr", () => {
       jsonResponse({ jobId: "job-1" }, 202),
     ) as unknown as typeof fetch;
 
-    const jobId = await submitOmr(fakeFile(), fetchFn);
+    const jobId = await submitOmr(fakeFile(), { fetchFn });
     expect(jobId).toBe("job-1");
 
     const call = (fetchFn as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
@@ -44,6 +44,19 @@ describe("submitOmr", () => {
     expect(call[1].method).toBe("POST");
     expect(call[1].body).toBeInstanceOf(FormData);
     expect((call[1].body as FormData).get("file")).toBeInstanceOf(File);
+    // Default (no opts) is the accurate path: no "fast" field.
+    expect((call[1].body as FormData).get("fast")).toBeNull();
+  });
+
+  it("tags the form with fast=1 when the fast option is set", async () => {
+    const fetchFn = vi.fn(async () =>
+      jsonResponse({ jobId: "job-2" }, 202),
+    ) as unknown as typeof fetch;
+
+    await submitOmr(fakeFile(), { fast: true, fetchFn });
+
+    const call = (fetchFn as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect((call[1].body as FormData).get("fast")).toBe("1");
   });
 
   it("throws the server error when submission fails", async () => {
@@ -51,7 +64,7 @@ describe("submitOmr", () => {
       jsonResponse({ error: "File too large." }, 413),
     ) as unknown as typeof fetch;
 
-    await expect(submitOmr(fakeFile(), fetchFn)).rejects.toThrow("File too large.");
+    await expect(submitOmr(fakeFile(), { fetchFn })).rejects.toThrow("File too large.");
   });
 });
 
