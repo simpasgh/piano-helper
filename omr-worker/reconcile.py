@@ -1196,6 +1196,13 @@ def reconcile(primary_bytes, secondary_bytes, input_pdf=None) -> bytes:
         # Clarity note sits there (no chord stack, no coincident note). The referee's validated
         # scope is isolated noteheads only; a dense/chorded slot is never refereeable.
         isolated_slots = _isolated_slots(primary_events) if use_referee else None
+        # Dense-run map: slots inside a beamed sub-quarter run. The referee's validated scope
+        # EXCLUDES dense/beamed regions (Slice 5 GO/NO-GO): there the two engines often disagree
+        # on note ORDER, and the position-based referee crops by oemer's order-drifted bbox and
+        # confidently confirms a swapped pitch (the Reverie regression, tech-lead.md 2026-06-02).
+        # Every eighth in a run passes the isolation test (one note per slot), so isolation alone
+        # does NOT exclude dense runs; this map does. See _dense_run_slots.
+        dense_run_slots = _dense_run_slots(primary_events) if use_referee else None
 
         # oemer pitched notes that aligned to a Clarity REST (a slot Clarity heard as silence):
         # these are class-C ADD candidates too (Clarity put a rest where oemer put a note), so we
@@ -1253,25 +1260,28 @@ def reconcile(primary_bytes, secondary_bytes, input_pdf=None) -> bytes:
                             clarity_ev, oemer_ev, diatonic_pcs, prev_midi
                         )
                     ):
-                        is_isolated = bool(
-                            isolated_slots
-                            and (
-                                clarity_ev.measure,
-                                clarity_ev.staff,
-                                clarity_ev.onset,
+                        ref_slot = (
+                            clarity_ev.measure,
+                            clarity_ev.staff,
+                            clarity_ev.onset,
+                        )
+                        is_isolated = bool(isolated_slots and ref_slot in isolated_slots)
+                        is_dense = bool(dense_run_slots and ref_slot in dense_run_slots)
+                        # Consult the referee ONLY on an isolated notehead that is NOT inside a
+                        # dense/beamed run (its validated scope). A dense-run slot is declined
+                        # outright (keep Clarity): the order-drift mispair there is exactly what
+                        # the position-based referee cannot adjudicate.
+                        if is_isolated and not is_dense:
+                            ref_winner = _maybe_referee_pitch(
+                                input_pdf,
+                                clarity_ev,
+                                oemer_ev,
+                                primary_root,
+                                common_base,
+                                is_isolated,
                             )
-                            in isolated_slots
-                        )
-                        ref_winner = _maybe_referee_pitch(
-                            input_pdf,
-                            clarity_ev,
-                            oemer_ev,
-                            primary_root,
-                            common_base,
-                            is_isolated,
-                        )
-                        if ref_winner is not None:
-                            winner = ref_winner
+                            if ref_winner is not None:
+                                winner = ref_winner
                     if winner is oemer_ev and target_elem is not None:
                         # DUPLICATE GUARD: if adopting oemer's pitch would collide with ANOTHER
                         # note already at this same (measure, staff, onset) slot (a chord member
@@ -1402,6 +1412,47 @@ def _isolated_slots(events: List[NoteEvent]) -> Set[Tuple[int, int, int]]:
         key = (e.measure, e.staff, e.onset)
         counts[key] = counts.get(key, 0) + 1
     return {key for key, n in counts.items() if n == 1}
+
+
+def _dense_run_slots(events: List[NoteEvent]) -> Set[Tuple[int, int, int]]:
+    """Return the (measure, staff, onset) slots that sit inside a DENSE/BEAMED sub-quarter run:
+    a pitched note whose nearest same-cell pitched neighbor is LESS THAN one quarter note away.
+
+    The visual-diff referee's validated scope EXCLUDES dense/beamed regions (Slice 5 GO/NO-GO,
+    tech-lead.md). In a dense run the two engines frequently disagree on note ORDER (one engine's
+    onset assignment drifts by a note relative to the other), so a Clarity note gets matched to an
+    oemer note the engines placed a beat-fraction apart. The referee crops by oemer's
+    (order-drifted) bbox, sees a REAL but WRONG-SLOT notehead, and confidently confirms a swapped
+    pitch. That is the Reverie regression (adjacent A->B / B->A swap pairs in eighth runs). The
+    isolation test (one pitched note per onset slot) does NOT catch this: every eighth in a run is
+    alone in its own onset slot. This map does, by neighbor spacing.
+
+    One quarter = the event's tick base (ticks-per-quarter). These events are the primary (Clarity)
+    document's, so e.base is the primary doc base, consistent with _isolated_slots which the caller
+    pairs this with. An eighth-note run (gap = base/2 < base) is dense; a quarter-note line
+    (gap = base, NOT < base) is not, so an isolated quarter dispute (e.g. the Icarus E6->C6
+    correction) still reaches the referee. PURE; never raises in practice.
+    """
+    by_cell = {}
+    for e in events:
+        if e.pitch is None:
+            continue  # rests are not noteheads.
+        by_cell.setdefault((e.measure, e.staff), []).append(e)
+    dense: Set[Tuple[int, int, int]] = set()
+    for evs in by_cell.values():
+        onsets = sorted({e.onset for e in evs})
+        for e in evs:
+            quarter = e.base if e.base and e.base > 0 else 1
+            nearest = None
+            for o in onsets:
+                if o == e.onset:
+                    continue
+                d = abs(o - e.onset)
+                if nearest is None or d < nearest:
+                    nearest = d
+            if nearest is not None and nearest < quarter:
+                dense.add((e.measure, e.staff, e.onset))
+    return dense
 
 
 def _onset_slot_midis(events: List[NoteEvent]):

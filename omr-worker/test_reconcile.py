@@ -411,6 +411,27 @@ def test_referee_onset_coincides_guard():
     assert reconcile._referee_onset_coincides(same, drifted) is False
 
 
+def test_dense_run_slots_flags_beamed_runs_not_quarters():
+    # An eighth-note RUN (base=8 ticks/quarter -> eighths 4 ticks apart, < a quarter) is DENSE,
+    # so the referee must decline there: this is the Reverie regression region. A quarter-note
+    # line (notes a full quarter apart, NOT < a quarter) is NOT dense, so an isolated quarter
+    # dispute (the Icarus E6->C6 correction) still reaches the referee.
+    def ev(onset, base):
+        return NoteEvent(measure=1, onset=onset, staff=1, pitch=("C", 0, 5), duration=base // 2,
+                         is_chord=False, base=base)
+    # Reverie-like: eighths at 0,4,8,12 (base 8 -> quarter = 8, gaps = 4 < 8) => all dense.
+    run = [ev(0, 8), ev(4, 8), ev(8, 8), ev(12, 8)]
+    dense = reconcile._dense_run_slots(run)
+    assert dense == {(1, 1, 0), (1, 1, 4), (1, 1, 8), (1, 1, 12)}
+    # Icarus-like: quarters at 0,8,16,24 (base 8 -> quarter = 8, gaps = 8, NOT < 8) => none dense.
+    quarters = [ev(0, 8), ev(8, 8), ev(16, 8), ev(24, 8)]
+    for q in quarters:
+        q.duration = 8
+    assert reconcile._dense_run_slots(quarters) == set()
+    # A lone note in its cell has no neighbor => never dense.
+    assert reconcile._dense_run_slots([ev(0, 8)]) == set()
+
+
 # --- ties / pitch parsing ----------------------------------------------------------------
 
 
