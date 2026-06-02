@@ -360,10 +360,11 @@ def align(events_a: List[NoteEvent], events_b: List[NoteEvent]):
          (e.g. 16 vs 4). Rescale both onto lcm(base_a, base_b) so onsets are directly
          comparable integers.
       2. Group both streams by (measure, staff) cell.
-      3. Within each cell, GREEDY nearest-onset matching (tolerance EPS_BEATS of a beat),
-         preferring an exact-pitch match when onsets tie. A matched pair = both engines saw a
-         note in the same slot (the pitches may DISAGREE: that lands in `matched`, to be voted
-         on by a later slice). Unmatched events bucket into only_a / only_b.
+      3. Within each cell, GLOBAL OPTIMAL ASSIGNMENT keyed on BOTH onset and pitch (tolerance
+         EPS_BEATS of a beat). A matched pair = both engines saw a note in the same slot (the
+         pitches may DISAGREE: that lands in `matched`, to be voted on by a later slice).
+         Unmatched events bucket into only_a / only_b. The earlier GREEDY nearest-onset matcher
+         is kept as a never-raise fallback (_match_cell_greedy).
 
     This does NOT resolve conflicts; it only buckets them (Slice 2 scope).
     """
@@ -438,14 +439,186 @@ def _group_by_cell(events: List[NoteEvent]):
 
 
 def _match_cell(list_a, list_b, eps):
-    """Greedy nearest-onset matching within one (measure, staff) cell.
+    """Match events within one (measure, staff) cell by GLOBAL OPTIMAL ASSIGNMENT keyed on
+    BOTH onset and pitch.
+
+    The original GREEDY nearest-onset matcher mispairs DENSE runs: when two Clarity notes and
+    two oemer notes fall inside the eps window in a SWAPPED pitch order (e.g. Clarity [G5, B4]
+    vs oemer [B4, G5] at near-coincident onsets), greedy locks each Clarity note to the
+    onset-nearest oemer note and MANUFACTURES an A->B / B->A pitch-swap PAIR of phantom disputes
+    when the correct pairing (G5<->G5, B4<->B4) makes both engines AGREE. Downstream the
+    visual-diff referee then crops the WRONG (neighbor) oemer notehead and confidently confirms
+    the swap (the Reverie regression; see docs/context/tech-lead.md 2026-06-02 Slice 6c entry).
+
+    Fix: among all pairs whose onsets are within eps (the eligibility window, UNCHANGED), pick
+    the assignment that MINIMIZES total cost, with cost = pitch_distance * (eps + 1) +
+    onset_distance so pitch agreement DOMINATES onset proximity inside the window (a single
+    semitone outweighs the whole eps onset window). This pairs like-pitch with like-pitch when
+    the engines merely disagree on micro-timing, eliminating the phantom swap disputes, while
+    still matching a genuine same-onset pitch dispute (its only eligible partner) as class B.
+    Cardinality is maximized first (matching is always preferred to leaving a note unmatched
+    within eps, exactly as greedy did), cost broken among the max-cardinality matchings.
+
+    A matched pair may still DISAGREE on pitch (class B, voted later). Unmatched A -> only_a,
+    unused B -> only_b (feeding the class C/D paths). NEVER raises: on ANY failure it falls back
+    to the original greedy matching so align() degrades rather than throwing.
+    """
+    try:
+        return _match_cell_optimal(list_a, list_b, eps)
+    except Exception:
+        return _match_cell_greedy(list_a, list_b, eps)
+
+
+def _pair_cost(a: NoteEvent, b: NoteEvent, pitch_w: int) -> int:
+    """Cost of pairing A with B: pitch distance (in semitones) dominates onset distance. A
+    rest/garbage-vs-note pair is priced at 128 semitones (just above the 127-semitone piano
+    span) so a note->note pairing is always preferred to note->rest when both are eligible; a
+    rest-vs-rest pair costs only its onset distance. PURE."""
+    onset_dist = abs(a.onset - b.onset)
+    midi_a = _pitch_to_midi(a.pitch)
+    midi_b = _pitch_to_midi(b.pitch)
+    if midi_a is None and midi_b is None:
+        pitch_dist = 0
+    elif midi_a is None or midi_b is None:
+        pitch_dist = 128
+    else:
+        pitch_dist = abs(midi_a - midi_b)
+    return pitch_dist * pitch_w + onset_dist
+
+
+def _match_cell_optimal(list_a, list_b, eps):
+    """Minimal-cost maximum-cardinality assignment within one (measure, staff) cell. See
+    _match_cell for the rationale. Returns (matched_pairs, only_a, only_b)."""
+    n = len(list_a)
+    m = len(list_b)
+    if n == 0:
+        return [], [], list(list_b)
+    if m == 0:
+        return [], list(list_a), []
+
+    # pitch_w makes one semitone of pitch distance outweigh the entire eps onset window, so the
+    # assignment first minimizes total pitch distance, then breaks ties by onset proximity.
+    pitch_w = eps + 1
+    max_real = 128 * pitch_w + eps  # max real pairing cost (rest-vs-note = 128 semitones).
+    # Unmatch penalty: matching ANY eligible pair (cost <= max_real) must beat unmatching both
+    # ends (2 * unmatch), so unmatch > max_real / 2; max_real + 1 guarantees it and preserves
+    # greedy's "always match within eps" behavior (incl. an octave dispute, the slot's only
+    # partner). Ineligible (onset beyond eps) pairs are priced so high the optimizer always
+    # prefers unmatching both ends over using one.
+    unmatch = max_real + 1
+    big = unmatch * (n + m + 2)
+
+    # Pad to a square: each real A also gets a dedicated "unmatched" dummy column (n+i), each
+    # real B a dedicated dummy row (n+j); dummy-vs-dummy is free. A finite perfect matching
+    # therefore always exists, and a min-cost one matches as many eligible real pairs as
+    # possible (every real edge saves ~unmatch over leaving both ends unmatched).
+    size = n + m
+    cost = [[0] * size for _ in range(size)]
+    for i in range(size):
+        a_real = i < n
+        for j in range(size):
+            b_real = j < m
+            if a_real and b_real:
+                a = list_a[i]
+                b = list_b[j]
+                cost[i][j] = (
+                    _pair_cost(a, b, pitch_w)
+                    if abs(a.onset - b.onset) <= eps
+                    else big
+                )
+            elif a_real and not b_real:
+                cost[i][j] = unmatch if (j - m) == i else big
+            elif (not a_real) and b_real:
+                cost[i][j] = unmatch if (i - n) == j else big
+            else:
+                cost[i][j] = 0
+
+    assign = _hungarian(cost)  # assign[i] = column matched to row i.
+
+    matched_idx: List[Tuple[int, NoteEvent, NoteEvent]] = []
+    only_a: List[NoteEvent] = []
+    used_b = set()
+    for i in range(n):
+        j = assign[i]
+        if j < m and cost[i][j] < big:
+            matched_idx.append((i, list_a[i], list_b[j]))
+            used_b.add(j)
+        else:
+            only_a.append(list_a[i])
+    only_b = [list_b[j] for j in range(m) if j not in used_b]
+
+    # Stable order: matched by A onset then A index (mirrors greedy's onset-ordered output).
+    matched_idx.sort(key=lambda t: (t[1].onset, t[0]))
+    matched = [(a, b) for _, a, b in matched_idx]
+    return matched, only_a, only_b
+
+
+def _hungarian(cost):
+    """Minimal-cost perfect assignment on a SQUARE integer cost matrix (Kuhn-Munkres with
+    potentials, O(n^3)). Returns `assign` where assign[i] = column matched to row i. Pure
+    stdlib. Called only on the square padded matrix _match_cell_optimal builds."""
+    n = len(cost)
+    if n == 0:
+        return []
+    # A sentinel strictly larger than any reachable reduced cost (sum of all |entries| + 1).
+    inf = 1
+    for row in cost:
+        for c in row:
+            inf += abs(c)
+
+    u = [0] * (n + 1)
+    v = [0] * (n + 1)
+    p = [0] * (n + 1)  # p[j] = row assigned to column j (1-based); p[0] = scratch row.
+    way = [0] * (n + 1)
+    for i in range(1, n + 1):
+        p[0] = i
+        j0 = 0
+        minv = [inf] * (n + 1)
+        used = [False] * (n + 1)
+        while True:
+            used[j0] = True
+            i0 = p[j0]
+            delta = inf
+            j1 = -1
+            for j in range(1, n + 1):
+                if not used[j]:
+                    cur = cost[i0 - 1][j - 1] - u[i0] - v[j]
+                    if cur < minv[j]:
+                        minv[j] = cur
+                        way[j] = j0
+                    if minv[j] < delta:
+                        delta = minv[j]
+                        j1 = j
+            for j in range(n + 1):
+                if used[j]:
+                    u[p[j]] += delta
+                    v[j] -= delta
+                else:
+                    minv[j] -= delta
+            j0 = j1
+            if p[j0] == 0:
+                break
+        while j0:
+            j1 = way[j0]
+            p[j0] = p[j1]
+            j0 = j1
+
+    assign = [0] * n
+    for j in range(1, n + 1):
+        if p[j] != 0:
+            assign[p[j] - 1] = j - 1
+    return assign
+
+
+def _match_cell_greedy(list_a, list_b, eps):
+    """Greedy nearest-onset matching within one (measure, staff) cell. KEPT as the never-raise
+    fallback for _match_cell (and the historical reference behavior).
 
     For each A event (in onset order) pick the unused B event with the smallest onset
     distance within eps; among equally-close B candidates prefer one whose pitch matches
-    exactly (so a coincident same-pitch note beats a same-onset different-pitch note). A
-    matched pair may still DISAGREE on pitch (both engines placed a note in the slot but read
-    a different pitch): that is intentionally bucketed in `matched` for a later voting slice.
-    Unmatched A -> only_a, unused B -> only_b.
+    exactly. A matched pair may still DISAGREE on pitch. Unmatched A -> only_a, unused B ->
+    only_b. NOTE: this mispairs swapped dense runs (the reason _match_cell now defaults to the
+    optimal assignment); see _match_cell's docstring.
     """
     matched: List[Tuple[NoteEvent, NoteEvent]] = []
     only_a: List[NoteEvent] = []
@@ -870,6 +1043,25 @@ def _bbox_row_for(rows, oemer_ev, common_base):
         return None
 
 
+def _referee_onset_coincides(clarity_ev, oemer_ev) -> bool:
+    """DECLINE-GUARD (belt-and-suspenders for the align() pairing fix): True only when the
+    matched pair sits at effectively the SAME onset (within HALF the eps window). A genuine
+    pitch dispute keeps the onset (only the pitch is misread); a non-trivial onset gap is the
+    fingerprint of a dense-run MISPAIR (align matched within tolerance), where the referee
+    would crop oemer's neighbor and confidently confirm a swapped pitch. With the optimal
+    assignment this is rare, but declining when the onsets do not coincide keeps the referee
+    never-worse: a wrong confident arbitration is worse than a decline. PURE; never raises.
+
+    clarity_ev/oemer_ev are align()'s rescaled copies, so both onsets and .base are already on
+    the shared common base and directly comparable."""
+    try:
+        base = clarity_ev.base or oemer_ev.base or 1
+        eps = max(1, int(round(EPS_BEATS * base)))
+        return abs(clarity_ev.onset - oemer_ev.onset) * 2 <= eps
+    except Exception:
+        return False
+
+
 def _maybe_referee_pitch(
     input_pdf,
     clarity_ev,
@@ -905,6 +1097,12 @@ def _maybe_referee_pitch(
         if not referee.is_refereeable_dispute(
             interval, is_isolated=is_isolated, is_pitch_dispute=True
         ):
+            return None
+
+        # Decline-guard: if the matched pair's onsets do not coincide, the pairing is suspect
+        # (a dense-run mispair the optimal assignment may not have fully resolved). Crop the
+        # neighbor and we would confirm a swap; keep Clarity instead.
+        if not _referee_onset_coincides(clarity_ev, oemer_ev):
             return None
 
         localized = _localize_dispute(

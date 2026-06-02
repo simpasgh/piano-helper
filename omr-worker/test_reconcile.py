@@ -327,6 +327,90 @@ def test_greedy_match_prefers_exact_pitch_on_tie():
         assert ea.pitch == eb.pitch
 
 
+def test_dense_run_optimal_assignment_pairs_by_pitch_not_onset():
+    # The dense-run regression (Reverie, tech-lead.md 2026-06-02): two notes per engine fall
+    # inside the eps window in a SWAPPED pitch order. divisions=8 -> eps = 1 tick, so onsets 0
+    # and 1 are both eligible partners for either note. Clarity reads [G5@0, B4@1]; oemer reads
+    # the SAME two pitches but at swapped onsets [B4@0, G5@1]. Greedy locks onto onset and
+    # manufactures two phantom pitch disputes (G5<->B4, B4<->G5); the optimal pitch-aware
+    # assignment instead pairs G5<->G5 and B4<->B4, so both engines AGREE and nothing disputes.
+    clarity = to_events(
+        _clarity_xml(8, [[_note("G", 5, 1), _note("B", 4, 1)]], [[]]),
+        "clarity",
+    )
+    oemer = to_events(
+        _oemer_xml(8, [[_note("B", 4, 1, staff=1), _note("G", 5, 1, staff=1)]]),
+        "oemer",
+    )
+    res = align(clarity, oemer)
+    assert len(res["matched"]) == 2
+    assert res["only_a"] == [] and res["only_b"] == []
+    # Every matched pair AGREES on pitch (the phantom A->B / B->A swap disputes are gone).
+    for a, b in res["matched"]:
+        assert a.pitch == b.pitch
+
+    # Contrast: the kept greedy fallback DOES mispair the same input into two pitch disputes,
+    # which is exactly the bug the optimal assignment fixes.
+    cells_a = reconcile._group_by_cell(clarity)
+    cells_b = reconcile._group_by_cell(oemer)
+    cell = (1, 1)
+    g_matched, _, _ = reconcile._match_cell_greedy(cells_a[cell], cells_b[cell], 1)
+    assert len(g_matched) == 2
+    assert sum(1 for a, b in g_matched if a.pitch != b.pitch) == 2
+
+
+def test_optimal_assignment_maximizes_matches_then_picks_best_pitch():
+    # A has C5 + E5 at one onset; B has only E5 at that onset. The matcher must match the ONE
+    # available pair by pitch (E5<->E5, cost 0) and bucket the unmatched C5 to only_a, rather
+    # than burn the match on C5<->E5 and strand E5.
+    a = to_events(
+        _oemer_xml(4, [[_note("C", 5, 4, staff=1), _note("E", 5, 4, staff=1, chord=True)]]),
+        "a",
+    )
+    b = to_events(_oemer_xml(4, [[_note("E", 5, 4, staff=1)]]), "b")
+    res = align(a, b)
+    assert len(res["matched"]) == 1
+    ma, mb = res["matched"][0]
+    assert ma.pitch == ("E", 0, 5) and mb.pitch == ("E", 0, 5)
+    assert [e.pitch for e in res["only_a"]] == [("C", 0, 5)]
+    assert res["only_b"] == []
+
+
+def test_same_onset_octave_dispute_still_matches_as_class_b():
+    # An isolated same-onset octave dispute (C5 vs C6) has only ONE eligible partner, so the
+    # matcher must still PAIR it (a class-B dispute for the vote/referee), exactly as greedy
+    # did - the optimal assignment must not strand a lone disagreeing pair into only_a/only_b.
+    a = to_events(_oemer_xml(4, [[_note("C", 5, 4, staff=1)]]), "a")
+    b = to_events(_oemer_xml(4, [[_note("C", 6, 4, staff=1)]]), "b")
+    res = align(a, b)
+    assert len(res["matched"]) == 1
+    ma, mb = res["matched"][0]
+    assert ma.pitch == ("C", 0, 5) and mb.pitch == ("C", 0, 6)
+    assert res["only_a"] == [] and res["only_b"] == []
+
+
+def test_hungarian_solves_known_assignment():
+    # Sanity-check the pure assignment solver on a tiny matrix with a unique optimum: the
+    # min-cost perfect assignment of [[1,9],[9,1]] is the diagonal (rows->cols [0,1]).
+    assert reconcile._hungarian([[1, 9], [9, 1]]) == [0, 1]
+    # And the anti-diagonal when that is cheaper.
+    assert reconcile._hungarian([[9, 1], [1, 9]]) == [1, 0]
+
+
+def test_referee_onset_coincides_guard():
+    # The decline-guard: a same-onset pair coincides (genuine pitch dispute); a pair half the
+    # eps window apart does not (suspect dense-run mispair -> referee declines). base = 8 ->
+    # eps = 1 tick, so any onset gap > 0 fails the half-eps test.
+    same = NoteEvent(measure=1, onset=8, staff=1, pitch=("C", 0, 5), duration=8,
+                     is_chord=False, base=8)
+    same_b = NoteEvent(measure=1, onset=8, staff=1, pitch=("E", 0, 5), duration=8,
+                       is_chord=False, base=8)
+    assert reconcile._referee_onset_coincides(same, same_b) is True
+    drifted = NoteEvent(measure=1, onset=9, staff=1, pitch=("E", 0, 5), duration=8,
+                        is_chord=False, base=8)
+    assert reconcile._referee_onset_coincides(same, drifted) is False
+
+
 # --- ties / pitch parsing ----------------------------------------------------------------
 
 
