@@ -30,6 +30,7 @@ Config comes from env vars (no secrets in the file, none on disk):
   OMR_POLL_SECONDS      poll interval, optional (default 5)
 """
 
+import concurrent.futures
 import os
 import subprocess
 import sys
@@ -76,6 +77,47 @@ PDF_RASTER_DPI = 350
 # 60 pages * 11.8 MP ~= 708 MP is also the ceiling we hand oemer (well past any real score).
 MAX_STITCH_PAGES = 60
 MAX_STITCH_PIXELS = 1_000_000_000  # ~1 GP; RGB canvas ~3 GB worst case, then freed.
+
+# Per-engine wall-clock cap. The ensemble (Slice 1) runs Clarity and oemer CONCURRENTLY,
+# so a single wedged engine must not stall the always-on poller indefinitely. Each engine
+# subprocess gets this timeout; exceeding it is treated as that engine FAILING (the runner
+# returns None) so the flow degrades to the surviving engine exactly as if it had errored.
+# Generous because oemer is ~180s on a full page at 350 DPI (#112) and a long multi-page
+# score plus model load can run longer; the cap is a runaway guard, not a tuning knob.
+# Overridable via OMR_ENGINE_TIMEOUT_SECONDS for hosts with different compute budgets.
+DEFAULT_ENGINE_TIMEOUT_SECONDS = 1200
+
+
+def engine_timeout_seconds():
+    """Per-engine subprocess timeout in seconds, from OMR_ENGINE_TIMEOUT_SECONDS or the
+    default. A non-positive or unparseable value falls back to the default."""
+    raw = os.environ.get("OMR_ENGINE_TIMEOUT_SECONDS")
+    if raw is None:
+        return DEFAULT_ENGINE_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_ENGINE_TIMEOUT_SECONDS
+    return value if value > 0 else DEFAULT_ENGINE_TIMEOUT_SECONDS
+
+
+# Master kill-switch for the ensemble work (Slice 1+). DEFAULT OFF so prod behavior is
+# byte- AND latency-identical to today: the legacy Clarity-first SHORT-CIRCUIT runs (oemer
+# only when Clarity fails, no upfront rasterization on the Clarity happy path, ~15s). When
+# ON, process_job runs Clarity + oemer CONCURRENTLY via select_primary_result (~max of the
+# two engines). The same flag will later gate reconciliation (Slice 3+), so QA can validate
+# the parallel path on the live worker (OMR_ENSEMBLE=1) before it ever becomes the default.
+OMR_ENSEMBLE_ENV = "OMR_ENSEMBLE"
+
+
+def ensemble_enabled():
+    """True when OMR_ENSEMBLE is a truthy string ("1"/"true", case-insensitive). Anything
+    else (unset, "0", "false", garbage) is OFF. Shared by every ensemble slice so the flag
+    is read in exactly one place."""
+    raw = os.environ.get(OMR_ENSEMBLE_ENV)
+    if raw is None:
+        return False
+    return raw.strip().lower() in ("1", "true")
 
 # Byte-compatible with src/omr.ts FAILURE_SENTINEL_RE = /name="omr-status"\s*>\s*failed/.
 # Written to the result key when both engines fail so the browser stops polling and
@@ -330,8 +372,11 @@ def oemer_command(image_path, out_dir, without_deskew):
     return cmd
 
 
-def run_oemer(image_path, workdir, without_deskew=False):
-    """Run the primary engine. Returns the MusicXML path or None on failure."""
+def run_oemer(image_path, workdir, without_deskew=False, timeout=None):
+    """Run the primary raster engine. Returns the MusicXML path or None on failure.
+
+    A timeout (seconds) caps the subprocess wall-clock; exceeding it is treated as a
+    FAILURE (return None) so the ensemble degrades to the surviving engine."""
     out_dir = os.path.join(workdir, "oemer-out")
     os.makedirs(out_dir, exist_ok=True)
     try:
@@ -339,17 +384,25 @@ def run_oemer(image_path, workdir, without_deskew=False):
             oemer_command(image_path, out_dir, without_deskew),
             check=True,
             cwd=workdir,
+            timeout=timeout,
         )
+    except subprocess.TimeoutExpired as err:
+        log("oemer timed out after %ss" % getattr(err, "timeout", timeout))
+        return None
     except (subprocess.CalledProcessError, FileNotFoundError) as err:
         log("oemer failed: %s" % err)
         return None
     return find_musicxml(out_dir, workdir)
 
 
-def run_homr(image_path, workdir):
-    """Run the fallback engine. Returns the MusicXML path or None on failure."""
+def run_homr(image_path, workdir, timeout=None):
+    """Run the last-resort raster engine. Returns the MusicXML path or None on failure.
+    A timeout (seconds) caps the subprocess; exceeding it counts as a failure (None)."""
     try:
-        subprocess.run(["homr", image_path], check=True, cwd=workdir)
+        subprocess.run(["homr", image_path], check=True, cwd=workdir, timeout=timeout)
+    except subprocess.TimeoutExpired as err:
+        log("homr timed out after %ss" % getattr(err, "timeout", timeout))
+        return None
     except (subprocess.CalledProcessError, FileNotFoundError) as err:
         log("homr failed: %s" % err)
         return None
@@ -388,10 +441,11 @@ def clarity_command(python, omr_script, pdf_path, out_path, work_dir):
     ]
 
 
-def run_clarity(pdf_path, workdir):
+def run_clarity(pdf_path, workdir, timeout=None):
     """Run Clarity-OMR on the original PDF. Returns the output .musicxml path or None on
-    ANY failure (env unset/missing, subprocess error, no output) so the caller falls back
-    to oemer. Never raises into process_job."""
+    ANY failure (env unset/missing, subprocess error, timeout, no output) so the caller
+    falls back to oemer. Never raises into process_job. A timeout (seconds) caps the
+    subprocess wall-clock; exceeding it counts as a failure (None)."""
     omr_dir = os.environ.get(CLARITY_OMR_DIR_ENV)
     python = os.environ.get(CLARITY_PYTHON_ENV)
     if not omr_dir or not python:
@@ -409,7 +463,11 @@ def run_clarity(pdf_path, workdir):
             clarity_command(python, omr_script, pdf_path, out_path, clarity_work),
             check=True,
             cwd=workdir,
+            timeout=timeout,
         )
+    except subprocess.TimeoutExpired as err:
+        log("clarity timed out after %ss" % getattr(err, "timeout", timeout))
+        return None
     except (subprocess.CalledProcessError, FileNotFoundError) as err:
         log("clarity failed: %s" % err)
         return None
@@ -748,6 +806,137 @@ def normalize_ties(xml_bytes):
         return xml_bytes
 
 
+def select_primary_result(run_clarity_fn, run_oemer_fn, is_pdf_input, timeout=None):
+    """Slice 1 of the ensemble (docs/context/tech-lead.md, 2026-06-02): run the two PRIMARY
+    engines CONCURRENTLY and apply the EXISTING fallback selection unchanged.
+
+    Behavior is byte-identical to the old sequential flow for every input; only the
+    SCHEDULING changed (parallel instead of Clarity-then-oemer). The selection precedence
+    is preserved exactly: Clarity wins if it produced output, else oemer, else None (the
+    caller then tries homr, then the failure sentinel). homr stays the last-resort engine
+    OUTSIDE this concurrent stage; it runs only when both primaries fail (unchanged).
+
+    Concurrency model: each engine is a subprocess, so running them on a ThreadPoolExecutor
+    gives true wall-clock overlap (the GIL is released during the subprocess wait and each
+    engine child uses its own cores). Wall-clock is ~max(clarity, oemer), not the sum.
+
+    Clarity is PDF-only (it reads the PDF directly), so for PNG/JPEG uploads it is NOT
+    launched and the "ensemble" is just oemer, exactly as before. A None from either runner
+    (engine error, missing env, or the per-engine timeout) counts as that engine failing, so
+    we degrade to the survivor without changing which output is chosen.
+
+    run_clarity_fn() and run_oemer_fn() are zero-arg callables (the caller binds paths) so
+    this selector is pure scheduling logic and unit-testable with fast/slow/failing mocks.
+    Returns (result_path_or_None, source_label)."""
+    futures = {}
+    # ThreadPoolExecutor over subprocess calls: threads block on the OS, the GIL is freed,
+    # so the two engines truly overlap. max_workers=2 caps it at the two primaries.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        if is_pdf_input:
+            futures["clarity"] = pool.submit(run_clarity_fn)
+        futures["oemer"] = pool.submit(run_oemer_fn)
+        # Block until BOTH engines finish so the selection sees every result. A per-engine
+        # subprocess timeout (inside the runners) bounds how long either can take, so this
+        # join cannot hang longer than that cap; we do not need an executor-level timeout.
+        results = {name: fut.result() for name, fut in futures.items()}
+
+    # Selection precedence UNCHANGED: Clarity first, then oemer. homr is handled by the
+    # caller as the last resort (it is not part of the concurrent primary stage).
+    clarity_result = results.get("clarity")
+    if clarity_result is not None:
+        return clarity_result, "clarity"
+    oemer_result = results.get("oemer")
+    if oemer_result is not None:
+        return oemer_result, "oemer"
+    return None, None
+
+
+def _select_legacy(job_id, input_path, workdir, is_pdf_input):
+    """LEGACY engine selection (OMR_ENSEMBLE OFF = prod default). Byte- and latency-identical
+    to the pre-ensemble flow: Clarity is PRIMARY and SHORT-CIRCUITS for a PDF (oemer is NOT
+    run when Clarity succeeds, and NO rasterization happens on the Clarity happy path, so the
+    ~15s Clarity inference is the whole cost). Only if Clarity fails (or for a PNG/JPEG, where
+    Clarity is skipped) do we rasterize and fall back to oemer, then homr.
+    Returns (result_path_or_None, source_label_or_None)."""
+    result_path = None
+    source = None
+    # Clarity is PRIMARY but PDF-only: it expects a PDF (pymupdf + YOLO auto-segment),
+    # so it is skipped for PNG/JPEG uploads. On any failure run_clarity returns None
+    # and we fall back to the existing rasterize -> oemer -> homr path.
+    if is_pdf_input:
+        result_path = run_clarity(input_path, workdir)
+        if result_path is not None:
+            source = "clarity"
+        else:
+            log("clarity produced nothing for %s; falling back to oemer" % job_id)
+
+    if result_path is None:
+        image_path, is_pdf = rasterize_if_pdf(input_path, workdir)
+        # Disable deskew only on the vector-PDF raster (already orthogonal).
+        result_path = run_oemer(image_path, workdir, without_deskew=is_pdf)
+        if result_path is not None:
+            source = "oemer"
+        else:
+            log("oemer produced nothing for %s; trying homr" % job_id)
+            result_path = run_homr(image_path, workdir)
+            if result_path is not None:
+                source = "homr"
+
+    return result_path, source
+
+
+def _select_ensemble(job_id, input_path, workdir, is_pdf_input):
+    """ENSEMBLE engine selection (OMR_ENSEMBLE ON). Runs the two PRIMARY engines (Clarity +
+    oemer) CONCURRENTLY via select_primary_result with a per-engine timeout. Selection
+    precedence is UNCHANGED (Clarity > oemer > homr > sentinel); only the scheduling is
+    parallel, so wall-clock is ~max(clarity, oemer) instead of the legacy ~15s short-circuit.
+    This is the path QA validates with OMR_ENSEMBLE=1 before it ever becomes the default, and
+    the slot where reconciliation (Slice 3+) will later hook in.
+    Returns (result_path_or_None, source_label_or_None)."""
+    timeout = engine_timeout_seconds()
+
+    # Rasterize up front so oemer's image is ready to run CONCURRENTLY with Clarity.
+    # Clarity is PDF-only and reads the original PDF directly, so it is NOT given the
+    # raster; oemer gets the stitched image. is_pdf disables oemer deskew on the clean
+    # vector-PDF raster (already orthogonal). If rasterization fails on a PDF (e.g.
+    # pdftoppm error or a stitch-cap RuntimeError), do NOT crash the whole job: Clarity
+    # reads the PDF directly and may still succeed, so disable only the raster engines
+    # (oemer/homr) and let Clarity run. For a non-PDF input there is no Clarity path, so
+    # a rasterization failure stays fatal (re-raised, caught by poll_once) as before.
+    image_path = None
+    is_pdf = False
+    try:
+        image_path, is_pdf = rasterize_if_pdf(input_path, workdir)
+    except Exception as err:
+        if not is_pdf_input:
+            raise
+        log("rasterization failed for %s (%r); raster engines disabled, trying Clarity"
+            % (job_id, err))
+
+    # Run the two PRIMARY engines concurrently, keep the same selection. Clarity (PDF-only)
+    # wins if present, else oemer; homr stays the last resort below. run_oemer is only
+    # launched when a raster image exists (it always does unless a PDF raster failed above),
+    # so a missing image degrades cleanly to Clarity-only.
+    oemer_fn = (
+        (lambda: run_oemer(image_path, workdir, without_deskew=is_pdf, timeout=timeout))
+        if image_path is not None
+        else (lambda: None)
+    )
+    result_path, source = select_primary_result(
+        lambda: run_clarity(input_path, workdir, timeout=timeout),
+        oemer_fn,
+        is_pdf_input,
+        timeout=timeout,
+    )
+    if result_path is None and image_path is not None:
+        log("clarity+oemer produced nothing for %s; trying homr" % job_id)
+        result_path = run_homr(image_path, workdir, timeout=timeout)
+        if result_path is not None:
+            source = "homr"
+
+    return result_path, source
+
+
 def process_job(client, bucket, job_id):
     """Convert one upload. Always leaves exactly one object at the result key
     (real score or sentinel) and deletes the upload so it is not reprocessed."""
@@ -764,27 +953,15 @@ def process_job(client, bucket, job_id):
         # original PDF path stays available for Clarity, which reads the PDF directly.
         is_pdf_input = sniff_mime(input_path) == "application/pdf"
 
-        result_path = None
-        # Clarity is PRIMARY but PDF-only: it expects a PDF (pymupdf + YOLO auto-segment),
-        # so it is skipped for PNG/JPEG uploads. On any failure run_clarity returns None
-        # and we fall back to the existing rasterize -> oemer -> homr path.
-        if is_pdf_input:
-            result_path = run_clarity(input_path, workdir)
-            if result_path is None:
-                log("clarity produced nothing for %s; falling back to oemer" % job_id)
-
-        if result_path is None:
-            image_path, is_pdf = rasterize_if_pdf(input_path, workdir)
-            # Disable deskew only on the vector-PDF raster (already orthogonal).
-            result_path = run_oemer(image_path, workdir, without_deskew=is_pdf)
-            if result_path is None:
-                log("oemer produced nothing for %s; trying homr" % job_id)
-                result_path = run_homr(image_path, workdir)
+        if ensemble_enabled():
+            result_path, source = _select_ensemble(job_id, input_path, workdir, is_pdf_input)
+        else:
+            result_path, source = _select_legacy(job_id, input_path, workdir, is_pdf_input)
 
         if result_path is not None:
             with open(result_path, "rb") as fh:
                 body = fh.read()
-            log("%s recognized via engine output %s" % (job_id, result_path))
+            log("%s recognized via %s output %s" % (job_id, source, result_path))
             # Post-transforms run UNCONDITIONALLY on every engine's output. Each returns
             # the input unchanged on failure or when it does not apply (oemer is already a
             # 1-part grand staff with zero ties, so both are safe no-ops there). Order:

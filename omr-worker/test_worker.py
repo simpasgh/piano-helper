@@ -185,6 +185,303 @@ def test_run_clarity_returns_none_when_paths_missing(tmp_path, monkeypatch):
     assert worker.run_clarity(str(tmp_path / "score.pdf"), str(tmp_path)) is None
 
 
+# --- Slice 1: concurrent engine scheduling with same fallback selection ------------------
+# select_primary_result runs Clarity + oemer CONCURRENTLY but keeps the EXACT old selection
+# precedence (Clarity > oemer; homr is the caller's last resort). These tests pin: which
+# output is chosen, that the two engines truly overlap (wall-clock is max, not sum), that a
+# per-engine timeout / failure degrades to the survivor, and that PNG/JPEG skips Clarity.
+
+import subprocess  # noqa: E402
+import threading  # noqa: E402
+import time as _time  # noqa: E402
+
+
+def _slow_runner(label, seconds, return_value, log_list, lock):
+    """A fake engine runner that sleeps `seconds` (simulating a subprocess wall-clock) then
+    returns return_value, recording its start/end so concurrency can be asserted."""
+
+    def run():
+        with lock:
+            log_list.append(("start", label, _time.monotonic()))
+        _time.sleep(seconds)
+        with lock:
+            log_list.append(("end", label, _time.monotonic()))
+        return return_value
+
+    return run
+
+
+def test_select_both_succeed_chooses_clarity():
+    # Both primaries produce output. Selection precedence is unchanged: Clarity wins.
+    result, source = worker.select_primary_result(
+        lambda: "/clarity.musicxml",
+        lambda: "/oemer.musicxml",
+        is_pdf_input=True,
+    )
+    assert result == "/clarity.musicxml"
+    assert source == "clarity"
+
+
+def test_select_clarity_fails_oemer_succeeds_chooses_oemer():
+    # Clarity fails (returns None, e.g. error or timeout); we degrade to the oemer survivor.
+    result, source = worker.select_primary_result(
+        lambda: None,
+        lambda: "/oemer.musicxml",
+        is_pdf_input=True,
+    )
+    assert result == "/oemer.musicxml"
+    assert source == "oemer"
+
+
+def test_select_both_fail_returns_none():
+    # Both primaries fail: the selector returns None so the caller tries homr / the sentinel.
+    result, source = worker.select_primary_result(
+        lambda: None,
+        lambda: None,
+        is_pdf_input=True,
+    )
+    assert result is None
+    assert source is None
+
+
+def test_select_png_jpeg_skips_clarity_runs_only_oemer():
+    # Clarity is PDF-only; for a raster upload it must NOT be launched. If the selector ever
+    # called the Clarity runner here it would raise, proving Clarity is skipped.
+    def clarity_must_not_run():
+        raise AssertionError("Clarity must not run for a non-PDF input")
+
+    result, source = worker.select_primary_result(
+        clarity_must_not_run,
+        lambda: "/oemer.musicxml",
+        is_pdf_input=False,
+    )
+    assert result == "/oemer.musicxml"
+    assert source == "oemer"
+
+
+def test_select_runs_engines_concurrently_wall_clock_is_max_not_sum():
+    # The whole point of Slice 1: the two engines OVERLAP. With a 0.3s Clarity and a 0.3s
+    # oemer, a sequential flow would take ~0.6s; concurrent takes ~0.3s. Assert both via the
+    # interleaved start/end log (oemer starts before Clarity ends) AND the total wall-clock.
+    events = []
+    lock = threading.Lock()
+    delay = 0.3
+    clarity = _slow_runner("clarity", delay, "/clarity.musicxml", events, lock)
+    oemer = _slow_runner("oemer", delay, "/oemer.musicxml", events, lock)
+
+    start = _time.monotonic()
+    result, source = worker.select_primary_result(clarity, oemer, is_pdf_input=True)
+    elapsed = _time.monotonic() - start
+
+    # Output selection still Clarity (both succeeded).
+    assert result == "/clarity.musicxml"
+    assert source == "clarity"
+    # Wall-clock is ~max(delay), not the ~2*delay a sequential run would cost. Generous
+    # upper bound (1.5*delay) to stay robust on a loaded CI box while still failing a
+    # sequential implementation (which would need ~2*delay).
+    assert elapsed < delay * 1.5, "engines must overlap (wall-clock ~max, not sum)"
+    # And prove overlap directly: both engines were running at the same time, i.e. the
+    # second start happened before the first end.
+    starts = sorted(t for kind, _, t in events if kind == "start")
+    ends = sorted(t for kind, _, t in events if kind == "end")
+    assert starts[1] < ends[0], "second engine started before the first finished"
+
+
+def test_run_oemer_timeout_counts_as_failure(tmp_path, monkeypatch):
+    # A subprocess that exceeds the per-engine timeout raises TimeoutExpired; run_oemer must
+    # treat that as a FAILURE (return None) so the ensemble degrades to the survivor.
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="oemer", timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+    assert worker.run_oemer(str(tmp_path / "page.png"), str(tmp_path), timeout=0.01) is None
+
+
+def test_run_clarity_timeout_counts_as_failure(tmp_path, monkeypatch):
+    # Same contract for Clarity: a timeout -> None, no exception into process_job.
+    script = tmp_path / "omr.py"
+    script.write_text("# stub")
+    python = tmp_path / "python"
+    python.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("CLARITY_OMR_DIR", str(tmp_path))
+    monkeypatch.setenv("CLARITY_PYTHON", str(python))
+
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="clarity", timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+    assert worker.run_clarity(str(tmp_path / "score.pdf"), str(tmp_path), timeout=0.01) is None
+
+
+def test_select_one_engine_times_out_other_used():
+    # Concretely model "one engine times out": its runner returns None (the runners convert
+    # a TimeoutExpired into None). If Clarity times out, oemer is used; if oemer times out,
+    # Clarity is used. The survivor's output is chosen, never the sentinel.
+    # Clarity times out -> oemer wins.
+    result, source = worker.select_primary_result(
+        lambda: None,            # clarity timed out
+        lambda: "/oemer.musicxml",
+        is_pdf_input=True,
+    )
+    assert (result, source) == ("/oemer.musicxml", "oemer")
+    # oemer times out -> Clarity wins (still the higher-precedence survivor).
+    result, source = worker.select_primary_result(
+        lambda: "/clarity.musicxml",
+        lambda: None,            # oemer timed out
+        is_pdf_input=True,
+    )
+    assert (result, source) == ("/clarity.musicxml", "clarity")
+
+
+def test_engine_timeout_seconds_default_and_override(monkeypatch):
+    monkeypatch.delenv("OMR_ENGINE_TIMEOUT_SECONDS", raising=False)
+    assert worker.engine_timeout_seconds() == worker.DEFAULT_ENGINE_TIMEOUT_SECONDS
+    monkeypatch.setenv("OMR_ENGINE_TIMEOUT_SECONDS", "42")
+    assert worker.engine_timeout_seconds() == 42
+    # Garbage or non-positive falls back to the default (never disables the runaway guard).
+    monkeypatch.setenv("OMR_ENGINE_TIMEOUT_SECONDS", "nonsense")
+    assert worker.engine_timeout_seconds() == worker.DEFAULT_ENGINE_TIMEOUT_SECONDS
+    monkeypatch.setenv("OMR_ENGINE_TIMEOUT_SECONDS", "0")
+    assert worker.engine_timeout_seconds() == worker.DEFAULT_ENGINE_TIMEOUT_SECONDS
+
+
+# --- OMR_ENSEMBLE flag gating (Slice 1) --------------------------------------------------
+# The concurrent select_primary_result path ships behind OMR_ENSEMBLE (default OFF) so prod
+# latency is unchanged until QA validates the parallel path. Flag OFF must take the LEGACY
+# Clarity-first short-circuit (oemer NOT run when Clarity succeeds on a PDF, no upfront
+# rasterization on the Clarity happy path). Flag ON must run both engines concurrently.
+
+
+def test_ensemble_enabled_truthy_parsing(monkeypatch):
+    # Default (unset) is OFF: prod stays on the legacy short-circuit.
+    monkeypatch.delenv("OMR_ENSEMBLE", raising=False)
+    assert worker.ensemble_enabled() is False
+    # "1" and "true" (case-insensitive, whitespace-tolerant) are ON.
+    for on in ("1", "true", "TRUE", " True ", "tRuE"):
+        monkeypatch.setenv("OMR_ENSEMBLE", on)
+        assert worker.ensemble_enabled() is True, on
+    # Everything else is OFF (never accidentally enables the parallel path in prod).
+    for off in ("0", "false", "False", "", "yes", "on", "2", "garbage"):
+        monkeypatch.setenv("OMR_ENSEMBLE", off)
+        assert worker.ensemble_enabled() is False, off
+
+
+def test_legacy_pdf_clarity_success_does_not_run_oemer(tmp_path, monkeypatch):
+    # FLAG OFF, the load-bearing prod guarantee: when Clarity succeeds on a PDF, oemer is
+    # NEVER run and the PDF is NEVER rasterized (so latency stays ~15s, not ~max(engines)).
+    monkeypatch.delenv("OMR_ENSEMBLE", raising=False)
+    clarity_out = tmp_path / "clarity.musicxml"
+    clarity_out.write_text("<score/>")
+
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clarity_out))
+
+    def oemer_must_not_run(*a, **k):
+        raise AssertionError("oemer must not run when Clarity succeeds (legacy short-circuit)")
+
+    def raster_must_not_run(*a, **k):
+        raise AssertionError("PDF must not be rasterized on the Clarity happy path")
+
+    monkeypatch.setattr(worker, "run_oemer", oemer_must_not_run)
+    monkeypatch.setattr(worker, "rasterize_if_pdf", raster_must_not_run)
+
+    result, source = worker._select_legacy(
+        "job", str(tmp_path / "input.bin"), str(tmp_path), is_pdf_input=True
+    )
+    assert (result, source) == (str(clarity_out), "clarity")
+
+
+def test_legacy_pdf_clarity_fails_falls_back_to_oemer(tmp_path, monkeypatch):
+    # FLAG OFF: Clarity fails -> rasterize -> oemer (sequential fallback, unchanged).
+    monkeypatch.delenv("OMR_ENSEMBLE", raising=False)
+    oemer_out = tmp_path / "oemer.musicxml"
+    oemer_out.write_text("<score/>")
+
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: None)
+    monkeypatch.setattr(worker, "rasterize_if_pdf", lambda *a, **k: ("/img.png", True))
+    monkeypatch.setattr(worker, "run_oemer", lambda *a, **k: str(oemer_out))
+
+    def homr_must_not_run(*a, **k):
+        raise AssertionError("homr must not run when oemer succeeds")
+
+    monkeypatch.setattr(worker, "run_homr", homr_must_not_run)
+
+    result, source = worker._select_legacy(
+        "job", str(tmp_path / "input.bin"), str(tmp_path), is_pdf_input=True
+    )
+    assert (result, source) == (str(oemer_out), "oemer")
+
+
+def test_legacy_png_skips_clarity_runs_oemer(tmp_path, monkeypatch):
+    # FLAG OFF, raster upload: Clarity is PDF-only so it is skipped; oemer runs directly.
+    monkeypatch.delenv("OMR_ENSEMBLE", raising=False)
+    oemer_out = tmp_path / "oemer.musicxml"
+    oemer_out.write_text("<score/>")
+
+    def clarity_must_not_run(*a, **k):
+        raise AssertionError("Clarity must not run for a non-PDF input")
+
+    monkeypatch.setattr(worker, "run_clarity", clarity_must_not_run)
+    monkeypatch.setattr(worker, "rasterize_if_pdf", lambda *a, **k: ("/img.png", False))
+    monkeypatch.setattr(worker, "run_oemer", lambda *a, **k: str(oemer_out))
+
+    result, source = worker._select_legacy(
+        "job", str(tmp_path / "input.bin"), str(tmp_path), is_pdf_input=False
+    )
+    assert (result, source) == (str(oemer_out), "oemer")
+
+
+def test_ensemble_pdf_runs_both_engines(tmp_path, monkeypatch):
+    # FLAG ON: BOTH primaries run for a PDF (oemer is launched even though Clarity wins), so
+    # oemer's output is available for the later reconciliation slices. Records each call.
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    clarity_out = tmp_path / "clarity.musicxml"
+    clarity_out.write_text("<score/>")
+    calls = []
+
+    def fake_clarity(*a, **k):
+        calls.append("clarity")
+        return str(clarity_out)
+
+    def fake_oemer(*a, **k):
+        calls.append("oemer")
+        return "/oemer.musicxml"
+
+    monkeypatch.setattr(worker, "run_clarity", fake_clarity)
+    monkeypatch.setattr(worker, "run_oemer", fake_oemer)
+    monkeypatch.setattr(worker, "rasterize_if_pdf", lambda *a, **k: ("/img.png", True))
+
+    result, source = worker._select_ensemble(
+        "job", str(tmp_path / "input.bin"), str(tmp_path), is_pdf_input=True
+    )
+    # Selection precedence unchanged (Clarity wins), but oemer ALSO ran (the ensemble cost).
+    assert (result, source) == (str(clarity_out), "clarity")
+    assert set(calls) == {"clarity", "oemer"}, "both engines must run under the flag"
+
+
+def test_ensemble_pdf_raster_failure_still_runs_clarity(tmp_path, monkeypatch):
+    # FLAG ON: a PDF whose rasterization fails must NOT crash the job; Clarity reads the PDF
+    # directly and still runs (raster engines disabled).
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    clarity_out = tmp_path / "clarity.musicxml"
+    clarity_out.write_text("<score/>")
+
+    def boom(*a, **k):
+        raise RuntimeError("pdftoppm exploded")
+
+    monkeypatch.setattr(worker, "rasterize_if_pdf", boom)
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clarity_out))
+
+    def oemer_must_not_run(*a, **k):
+        raise AssertionError("oemer must not run when rasterization failed")
+
+    monkeypatch.setattr(worker, "run_oemer", oemer_must_not_run)
+
+    result, source = worker._select_ensemble(
+        "job", str(tmp_path / "input.bin"), str(tmp_path), is_pdf_input=True
+    )
+    assert (result, source) == (str(clarity_out), "clarity")
+
+
 # --- merge_to_grand_staff (#135) ---------------------------------------------------------
 
 TWO_PART_XML = b"""<?xml version="1.0" encoding="UTF-8"?>

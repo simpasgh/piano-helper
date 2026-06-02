@@ -50,8 +50,10 @@ describe("OMR worker rasterization preprocessing (issue #109)", () => {
 
   it("disables oemer deskew only on the PDF path", () => {
     expect(worker).toContain("--without-deskew");
-    // rasterize returns (image_path, is_pdf); the deskew flag is driven by is_pdf.
-    expect(worker).toMatch(/run_oemer\(image_path,\s*workdir,\s*without_deskew=is_pdf\)/);
+    // rasterize returns (image_path, is_pdf); the deskew flag is driven by is_pdf. The
+    // oemer launch now carries a per-engine timeout too (Slice 1), so allow extra args
+    // after without_deskew=is_pdf rather than pinning the exact end of the call.
+    expect(worker).toMatch(/run_oemer\(image_path,\s*workdir,\s*without_deskew=is_pdf/);
   });
 
   it("keeps the R2 result key/content-type transport contract unchanged", () => {
@@ -89,19 +91,81 @@ describe("OMR worker Clarity-OMR tie engine (issue #135)", () => {
     expect(worker).toContain("os.path.isfile(omr_script)");
   });
 
-  it("runs Clarity first for PDF uploads, then falls back to oemer then homr", () => {
-    // Order: Clarity (PDF-only) -> oemer -> homr. Clarity is skipped for PNG/JPEG.
-    expect(worker).toContain("is_pdf_input");
-    expect(worker).toMatch(/if is_pdf_input:\s*\n\s*result_path = run_clarity\(input_path, workdir\)/);
-    // oemer/homr stay the fallback, in that order. Scope the ordering to the process_job
-    // flow (the function bodies define run_oemer/run_homr earlier in the file).
-    const flow = worker.slice(worker.indexOf("def process_job("));
-    const clarity = flow.indexOf("run_clarity(input_path");
-    const oemer = flow.indexOf("run_oemer(image_path");
-    const homr = flow.indexOf("run_homr(image_path");
+  it("gates the concurrent ensemble path behind OMR_ENSEMBLE, default OFF = legacy short-circuit", () => {
+    // Slice 1 ships ZERO-risk: the concurrent path is behind OMR_ENSEMBLE (default OFF) so
+    // prod keeps the legacy Clarity-first short-circuit (oemer NOT run when Clarity wins on a
+    // PDF, ~15s) until QA validates the parallel path with OMR_ENSEMBLE=1. The same flag will
+    // later gate reconciliation. This guard pins the env-flag helper + the process_job branch.
+    expect(worker).toContain('OMR_ENSEMBLE_ENV = "OMR_ENSEMBLE"');
+    expect(worker).toContain("def ensemble_enabled(");
+    // Truthy parsing: only "1"/"true" enable it (anything else, incl. unset, stays OFF).
+    expect(worker).toMatch(/in \("1", "true"\)/);
+    // process_job branches on the flag: ensemble path when ON, legacy path when OFF.
+    expect(worker).toMatch(/if ensemble_enabled\(\):\s*\n\s*result_path, source = _select_ensemble\(/);
+    expect(worker).toMatch(/else:\s*\n\s*result_path, source = _select_legacy\(/);
+  });
+
+  it("legacy path (flag OFF) short-circuits at Clarity for a PDF, no oemer/raster on success", () => {
+    // The prod default. _select_legacy must try Clarity FIRST for a PDF and only rasterize +
+    // run oemer when Clarity returns None, so a successful Clarity scan never pays the oemer
+    // (~180s) or rasterization cost. Pin that the rasterize+oemer fallback is INSIDE the
+    // `if result_path is None:` guard (i.e. skipped on the Clarity happy path).
+    const legacy = worker.slice(
+      worker.indexOf("def _select_legacy("),
+      worker.indexOf("def _select_ensemble("),
+    );
+    const clarity = legacy.indexOf("run_clarity(input_path");
+    const guard = legacy.indexOf("if result_path is None:");
+    const raster = legacy.indexOf("rasterize_if_pdf(input_path");
+    const oemer = legacy.indexOf("run_oemer(image_path");
     expect(clarity).toBeGreaterThan(-1);
-    expect(clarity).toBeLessThan(oemer);
-    expect(oemer).toBeLessThan(homr);
+    // Clarity runs before the None-guard; rasterize + oemer run only after (inside) it.
+    expect(clarity).toBeLessThan(guard);
+    expect(guard).toBeLessThan(raster);
+    expect(raster).toBeLessThan(oemer);
+  });
+
+  it("ensemble path (flag ON) runs the two primaries concurrently, keeping Clarity>oemer>homr", () => {
+    // When the flag is ON, _select_ensemble runs Clarity and oemer CONCURRENTLY via a
+    // ThreadPoolExecutor, but the SELECTION precedence is unchanged (Clarity wins, else oemer,
+    // else homr, else sentinel). This guard pins the precedence without pinning a sequential
+    // call order, so the concurrent scheduling is allowed while a precedence regression fails.
+    expect(worker).toContain("is_pdf_input");
+    expect(worker).toContain("def select_primary_result(");
+    // The two primaries are launched on a thread pool (true wall-clock overlap on subprocs).
+    expect(worker).toContain("import concurrent.futures");
+    expect(worker).toMatch(/concurrent\.futures\.ThreadPoolExecutor/);
+    // Clarity is launched ONLY for PDF input (it is PDF-only); oemer always.
+    expect(worker).toMatch(/if is_pdf_input:\s*\n\s*futures\["clarity"\] = pool\.submit/);
+    // Selection precedence inside the selector: Clarity checked before oemer.
+    const selector = worker.slice(
+      worker.indexOf("def select_primary_result("),
+      worker.indexOf("def _select_legacy("),
+    );
+    const clarityPick = selector.indexOf('return clarity_result, "clarity"');
+    const oemerPick = selector.indexOf('return oemer_result, "oemer"');
+    expect(clarityPick).toBeGreaterThan(-1);
+    expect(clarityPick).toBeLessThan(oemerPick);
+    // homr stays the LAST resort, run in the ensemble path only after the concurrent
+    // primaries both fail (result_path is None).
+    const flow = worker.slice(
+      worker.indexOf("def _select_ensemble("),
+      worker.indexOf("def process_job("),
+    );
+    const selectCall = flow.indexOf("select_primary_result(");
+    const homr = flow.indexOf("run_homr(image_path");
+    expect(selectCall).toBeGreaterThan(-1);
+    expect(selectCall).toBeLessThan(homr);
+  });
+
+  it("applies a per-engine subprocess timeout so one wedged engine cannot stall the worker", () => {
+    // Each engine subprocess gets a wall-clock cap; exceeding it counts as that engine
+    // failing (the runner returns None) and we degrade to the survivor.
+    expect(worker).toContain("def engine_timeout_seconds(");
+    expect(worker).toMatch(/DEFAULT_ENGINE_TIMEOUT_SECONDS\s*=\s*\d+/);
+    // The runners thread the timeout into subprocess.run and treat TimeoutExpired as None.
+    expect(worker).toMatch(/subprocess\.run\([\s\S]*?timeout=timeout/);
+    expect(worker).toContain("subprocess.TimeoutExpired");
   });
 
   it("preserves the original PDF path for Clarity (sniff before rasterize)", () => {
