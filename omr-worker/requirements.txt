@@ -29,3 +29,18 @@ typing-extensions
 
 # S3-compatible client used to talk to Cloudflare R2.
 boto3
+
+# Visual-diff PDF referee (omr-worker/referee.py, ensemble Slice 6). Engraves each engine's
+# candidate back to an image to arbitrate isolated-notehead pitch disputes. The module is
+# guarded (REFEREE_AVAILABLE) so it degrades cleanly if these are absent, and is NOT yet
+# wired into worker.py/reconcile.py, so adding these is inert until a later slice flips a gate.
+# IMPORTANT INSTALL CONSTRAINTS (verified in Slices 5/6):
+#   - verovio's linux-x86_64 (manylinux) wheel exists for Python >= 3.11 ONLY. The cx33
+#     worker venv MUST run Python >= 3.11 or pip falls back to building from source (needs
+#     swig, fails). The current prod worker venv does not yet meet this; the cx33 install +
+#     Python bump is a SEPARATE infra task (do not assume these import on the box yet).
+#   - cairosvg dlopens the system libcairo at runtime via cairocffi (pure-Python, no bundled
+#     cairo), so the host also needs the OS package libcairo2 (apt-get install libcairo2).
+#     Verovio has no PNG output and Pillow cannot read SVG, so cairosvg is required for SVG->PNG.
+verovio          # MusicXML -> SVG engraver; LGPL/GPL-3.0 (compatible with the GPL-3.0 Clarity dep)
+cairosvg         # SVG -> PNG rasterizer (needs system libcairo2)
