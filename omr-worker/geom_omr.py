@@ -435,6 +435,61 @@ def group_chords(
         return []
 
 
+# --- Barline detection (numpy) -----------------------------------------------------------
+
+def detect_barlines(gray, staves: List[List[float]]) -> List[List[float]]:
+    """Detect barline x-positions per grand-staff pair. Returns a list aligned with `staves`:
+    out[i] is the sorted barline x-centers for the grand staff staff i belongs to (the treble and
+    bass of a pair share one list). NEVER raises; returns empty lists on failure so the decode
+    falls back to even binning.
+
+    A barline is a near-vertical dark run spanning the FULL grand-staff height (treble top to bass
+    bottom). The discriminator vs a stem is the INTER-STAFF GAP: a stem lives inside one staff, but
+    a barline crosses the blank gap between the treble and bass staves, so requiring high dark
+    coverage over the whole pair height rejects stems, beams, and noteheads. Pairs staves as
+    (treble=2i, bass=2i+1), matching _clef_for_staff_index. A column is a barline if it is dark
+    over >70% of the pair height AND narrow (a few px); a wide dark run is a beam/blob, not a line.
+    """
+    out: List[List[float]] = [[] for _ in staves]
+    if not GEOM_AVAILABLE or gray is None or not staves:
+        return out
+    try:
+        h, w = gray.shape
+        mask = gray < 0.5
+        npairs = (len(staves) + 1) // 2
+        for pi in range(npairs):
+            ti, bi = 2 * pi, 2 * pi + 1
+            top = sorted(float(v) for v in staves[ti])
+            bot = sorted(float(v) for v in staves[bi]) if bi < len(staves) else top
+            y0 = max(0, int(round(top[0])))
+            y1 = min(h - 1, int(round(bot[-1])))
+            if y1 - y0 < 4:
+                continue
+            sp = _interline(top) or 1.0
+            band = mask[y0:y1 + 1, :]
+            cov = band.sum(axis=0) / float(band.shape[0])  # per-column dark fraction over the pair
+            barcol = cov > 0.7
+            xs: List[float] = []
+            maxw = max(2, int(round(0.6 * sp)))
+            x = 0
+            while x < w:
+                if barcol[x]:
+                    s = x
+                    while x < w and barcol[x]:
+                        x += 1
+                    if (x - s) <= maxw:  # thin -> a line; wide -> a beam/blob, skip
+                        xs.append((s + x - 1) / 2.0)
+                else:
+                    x += 1
+            xs.sort()
+            for idx in (ti, bi):
+                if idx < len(staves):
+                    out[idx] = xs
+        return out
+    except Exception:
+        return [[] for _ in staves]
+
+
 # --- Full pipeline -----------------------------------------------------------------------
 
 def _clef_for_staff_index(idx_in_system: int) -> str:
@@ -447,6 +502,7 @@ def _decode_staves_to_musicxml(
     staves: List[List[float]],
     per_staff_heads: List[List[Tuple[float, float]]],
     key_fifths: int = 0,
+    gray=None,
 ) -> Optional[bytes]:
     """Shared decode tail for BOTH notehead sources: the classical detect_noteheads and the
     trained YOLO detector in geom_detector. Takes the detected staff-line groups and the
@@ -463,46 +519,52 @@ def _decode_staves_to_musicxml(
     bass all lower-staff chords, in page order, then each hand's chord stream is split into
     measures.
 
-    Measure structure: this geometric pass does NOT read barlines yet, so on its own it would
-    place ALL of a staff's chords into a SINGLE measure per hand. The eval metric grades pitch
-    per (measure, staff) multiset and is rhythm-agnostic, but a single bucket would lump every
-    measure together; to keep the comparison fair against a multi-measure ground truth we
-    distribute chords across measures EVENLY in time order (best-effort, see _chords_to_measures).
-    The headline pitch/octave/chord numbers are what matter; exact bar placement is a later pass.
+    Measure structure: when a grayscale image is passed, detect_barlines finds the REAL bar lines
+    per grand-staff system and chords are placed into measures by their x-position (each chord
+    keeps its center x for this). Without it (gray=None) the legacy even binning is used (see
+    _segment_to_measures / _chords_to_measures). Durations are still a placeholder (every event
+    duration:1); reading note durations is a separate rung.
 
     Returns MusicXML bytes, or None if nothing usable was found. NEVER raises.
     """
     try:
-        treble_chords: List[List[Tuple[str, int, int]]] = []
-        bass_chords: List[List[Tuple[str, int, int]]] = []
+        barlines = detect_barlines(gray, staves) if gray is not None else [[] for _ in staves]
 
-        for idx, staff_lines in enumerate(staves):
-            sp = _interline(staff_lines)
+        def staff_chords(idx, clef):
+            # [(rep_x, [pitch...]), ...] for one staff, x-ordered. Keeping each chord's center x
+            # is what lets _segment_to_measures place it into the right bar.
+            if idx >= len(staves):
+                return []
+            sp = _interline(staves[idx])
             if sp is None:
-                continue
-            clef = _clef_for_staff_index(idx)
+                return []
             heads = per_staff_heads[idx] if idx < len(per_staff_heads) else []
-            if not heads:
-                continue
-            chords = group_chords(heads, sp)
-            for chord in chords:
-                pitches = []
-                for (_x, y) in chord:
-                    p = decode_pitch(y, staff_lines, clef, fifths=key_fifths)
+            out = []
+            for chord in group_chords(heads, sp):
+                pitches, xs = [], []
+                for (x, y) in chord:
+                    p = decode_pitch(y, staves[idx], clef, fifths=key_fifths)
                     if p is not None:
                         pitches.append(p)
-                if not pitches:
-                    continue
-                if clef == "G":
-                    treble_chords.append(pitches)
-                else:
-                    bass_chords.append(pitches)
+                        xs.append(x)
+                if pitches:
+                    out.append((sum(xs) / len(xs), pitches))
+            return out
 
-        if not treble_chords and not bass_chords:
-            return None
+        # Process each grand-staff PAIR (treble=2i, bass=2i+1) as one system, segmenting its chords
+        # into measures by that system's detected barlines; concatenate measures across systems.
+        measures: List[dict] = []
+        any_chord = False
+        for pi in range((len(staves) + 1) // 2):
+            ti, bi = 2 * pi, 2 * pi + 1
+            treble = staff_chords(ti, "G")
+            bass = staff_chords(bi, "F")
+            if treble or bass:
+                any_chord = True
+            blx = barlines[ti] if ti < len(barlines) else []
+            measures.extend(_segment_to_measures(treble, bass, blx))
 
-        measures = _chords_to_measures(treble_chords, bass_chords)
-        if not measures:
+        if not any_chord or not measures:
             return None
 
         data = {
@@ -539,7 +601,7 @@ def transcribe_geometric(image_path_or_gray, key_fifths: int = 0) -> Optional[by
         # Classical notehead source: detect per staff. _decode_staves_to_musicxml expects the
         # heads index-aligned with staves, so build one list per staff in page order.
         per_staff_heads = [detect_noteheads(gray, staff_lines) for staff_lines in staves]
-        return _decode_staves_to_musicxml(staves, per_staff_heads, key_fifths=key_fifths)
+        return _decode_staves_to_musicxml(staves, per_staff_heads, key_fifths=key_fifths, gray=gray)
     except Exception:
         return None
 
@@ -577,5 +639,37 @@ def _chords_to_measures(treble_chords, bass_chords) -> List[dict]:
                 continue
             measures.append({"staff1": s1, "staff2": s2})
         return measures
+    except Exception:
+        return []
+
+
+def _segment_to_measures(treble, bass, barlines) -> List[dict]:
+    """Place each hand's (rep_x, pitches) chords into measures. With >=2 barline x-positions a
+    measure is the half-open interval [barlines[k], barlines[k+1]) and each chord goes by its
+    rep_x -- REAL bars, replacing the rhythm-blind even binning. Without barlines (detection
+    declined) it falls back to _chords_to_measures (legacy 4-per-bar). NEVER raises."""
+    try:
+        edges = sorted(barlines) if barlines else []
+        if len(edges) >= 2:
+            nmeas = len(edges) - 1
+
+            def bucket(chords):
+                buckets = [[] for _ in range(nmeas)]
+                for (x, pitches) in chords:
+                    k = 0
+                    while k < nmeas and x >= edges[k + 1]:
+                        k += 1
+                    buckets[min(k, nmeas - 1)].append((x, pitches))
+                return buckets
+
+            tb, bb = bucket(treble), bucket(bass)
+            measures = []
+            for m in range(nmeas):
+                s1 = [_pitches_to_event(p) for (_x, p) in sorted(tb[m], key=lambda c: c[0])]
+                s2 = [_pitches_to_event(p) for (_x, p) in sorted(bb[m], key=lambda c: c[0])]
+                if s1 or s2:
+                    measures.append({"staff1": s1, "staff2": s2})
+            return measures
+        return _chords_to_measures([p for (_x, p) in treble], [p for (_x, p) in bass])
     except Exception:
         return []

@@ -137,7 +137,7 @@ def transcribe_with_detector(image, detector: NoteheadDetector,
         # Trained notehead source: detect globally, then assign each head to its staff so the
         # per-staff lists are index-aligned with staves for the shared decode tail.
         per_staff = _assign_to_staves(centers, staves)
-        return geom_omr._decode_staves_to_musicxml(staves, per_staff, key_fifths=key_fifths)
+        return geom_omr._decode_staves_to_musicxml(staves, per_staff, key_fifths=key_fifths, gray=gray)
     except Exception:
         return None
 

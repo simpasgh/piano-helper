@@ -277,3 +277,73 @@ class TestNeverRaises:
 
     def test_group_chords_bad_interline(self):
         assert geom_omr.group_chords([(1.0, 2.0)], 0) == []
+
+
+# --- Barlines -> real measures ------------------------------------------------------------
+
+
+def test_segment_to_measures_by_barlines():
+    # treble chords at x=10/60/110; barlines at 0,50,100,150 -> 3 measures, one note each, x-ordered.
+    treble = [(10.0, [("C", 0, 5)]), (60.0, [("D", 0, 5)]), (110.0, [("E", 0, 5)])]
+    measures = geom_omr._segment_to_measures(treble, [], [0.0, 50.0, 100.0, 150.0])
+    assert len(measures) == 3
+    steps = [mm["staff1"][0]["pitches"][0]["step"] for mm in measures]
+    assert steps == ["C", "D", "E"]
+
+
+def test_segment_to_measures_falls_back_without_barlines():
+    # no barlines -> legacy 4-per-bar binning (identical to _chords_to_measures).
+    treble = [(float(i), [("C", 0, 5)]) for i in range(8)]
+    assert geom_omr._segment_to_measures(treble, [], []) == \
+        geom_omr._chords_to_measures([[("C", 0, 5)]] * 8, [])
+
+
+def _draw_grand_staff_with_barlines(barline_xs, width=400, interline=16, top=40, gap=64):
+    """Two 5-line staves (a grand staff) with vertical barlines spanning the treble top line to
+    the bass bottom line. Returns (gray, treble_lines, bass_lines)."""
+    import numpy as np
+    from PIL import Image, ImageDraw
+    treble = [top + i * interline for i in range(5)]
+    bass = [treble[-1] + gap + i * interline for i in range(5)]
+    im = Image.new("L", (width, int(bass[-1] + 60)), 255)
+    d = ImageDraw.Draw(im)
+    for ly in treble + bass:
+        d.line([(0, ly), (width, ly)], fill=0, width=2)
+    for bx in barline_xs:
+        d.line([(bx, treble[0]), (bx, bass[-1])], fill=0, width=2)
+    gray = np.asarray(im, dtype=np.float32) / 255.0
+    return gray, [float(v) for v in treble], [float(v) for v in bass]
+
+
+@requires_geom
+def test_detect_barlines_finds_grand_staff_barlines():
+    import numpy as np
+    xs = [40, 140, 240, 340]  # 4 barlines -> 3 measures
+    gray, _treble, _bass = _draw_grand_staff_with_barlines(xs)
+    staves = geom_omr.detect_systems(gray)
+    assert len(staves) == 2
+    bl = geom_omr.detect_barlines(gray, staves)
+    assert bl[0] == bl[1]  # treble + bass of a pair share one barline list
+    assert len(bl[0]) == len(xs)
+    assert np.allclose(np.array(bl[0]), xs, atol=3.0)
+
+
+@requires_geom
+def test_detect_barlines_ignores_stems():
+    # a real barline spans both staves; a STEM lives in one staff and must NOT be detected.
+    import numpy as np
+    from PIL import Image, ImageDraw
+    interline, top, gap = 16, 40, 64
+    treble = [top + i * interline for i in range(5)]
+    bass = [treble[-1] + gap + i * interline for i in range(5)]
+    im = Image.new("L", (400, int(bass[-1] + 60)), 255)
+    d = ImageDraw.Draw(im)
+    for ly in treble + bass:
+        d.line([(0, ly), (400, ly)], fill=0, width=2)
+    d.line([(50, treble[0]), (50, bass[-1])], fill=0, width=2)      # barline: spans both staves
+    d.line([(200, treble[0]), (200, treble[-1])], fill=0, width=2)  # stem: treble only
+    gray = np.asarray(im, dtype=np.float32) / 255.0
+    staves = geom_omr.detect_systems(gray)
+    bl = geom_omr.detect_barlines(gray, staves)
+    assert any(abs(x - 50) <= 3 for x in bl[0])       # the barline IS found
+    assert not any(abs(x - 200) <= 3 for x in bl[0])  # the stem is NOT
