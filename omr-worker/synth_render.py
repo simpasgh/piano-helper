@@ -137,25 +137,47 @@ _MEASURE_JS = r"""
   const interline = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 10;
   const minDim = Math.max(2, interline * 0.15);  // ~a stem stroke width
 
+  const W = document.documentElement.clientWidth || 1e9;
+  const H = document.documentElement.clientHeight || 1e9;
   const symbols = [];
-  const push = (el, cls, code) => {
-    let [x, y, w, h] = rectOf(el);
+  const pushRect = (cls, code, x, y, w, h) => {
     if (w <= 0 && h <= 0) return;  // truly empty (e.g. verovio's empty <g class="accid"/>)
     if (w < minDim) { x -= (minDim - w) / 2; w = minDim; }   // pad a hairline stem to a real box
     if (h < minDim) { y -= (minDim - h) / 2; h = minDim; }
-    symbols.push({ cls, code, x, y, w, h });
+    if (x < 0) { w += x; x = 0; }   // clamp the box origin into the image (no off-page labels)
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > W) w = W - x;
+    if (y + h > H) h = H - y;
+    if (w > 0 && h > 0) symbols.push({ cls, code, x, y, w, h });
+  };
+  const pushEl = (el, cls, code) => { const [x, y, w, h] = rectOf(el); pushRect(cls, code, x, y, w, h); };
+  const unionRect = (els) => {  // bounding box of a set of elements (drops empties)
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    els.forEach((e) => {
+      const r = e.getBoundingClientRect();
+      if (r.width <= 0 && r.height <= 0) return;
+      x0 = Math.min(x0, r.x); y0 = Math.min(y0, r.y);
+      x1 = Math.max(x1, r.x + r.width); y1 = Math.max(y1, r.y + r.height);
+    });
+    return x0 === Infinity ? null : [x0, y0, x1 - x0, y1 - y0];
   };
   const groups = 'g.notehead, g.accid, g.keyAccid, g.flag, g.clef, g.rest, ' +
                  'g.stem, g.beam, g.dots, g.tie, g.octave';
   document.querySelectorAll(groups).forEach((el) => {
-    // A beamed run draws its notes' stems inside the beam group; skip a beam nested in another
-    // beam so a single beam stack is not counted twice.
-    if (el.classList.contains('beam') && el.parentElement &&
-        el.parentElement.closest('g.beam')) return;
-    push(el, (el.getAttribute('class') || '').split(' ')[0], codeOf(el));
+    if (el.classList.contains('beam')) {
+      // Verovio nests the beamed notes' <g> (heads + stems) INSIDE g.beam, so the group's own
+      // rect wraps the whole run. The beam itself is the direct <polygon>/<path> strokes; box
+      // those. Skip a beam nested in another beam so one stack is not counted twice.
+      if (el.parentElement && el.parentElement.closest('g.beam')) return;
+      const r = unionRect([...el.querySelectorAll(':scope > polygon, :scope > path')]);
+      if (r) pushRect('beam', null, r[0], r[1], r[2], r[3]);
+      else pushEl(el, 'beam', null);
+      return;
+    }
+    pushEl(el, (el.getAttribute('class') || '').split(' ')[0], codeOf(el));
   });
   // Time signature: one box PER digit (the <use> children of g.meterSig), not the whole stack.
-  document.querySelectorAll('g.meterSig use').forEach((u) => push(u, 'meterSig', null));
+  document.querySelectorAll('g.meterSig use').forEach((u) => pushEl(u, 'meterSig', null));
   const staves = [...document.querySelectorAll('g.staff')].map(s =>
     [...s.querySelectorAll(':scope > path')].map(rectOf)
   );

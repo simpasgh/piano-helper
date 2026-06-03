@@ -51,8 +51,8 @@ def _ds_category_to_class(name: str) -> Optional[str]:
         return "stem"
     if n == "beam":
         return "beam"
-    if nl.startswith("flag"):
-        return "flag"
+    if nl.startswith("flag") and len(n) > 4 and n[4].isdigit():
+        return "flag"   # flag8thUp..flag128thDown; excludes non-duration flags (e.g. flagInternal*)
     if n == "augmentationDot":
         return "dot"
     if "doublesharp" in nl:
@@ -167,6 +167,7 @@ def convert_split(json_path: str, root: str, out: str, split: str) -> Tuple[int,
         fn = im["filename"]
         W, H = float(im["width"]), float(im["height"])
         rows: List[str] = []
+        img_classes: List[int] = []
         for aid in im.get("ann_ids", []):
             ann = anns.get(str(aid)) or anns.get(aid)
             if not ann:
@@ -178,16 +179,18 @@ def convert_split(json_path: str, root: str, out: str, split: str) -> Tuple[int,
             if box is None:
                 continue
             rows.append(("%d %.6f %.6f %.6f %.6f") % ((cls,) + box))
-            per_class[CLASS_NAMES[cls]] = per_class.get(CLASS_NAMES[cls], 0) + 1
+            img_classes.append(cls)
         src = os.path.join(src_dir, fn)
         if not os.path.exists(src):
-            continue
+            continue  # tally + counts updated only for images we actually write (no over-count)
         stem = os.path.splitext(fn)[0]
         shutil.copy2(src, os.path.join(img_out, fn))
         with open(os.path.join(lbl_out, stem + ".txt"), "w", encoding="utf-8") as f:
             f.write("\n".join(rows) + ("\n" if rows else ""))
         n_img += 1
         n_box += len(rows)
+        for cls in img_classes:
+            per_class[CLASS_NAMES[cls]] = per_class.get(CLASS_NAMES[cls], 0) + 1
     return n_img, n_box, per_class
 
 
