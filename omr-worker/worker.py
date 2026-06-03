@@ -53,6 +53,7 @@ from reconcile import _clef_sign
 # llm_omr is the optional LLM-vision transcriber engine (stdlib-only; gated + key-required,
 # so importing it is free and it is inert until OMR_LLM + a provider key are configured).
 import llm_omr
+import fusion
 
 UPLOAD_PREFIX = "uploads/"
 RESULT_SUFFIX = ".musicxml"
@@ -154,6 +155,20 @@ def geom_primary():
     """True when OMR_GEOM_PRIMARY is truthy: geom runs FIRST (wins-first) instead of as the
     never-worse fallback. Only meaningful when geom_enabled() is also True. Mirrors geom_enabled."""
     raw = os.environ.get(GEOM_PRIMARY_ENV)
+    if raw is None:
+        return False
+    return raw.strip().lower() in ("1", "true")
+
+
+GEOM_FUSION_ENV = "OMR_GEOM_FUSION"
+
+
+def fusion_enabled():
+    """True when OMR_GEOM_FUSION is truthy: run geom AND Clarity and FUSE them (geom's pitch +
+    Clarity's rhythm, fusion.fuse) instead of geom wins-first. Beats either engine alone on the
+    real pieces. Only meaningful when geom_enabled() is also True; takes precedence over
+    geom_primary when both are set. Mirrors geom_enabled."""
+    raw = os.environ.get(GEOM_FUSION_ENV)
     if raw is None:
         return False
     return raw.strip().lower() in ("1", "true")
@@ -284,7 +299,13 @@ def rasterize_if_pdf(input_path, workdir):
     log("detected mime %r" % kind)
 
     if kind == "application/pdf":
-        out_prefix = os.path.join(workdir, "page")
+        # Render pages into a DEDICATED subdir, not the shared workdir: in the fusion path geom's
+        # rasterization runs concurrently with Clarity (cwd=workdir), and the page glob below scans
+        # a whole directory, so an unrelated `page-*.png` written into workdir by another engine
+        # could otherwise be stitched into geom's input. A private dir makes the glob immune.
+        raster_dir = os.path.join(workdir, "raster")
+        os.makedirs(raster_dir, exist_ok=True)
+        out_prefix = os.path.join(raster_dir, "page")
         # No -f/-l: render ALL pages. -r sets the DPI (the only quality lever we own).
         subprocess.run(
             ["pdftoppm", "-png", "-r", str(PDF_RASTER_DPI), input_path, out_prefix],
@@ -293,8 +314,8 @@ def rasterize_if_pdf(input_path, workdir):
         # pdftoppm appends -1, -01, or -001 depending on page-count width; sorting the
         # zero-padded names keeps pages in document order (page-001 < page-002 < ...).
         pages = sorted(
-            os.path.join(workdir, p)
-            for p in os.listdir(workdir)
+            os.path.join(raster_dir, p)
+            for p in os.listdir(raster_dir)
             if p.startswith("page-") and p.endswith(".png")
         )
         if not pages:
@@ -1212,10 +1233,38 @@ def process_job(client, bucket, job_id):
             with open(gp, "rb") as fh:
                 return fh.read()
 
+        # geom FUSION (OMR_GEOM + OMR_GEOM_FUSION): run geom and Clarity CONCURRENTLY and fuse
+        # geom's pitch with Clarity's rhythm (fusion.fuse), which beats either engine alone on the
+        # real pieces. Both engines are subprocesses, so the ThreadPoolExecutor overlaps them and the
+        # wall-clock is ~max(geom, Clarity). Clarity reads the PDF directly and is PDF-only, so for a
+        # non-PDF upload this degrades to geom alone (fuse returns geom unchanged with no Clarity).
+        # Takes precedence over geom_primary.
+        if geom_enabled() and fusion_enabled():
+            geom_bytes, clarity_bytes = None, None
+            if is_pdf_input:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                    gf = pool.submit(_geom_body)
+                    cf = pool.submit(lambda: run_clarity(input_path, workdir))
+                    geom_bytes = gf.result()
+                    clarity_path = cf.result()
+                if clarity_path:
+                    try:
+                        with open(clarity_path, "rb") as fh:
+                            clarity_bytes = fh.read()
+                    except Exception as err:
+                        log("fusion: clarity read failed for %s (%r)" % (job_id, err))
+            else:
+                geom_bytes = _geom_body()
+            fused = fusion.fuse(geom_bytes, clarity_bytes)
+            if fused:
+                body, source = fused, "fusion"
+                log("%s recognized via fusion (geom pitch + clarity rhythm)" % job_id)
+
         # geom PRIMARY (OMR_GEOM + OMR_GEOM_PRIMARY): runs FIRST and wins if it returns a result,
         # ahead of the LLM/ensemble. Override behaviour the user opted into; remove OMR_GEOM_PRIMARY
-        # for never-worse fallback, or OMR_GEOM to disable geom.
-        if geom_enabled() and geom_primary():
+        # for never-worse fallback, or OMR_GEOM to disable geom. Skipped if fusion already produced
+        # a result.
+        if body is None and geom_enabled() and geom_primary():
             geom_bytes = _geom_body()
             if geom_bytes:
                 body, source = geom_bytes, "geom"

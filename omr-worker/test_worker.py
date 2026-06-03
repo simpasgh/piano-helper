@@ -828,6 +828,106 @@ def test_geom_primary_declines_falls_through_to_ensemble(tmp_path, monkeypatch):
     assert ran["ensemble"] is True
 
 
+def test_fusion_enabled_truthy_parsing(monkeypatch):
+    monkeypatch.delenv("OMR_GEOM_FUSION", raising=False)
+    assert worker.fusion_enabled() is False
+    for on in ("1", "true", "TRUE", " True "):
+        monkeypatch.setenv("OMR_GEOM_FUSION", on)
+        assert worker.fusion_enabled() is True, on
+    for off in ("0", "false", "", "garbage"):
+        monkeypatch.setenv("OMR_GEOM_FUSION", off)
+        assert worker.fusion_enabled() is False, off
+
+
+def test_geom_fusion_fuses_geom_and_clarity(tmp_path, monkeypatch):
+    # OMR_GEOM + OMR_GEOM_FUSION on a PDF: geom + Clarity both run, fusion.fuse combines them, and
+    # NO later engine runs.
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    geom_out = tmp_path / "geom.musicxml"; geom_out.write_text("<score>geom</score>")
+    clar_out = tmp_path / "clarity.musicxml"; clar_out.write_text("<score>clarity</score>")
+    monkeypatch.setattr(worker, "rasterize_if_pdf", lambda p, w: ("/fake/stitched.png", True))
+    monkeypatch.setattr(worker, "run_geom", lambda *a, **k: str(geom_out))
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clar_out))
+    seen = {}
+
+    def fake_fuse(g, c):
+        seen["g"], seen["c"] = g, c
+        return b"<score>fused</score>"
+
+    monkeypatch.setattr(worker.fusion, "fuse", fake_fuse)
+
+    def must_not_run(*a, **k):
+        raise AssertionError("no later engine runs when fusion produced a result")
+
+    monkeypatch.setattr(worker, "_select_ensemble", must_not_run)
+    monkeypatch.setattr(worker, "_select_legacy", must_not_run)
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"%PDF-1.4 fake")
+    _drive_process_job(monkeypatch, client, is_pdf=True)
+    assert client.put_body == b"<score>fused</score>"
+    assert seen["g"] == b"<score>geom</score>"      # geom bytes handed to the fusion
+    assert seen["c"] == b"<score>clarity</score>"   # clarity bytes handed to the fusion
+
+
+def test_geom_fusion_non_pdf_uses_geom_alone(tmp_path, monkeypatch):
+    # Clarity is PDF-only; on a non-PDF upload the fusion runs geom alone (clarity bytes None).
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    geom_out = tmp_path / "geom.musicxml"; geom_out.write_text("<score>geom</score>")
+    monkeypatch.setattr(worker, "run_geom", lambda *a, **k: str(geom_out))
+
+    def clarity_must_not_run(*a, **k):
+        raise AssertionError("clarity is PDF-only; it must not run for a non-PDF upload")
+
+    monkeypatch.setattr(worker, "run_clarity", clarity_must_not_run)
+    seen = {}
+
+    def fake_fuse(g, c):
+        seen["g"], seen["c"] = g, c
+        return g  # fuse(geom, None) -> geom unchanged
+
+    monkeypatch.setattr(worker.fusion, "fuse", fake_fuse)
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"\x89PNG fake")
+    _drive_process_job(monkeypatch, client, is_pdf=False)
+    assert client.put_body == b"<score>geom</score>"
+    assert seen["c"] is None  # no clarity for non-PDF
+
+
+def test_geom_fusion_takes_precedence_over_primary(tmp_path, monkeypatch):
+    # With both OMR_GEOM_FUSION and OMR_GEOM_PRIMARY set, fusion runs and geom-primary does not
+    # re-run geom or override the fused result (geom runs exactly once, for the fusion).
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    monkeypatch.setenv("OMR_GEOM_PRIMARY", "1")
+    geom_out = tmp_path / "geom.musicxml"; geom_out.write_text("<score>geom</score>")
+    calls = {"geom": 0}
+
+    def counting_geom(*a, **k):
+        calls["geom"] += 1
+        return str(geom_out)
+
+    monkeypatch.setattr(worker, "rasterize_if_pdf", lambda p, w: ("/fake/s.png", True))
+    monkeypatch.setattr(worker, "run_geom", counting_geom)
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: None)
+    monkeypatch.setattr(worker.fusion, "fuse", lambda g, c: b"<score>fused</score>")
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"%PDF-1.4 fake")
+    _drive_process_job(monkeypatch, client, is_pdf=True)
+    assert client.put_body == b"<score>fused</score>"
+    assert calls["geom"] == 1  # geom ran once (for the fusion), not again for primary
+
+
 def test_llm_falls_back_to_engines_when_it_returns_none(tmp_path, monkeypatch):
     # If the LLM returns None (any failure), the worker falls back to the existing engines.
     monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: True)
