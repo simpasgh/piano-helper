@@ -263,6 +263,32 @@ Repo **secrets**: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`.
 
 ### OMR (issue #5) setup status
 
+- **2026-06-04 - PROGRESSIVE OMR shipped, default OFF (two env flags).** The worker can now write the
+  result key MULTIPLE times per job so the browser renders the first notes while the rest computes.
+  Gated; prod is byte-identical until a flag is flipped on the box:
+  - `OMR_PROGRESSIVE=1` (fast-then-refine): on the fusion path, publish geom's pitch-only result
+    (~5s, placeholder rhythm) as an `omr-status=partial` write, then the fused geom+Clarity result as
+    the complete (~100s). The browser shows ALL the notes in ~5s; rhythm refines in place.
+  - `OMR_PROGRESSIVE_PAGES=1` (per-page, needs `OMR_PROGRESSIVE`): for a multi-page PDF, transcribe +
+    fuse each page independently and append in document order, publishing after each page. Falls back
+    to fast-then-refine for single-page / non-PDF / when `pdfseparate` is unavailable.
+  - NEW DEP: per-page uses poppler's `pdfseparate` (same `poppler-utils` package as the existing
+    `pdftoppm`, so already on the cx33). If missing, per-page declines to whole-file fusion.
+  - IDEMPOTENCY: the result write now tags R2 object metadata `omr-status=complete|partial`;
+    `result_is_complete` (was `result_exists`) skips a job only when a COMPLETE result exists, so a
+    crash mid-progressive (partial written, upload not yet deleted) REPROCESSES instead of stranding at
+    the partial. The upload is deleted ONLY after the complete write. Legacy/unmarked results count as
+    complete.
+  - ROLLOUT: back up `/etc/piano-helper-omr.env`, append `OMR_PROGRESSIVE=1`, `systemctl restart
+    omr-worker.service` (same procedure as the ensemble flip). Validate fast-then-refine on a real
+    multi-system upload FIRST, then add `OMR_PROGRESSIVE_PAGES=1` (per-page total wall-clock depends on
+    Clarity's per-page model-reload cost, which is UNMEASURED on the box; it trades total time for
+    time-to-first-content). Rollback = remove the line(s) + restart.
+  - CLIENT: backward-compatible. `src/omr.ts pollOmrResult` gained `onPartial`; with no partials it
+    behaves exactly as before. The result endpoint (`functions/api/omr/result.ts`) is UNCHANGED (200
+    for partial and complete alike; the marker rides inside the MusicXML + object metadata, neither of
+    which the endpoint inspects).
+
 Architecture as of 2026-05-30: the worker polls R2; no Actions, no PAT.
 
 - [x] R2 bucket `piano-helper-omr` created (`wrangler r2 bucket create`).
