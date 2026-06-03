@@ -494,14 +494,19 @@ _JOB_ID = "12345678-1234-1234-1234-123456789abc"
 
 class _FakeClient:
     """Minimal S3 stand-in for driving process_job end-to-end in-process: download_file writes
-    the canned input bytes, put_object captures the written body, delete_object is a no-op.
-    result_exists is monkeypatched to False so the job always processes."""
+    the canned input bytes, put_object captures every written body + its metadata, delete_object is
+    a no-op. result_is_complete is monkeypatched to False so the job always processes.
+
+    `put_body` is the LAST body written (the complete result for almost every test). `puts` records
+    EVERY write as {"body", "metadata"} so the progressive tests can assert the partial-then-complete
+    sequence and the omr-status metadata."""
 
     def __init__(self, input_bytes=b"", is_pdf=False, metadata=None):
         self._input_bytes = input_bytes
         self._is_pdf = is_pdf
         self._metadata = metadata or {}
         self.put_body = None
+        self.puts = []
 
     def download_file(self, Bucket, Key, dest):
         with open(dest, "wb") as fh:
@@ -510,17 +515,18 @@ class _FakeClient:
     def head_object(self, Bucket, Key):
         return {"Metadata": dict(self._metadata)}
 
-    def put_object(self, Bucket, Key, Body, ContentType):
+    def put_object(self, Bucket, Key, Body, ContentType, Metadata=None):
         self.put_body = Body
+        self.puts.append({"body": Body, "metadata": dict(Metadata or {})})
 
     def delete_object(self, Bucket, Key):
         pass
 
 
 def _drive_process_job(monkeypatch, client, is_pdf=True):
-    """Run process_job against a _FakeClient, stubbing result_exists (no real head_object) and
+    """Run process_job against a _FakeClient, stubbing result_is_complete (no real head_object) and
     sniff_mime (no real `file` binary). is_pdf controls the sniffed mime."""
-    monkeypatch.setattr(worker, "result_exists", lambda *a, **k: False)
+    monkeypatch.setattr(worker, "result_is_complete", lambda *a, **k: False)
     monkeypatch.setattr(
         worker, "sniff_mime", lambda p: "application/pdf" if is_pdf else "image/png"
     )
@@ -1546,3 +1552,345 @@ def test_normalize_ties_drops_cross_pitch_false_positive():
     assert _ties_in(out) == [], "cross-pitch start and stop both removed"
     assert _tied_in(out) == []
     assert len(ET.fromstring(out).findall(".//note")) == 2, "both notes survive"
+
+
+# --- PROGRESSIVE publishing (OMR_PROGRESSIVE / OMR_PROGRESSIVE_PAGES) ----------------------------
+# Fast-then-refine + per-page streaming wired into process_job, plus the partial-aware idempotency
+# gate. The pure stamp/append helpers are covered in test_progressive.py; these test the WIRING:
+# which bodies get written, in what order, and with what omr-status metadata.
+import llm_omr as _pg_llm  # noqa: E402
+
+
+def _pg_xml(steps, octave=5):
+    """A MusicXML fixture with one single-quarter-note measure per step letter, built with the tested
+    llm_omr builder so it matches the real geom/fusion output shape (1 part, 2 staves)."""
+    measures = [
+        {"staff1": [{"duration": 4, "pitches": [{"step": s, "octave": octave}]}], "staff2": []}
+        for s in steps
+    ]
+    return _pg_llm.score_json_to_musicxml(
+        {"divisions": 4, "time": {"beats": 4, "beat_type": 4}, "measures": measures})
+
+
+def _mcount(body):
+    """Number of <measure> elements in a result body (its size, for asserting a growing score)."""
+    import xml.etree.ElementTree as ET
+
+    return len(ET.fromstring(body).findall("part/measure"))
+
+
+class _HeadClient:
+    """Stand-in exposing only head_object, for result_is_complete: returns the given metadata, or
+    raises a 404 ClientError when missing=True."""
+
+    def __init__(self, metadata=None, missing=False):
+        self._metadata = metadata
+        self._missing = missing
+
+    def head_object(self, Bucket, Key):
+        if self._missing:
+            err = worker.ClientError()
+            err.response = {"Error": {"Code": "404"}}
+            raise err
+        return {"Metadata": dict(self._metadata or {})}
+
+
+def test_result_is_complete_partial_metadata_reprocesses():
+    # A partial result (omr-status=partial) must NOT satisfy the gate: the upload is still present
+    # and the job has to finish, so process_job reprocesses instead of stranding at the partial.
+    assert worker.result_is_complete(_HeadClient(metadata={"omr-status": "partial"}), "b", _JOB_ID) is False
+
+
+def test_result_is_complete_complete_metadata_skips():
+    assert worker.result_is_complete(_HeadClient(metadata={"omr-status": "complete"}), "b", _JOB_ID) is True
+
+
+def test_result_is_complete_legacy_unmarked_counts_as_complete():
+    # A pre-progressive result has no metadata; it was always a finished write, so it counts complete.
+    assert worker.result_is_complete(_HeadClient(metadata={}), "b", _JOB_ID) is True
+
+
+def test_result_is_complete_missing_result_is_false():
+    assert worker.result_is_complete(_HeadClient(missing=True), "b", _JOB_ID) is False
+
+
+def test_result_is_complete_reads_status_case_insensitively():
+    # The crash-recovery guarantee (a partial never satisfies the gate) must survive the R2 endpoint
+    # returning the metadata key in a different case than boto3's usual lowercase.
+    assert worker.result_is_complete(_HeadClient(metadata={"Omr-Status": "partial"}), "b", _JOB_ID) is False
+    assert worker.result_is_complete(_HeadClient(metadata={"OMR-STATUS": "complete"}), "b", _JOB_ID) is True
+
+
+def test_progressive_skips_writing_an_unmarked_partial(tmp_path, monkeypatch):
+    # If stamp_partial ever failed to add the in-body marker (its never-raise fallback returns the
+    # input unstamped), the partial MUST NOT be written to the result key: an unmarked body reads as a
+    # COMPLETE result client-side and would stop polling early. So only the complete write happens.
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    monkeypatch.setenv("OMR_PROGRESSIVE", "1")
+    geom_out = tmp_path / "geom.musicxml"
+    geom_out.write_bytes(_pg_xml(["C"]))
+    clar_out = tmp_path / "clarity.musicxml"
+    clar_out.write_text("<score>clarity</score>")
+    monkeypatch.setattr(worker, "rasterize_if_pdf", lambda p, w: ("/fake.png", True))
+    monkeypatch.setattr(worker, "run_geom", lambda *a, **k: str(geom_out))
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clar_out))
+    monkeypatch.setattr(worker.fusion, "fuse", lambda g, c: b"<score>fused</score>")
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+    # Simulate stamping failing to mark the body (returns it unstamped).
+    monkeypatch.setattr(worker.progressive, "stamp_partial", lambda b, v: b)
+
+    client = _FakeClient(input_bytes=b"%PDF-1.4 fake")
+    _drive_process_job(monkeypatch, client, is_pdf=True)
+    assert len(client.puts) == 1, "the unmarked partial was skipped; only the complete write happened"
+    assert client.puts[0]["metadata"]["omr-status"] == "complete"
+    assert client.puts[0]["body"] == b"<score>fused</score>"
+
+
+def test_progressive_fusion_publishes_geom_partial_then_fused_complete(tmp_path, monkeypatch):
+    # FAST-THEN-REFINE: OMR_GEOM + OMR_GEOM_FUSION + OMR_PROGRESSIVE on a PDF publishes geom's
+    # pitch-only result as a PARTIAL (the browser shows all notes in ~5s), then the fused result as
+    # the COMPLETE. Two writes, with the right omr-status metadata and the partial's in-body marker.
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    monkeypatch.setenv("OMR_PROGRESSIVE", "1")
+    geom_out = tmp_path / "geom.musicxml"
+    geom_out.write_bytes(_pg_xml(["C", "D"]))
+    clar_out = tmp_path / "clarity.musicxml"
+    clar_out.write_text("<score>clarity</score>")
+    monkeypatch.setattr(worker, "rasterize_if_pdf", lambda p, w: ("/fake.png", True))
+    monkeypatch.setattr(worker, "run_geom", lambda *a, **k: str(geom_out))
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clar_out))
+    monkeypatch.setattr(worker.fusion, "fuse", lambda g, c: b"<score>fused</score>")
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"%PDF-1.4 fake")
+    _drive_process_job(monkeypatch, client, is_pdf=True)
+
+    assert len(client.puts) == 2, "one partial then one complete"
+    partial, complete = client.puts[0], client.puts[1]
+    assert partial["metadata"]["omr-status"] == "partial"
+    assert b'name="omr-status">partial' in partial["body"]   # marker the browser reads
+    assert b'name="omr-version">1' in partial["body"]
+    assert complete["metadata"]["omr-status"] == "complete"
+    assert complete["body"] == b"<score>fused</score>"
+
+
+def test_progressive_non_pdf_publishes_no_partial(tmp_path, monkeypatch):
+    # A non-PDF has no Clarity refine, so there is nothing to refine TO: the geom result is the
+    # final answer. We publish it once (complete) with no redundant partial.
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    monkeypatch.setenv("OMR_PROGRESSIVE", "1")
+    geom_out = tmp_path / "geom.musicxml"
+    geom_out.write_bytes(_pg_xml(["C"]))
+    monkeypatch.setattr(worker, "run_geom", lambda *a, **k: str(geom_out))
+
+    def clarity_must_not_run(*a, **k):
+        raise AssertionError("clarity is PDF-only; it must not run for a non-PDF upload")
+
+    monkeypatch.setattr(worker, "run_clarity", clarity_must_not_run)
+    monkeypatch.setattr(worker.fusion, "fuse", lambda g, c: g)  # fuse(geom, None) -> geom
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"\x89PNG fake")
+    _drive_process_job(monkeypatch, client, is_pdf=False)
+    assert len(client.puts) == 1, "no refine on a non-PDF, so no partial"
+    assert client.puts[0]["metadata"]["omr-status"] == "complete"
+
+
+def test_progressive_off_fusion_writes_once_complete(tmp_path, monkeypatch):
+    # Progressive OFF (prod default): the fusion path writes EXACTLY ONCE (the complete result), no
+    # partial, so behavior is byte-identical to before the progressive feature.
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    monkeypatch.delenv("OMR_PROGRESSIVE", raising=False)
+    geom_out = tmp_path / "geom.musicxml"
+    geom_out.write_text("<score>geom</score>")
+    clar_out = tmp_path / "clarity.musicxml"
+    clar_out.write_text("<score>clarity</score>")
+    monkeypatch.setattr(worker, "rasterize_if_pdf", lambda p, w: ("/fake.png", True))
+    monkeypatch.setattr(worker, "run_geom", lambda *a, **k: str(geom_out))
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clar_out))
+    monkeypatch.setattr(worker.fusion, "fuse", lambda g, c: b"<score>fused</score>")
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"%PDF-1.4 fake")
+    _drive_process_job(monkeypatch, client, is_pdf=True)
+    assert len(client.puts) == 1, "progressive off => single complete write"
+    assert client.puts[0]["metadata"]["omr-status"] == "complete"
+    assert client.put_body == b"<score>fused</score>"
+
+
+def test_fusion_per_page_streams_and_accumulates(tmp_path, monkeypatch):
+    # PER-PAGE: three pages, each transcribed independently and APPENDED. Pages 1 and 2 are published
+    # as partials (a growing score); page 3 (the last) is returned as the complete body. The measure
+    # count grows 1 -> 2 -> 3 as pages accumulate.
+    monkeypatch.setattr(worker, "split_pdf_pages", lambda i, w: ["p1", "p2", "p3"])
+    pages = {"p1": _pg_xml(["C"]), "p2": _pg_xml(["D"]), "p3": _pg_xml(["E"])}
+    monkeypatch.setattr(worker, "_transcribe_one_page", lambda pdf, d: pages[pdf])
+
+    published = []
+    final = worker._fusion_per_page("job", "in.pdf", str(tmp_path), lambda b: published.append(b))
+
+    assert len(published) == 2, "pages 1 and 2 publish partials; page 3 is the returned complete"
+    assert _mcount(published[0]) == 1
+    assert _mcount(published[1]) == 2
+    assert _mcount(final) == 3
+
+
+def test_fusion_per_page_single_page_returns_none(tmp_path, monkeypatch):
+    # A single-page PDF has nothing to stream, so per-page declines (returns None) and never even
+    # transcribes; the caller falls back to whole-file fusion (which is concurrent and simpler).
+    monkeypatch.setattr(worker, "split_pdf_pages", lambda i, w: ["only.pdf"])
+    transcribed = []
+    monkeypatch.setattr(worker, "_transcribe_one_page", lambda *a: transcribed.append(1))
+    result = worker._fusion_per_page("job", "in.pdf", str(tmp_path), lambda b: None)
+    assert result is None
+    assert transcribed == []
+
+
+def test_fusion_per_page_skips_pages_with_no_content(tmp_path, monkeypatch):
+    # A page that recognizes nothing is skipped (no empty publish), but the run continues: page 1 is
+    # a partial, page 2 contributes nothing, page 3 completes with 2 measures total.
+    monkeypatch.setattr(worker, "split_pdf_pages", lambda i, w: ["p1", "p2", "p3"])
+    pages = {"p1": _pg_xml(["C"]), "p2": None, "p3": _pg_xml(["E"])}
+    monkeypatch.setattr(worker, "_transcribe_one_page", lambda pdf, d: pages[pdf])
+    published = []
+    final = worker._fusion_per_page("job", "in.pdf", str(tmp_path), lambda b: published.append(b))
+    assert len(published) == 1
+    assert _mcount(published[0]) == 1
+    assert _mcount(final) == 2
+
+
+def test_fusion_per_page_all_pages_empty_returns_none(tmp_path, monkeypatch):
+    monkeypatch.setattr(worker, "split_pdf_pages", lambda i, w: ["p1", "p2"])
+    monkeypatch.setattr(worker, "_transcribe_one_page", lambda *a: None)
+    published = []
+    result = worker._fusion_per_page("job", "in.pdf", str(tmp_path), lambda b: published.append(b))
+    assert result is None and published == []
+
+
+def test_transcribe_one_page_fuses_geom_and_clarity(tmp_path, monkeypatch):
+    monkeypatch.setattr(worker, "_geom_page_body", lambda pdf, d: b"<geom/>")
+    clar = tmp_path / "c.musicxml"
+    clar.write_bytes(b"<clar/>")
+    monkeypatch.setattr(worker, "run_clarity", lambda pdf, d, **k: str(clar))
+    seen = {}
+    monkeypatch.setattr(worker.fusion, "fuse", lambda g, c: seen.update(g=g, c=c) or b"<fused/>")
+    out = worker._transcribe_one_page("p.pdf", str(tmp_path))
+    assert out == b"<fused/>"
+    assert seen["g"] == b"<geom/>" and seen["c"] == b"<clar/>"
+
+
+def test_transcribe_one_page_clarity_fail_degrades_to_geom(tmp_path, monkeypatch):
+    # A page whose Clarity failed must never drop below the geom (placeholder-rhythm) layer.
+    monkeypatch.setattr(worker, "_geom_page_body", lambda pdf, d: b"<geom/>")
+    monkeypatch.setattr(worker, "run_clarity", lambda pdf, d, **k: None)
+    monkeypatch.setattr(worker.fusion, "fuse", lambda g, c: g if c is None else b"<fused/>")
+    out = worker._transcribe_one_page("p.pdf", str(tmp_path))
+    assert out == b"<geom/>"
+
+
+def test_transcribe_one_page_both_fail_returns_none(tmp_path, monkeypatch):
+    monkeypatch.setattr(worker, "_geom_page_body", lambda pdf, d: None)
+    monkeypatch.setattr(worker, "run_clarity", lambda pdf, d, **k: None)
+
+    def fuse_must_not_run(g, c):
+        raise AssertionError("nothing recognized on the page; fuse must not run")
+
+    monkeypatch.setattr(worker.fusion, "fuse", fuse_must_not_run)
+    assert worker._transcribe_one_page("p.pdf", str(tmp_path)) is None
+
+
+def test_transcribe_one_page_collapses_two_part_clarity_to_grand_staff(tmp_path, monkeypatch):
+    # A clarity-only page (geom failed) returns Clarity's RAW output, which can be 2 parts. Per-page
+    # append_measures concatenates the first <part>, so the page must collapse to ONE grand-staff part
+    # first or the bass staff is silently dropped. Uses the REAL fusion.fuse + merge_to_grand_staff.
+    two_part = (
+        b'<?xml version="1.0"?><score-partwise version="4.0">'
+        b'<part-list><score-part id="P1"><part-name>RH</part-name></score-part>'
+        b'<score-part id="P2"><part-name>LH</part-name></score-part></part-list>'
+        b'<part id="P1"><measure number="1"><attributes><divisions>1</divisions>'
+        b'<key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time>'
+        b'<clef><sign>G</sign><line>2</line></clef></attributes>'
+        b'<note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration>'
+        b'<type>whole</type></note></measure></part>'
+        b'<part id="P2"><measure number="1"><attributes>'
+        b'<clef><sign>F</sign><line>4</line></clef></attributes>'
+        b'<note><pitch><step>C</step><octave>3</octave></pitch><duration>4</duration>'
+        b'<type>whole</type></note></measure></part></score-partwise>'
+    )
+    clar = tmp_path / "c.musicxml"
+    clar.write_bytes(two_part)
+    monkeypatch.setattr(worker, "_geom_page_body", lambda pdf, d: None)        # geom failed
+    monkeypatch.setattr(worker, "run_clarity", lambda pdf, d, **k: str(clar))  # clarity only
+    out = worker._transcribe_one_page("p.pdf", str(tmp_path))
+    import xml.etree.ElementTree as ET
+
+    root = ET.fromstring(out)
+    assert len(root.findall("part")) == 1, "collapsed to one grand-staff part"
+    # Both the treble C5 and the bass C3 survive (the bass staff is not dropped on append).
+    octaves = sorted(n.findtext("octave") for n in root.findall(".//pitch"))
+    assert octaves == ["3", "5"], octaves
+
+
+def test_split_pdf_pages_missing_binary_returns_empty(tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise FileNotFoundError("pdfseparate not installed")
+
+    monkeypatch.setattr(worker.subprocess, "run", boom)
+    assert worker.split_pdf_pages("in.pdf", str(tmp_path)) == []
+
+
+def test_split_pdf_pages_sorts_numerically_not_lexically(tmp_path, monkeypatch):
+    # pdfseparate's %d is not zero-padded, so page-10 must sort AFTER page-2, not before it.
+    out_dir = tmp_path / "pages"
+
+    def fake_run(cmd, check=True):
+        out_dir.mkdir(exist_ok=True)
+        for n in (1, 2, 10):
+            (out_dir / ("page-%d.pdf" % n)).write_text("x")
+
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+    pages = worker.split_pdf_pages("in.pdf", str(tmp_path))
+    assert [worker._page_index(p) for p in pages] == [1, 2, 10]
+
+
+def test_progressive_pages_wired_into_process_job(tmp_path, monkeypatch):
+    # WIRING: OMR_PROGRESSIVE + OMR_PROGRESSIVE_PAGES routes a multi-page PDF through _fusion_per_page,
+    # whose partials plus the returned complete are the three writes. The whole-file geom path must
+    # not run when per-page produced a result.
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    monkeypatch.setenv("OMR_PROGRESSIVE", "1")
+    monkeypatch.setenv("OMR_PROGRESSIVE_PAGES", "1")
+
+    def fake_per_page(job_id, input_path, workdir, publish_partial):
+        publish_partial(_pg_xml(["C"]))          # page 1 partial
+        publish_partial(_pg_xml(["C", "D"]))     # page 2 partial
+        return _pg_xml(["C", "D", "E"])          # page 3 -> complete
+
+    monkeypatch.setattr(worker, "_fusion_per_page", fake_per_page)
+
+    def whole_file_geom_must_not_run(*a, **k):
+        raise AssertionError("whole-file fusion must not run when per-page produced a result")
+
+    monkeypatch.setattr(worker, "run_geom", whole_file_geom_must_not_run)
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"%PDF-1.4 fake")
+    _drive_process_job(monkeypatch, client, is_pdf=True)
+
+    assert [p["metadata"]["omr-status"] for p in client.puts] == ["partial", "partial", "complete"]
+    assert _mcount(client.puts[2]["body"]) == 3

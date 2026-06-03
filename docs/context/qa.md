@@ -4,6 +4,19 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-06-04: PROGRESSIVE OMR merged (default OFF; `OMR_PROGRESSIVE` fast-then-refine, +
+  `OMR_PROGRESSIVE_PAGES` per-page). Covered by unit + worker tests and a browser end-to-end with a
+  MOCKED backend: a partial result hides the scan overlay, renders the notes, enables the controls, and
+  shows "Showing notes. Refining the rest..."; the complete then upgrades in place (status returns to
+  the sheet name + count); zero console errors. **REMAINING LIVE QA (do when the flag is flipped on the
+  box):** upload a real multi-system PDF through prod `/api/omr` with `OMR_PROGRESSIVE=1` and confirm
+  (1) the notes appear well before the full result (~5s vs ~100s), (2) the score upgrades in place when
+  the rhythm arrives WITHOUT yanking the playhead back to 0 if the user is mid-play, (3) the failure
+  sentinel still shows the friendly "Could not recognize any notes" error when geom finds nothing (no
+  partial is published in that case, so the overlay stays up until the failure). Then flip
+  `OMR_PROGRESSIVE_PAGES=1`, confirm measures appear page by page, and time the per-page total
+  wall-clock against whole-file fusion (the per-page model-reload cost is unmeasured).
+
 - 2026-06-03: ENSEMBLE OMR + REFEREE ENABLED in prod (#160) with a per-job "Fast scan" opt-out.
   Live smoke via real uploads through prod `/api/omr` (icarus.pdf): DEFAULT job returned a real
   score (200, not the failure sentinel) in ~7min, worker log `recognized via ensemble output

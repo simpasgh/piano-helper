@@ -276,12 +276,18 @@ describe("scan overlay markup + CSS (issue #86)", () => {
   });
 
   it("gates scanSheet's finally on the job generation so a stale settle can't stomp a newer job (issue #93)", () => {
+    // Window covers the whole function: progressive scanSheet polls long after the overlay is gone
+    // (it streams partials), so it grew past the old 1200-char slice; the finally generation gate
+    // now sits near the end.
     const scanFn = main.slice(
       main.indexOf("async function scanSheet"),
-      main.indexOf("async function scanSheet") + 1200,
+      main.indexOf("async function scanSheet") + 3300,
     );
     expect(scanFn).toMatch(/const\s+generation\s*=\s*\+\+jobGeneration/);
     expect(scanFn).toMatch(/if\s*\(\s*generation\s*===\s*jobGeneration\s*\)/);
+    // The progressive stream must also stop a superseded job from rendering (the controls re-enable
+    // on the first partial, so a stale poll could otherwise keep upgrading the new job's score).
+    expect(scanFn).toMatch(/generation\s*!==\s*jobGeneration/);
   });
 
   it("keeps the overlay copy free of em and en dashes", () => {
