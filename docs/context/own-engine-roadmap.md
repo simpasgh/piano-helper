@@ -4,6 +4,39 @@ Self-contained plan so any session (esp. the one on the GPU PC) can pick up and 
 without the prior machine's local memory. Newest status at the top. NO em dashes in generated
 text (project rule). Ship every code change through the gated flow (see "Constraints" below).
 
+## STATUS: rhythm REPAIR shipped (pitch-safe bar completion); note-stretching measured + REJECTED (2026-06-04)
+
+Shipped `omr-worker/rhythm_repair.py`, the FINAL worker post-transform (runs after
+`merge_to_grand_staff` + `normalize_ties` in process_job). It makes each measure's per-staff
+durations sum to a CORROBORATED time signature, but PITCH-SAFELY only: it grows/shrinks/removes a
+rest, or pads a short rest-free bar with a trailing rest. It NEVER changes a pitched note's duration
+and never adds/deletes a note, so it is mathematically incapable of lowering note_dur_f1 /
+duration_acc (the scorer ignores rests). Pure stdlib, never-raise.
+
+MEASURED DEAD END (do NOT re-add naively): the obvious "disambiguate with the time signature" idea
+-- when a bar is short by one note's worth of a simple misread (eighth-vs-quarter, a missed dot),
+stretch THAT note -- was built (unique-culprit-only) and REGRESSED the real pieces (fusion
+note_dur_f1 tctab 0.875 -> 0.863). A per-edit diagnostic vs ground truth (`repair_diag.py` on the
+box) showed 7 of 9 such edits stretched a note that was ALREADY CORRECT: the bar was short because a
+note was DROPPED, not misread, and from the bar sum alone you cannot tell an under-read note from a
+correct note beside a missing one. In real engine output missing notes dominate. A metric WIN at
+this layer is impossible anyway: the dropped note's PITCH is unrecoverable post-hoc and the rhythm
+metric keys on (midi, dur16), so you cannot earn a duration match without first recovering the pitch.
+
+VALIDATION (fusion path = geom + Clarity, the prod primary; harness `fusion_repair_eval.py` on the
+box at /opt/geom-omr/eval/real_scores): NO regression on note_dur_f1 / duration_acc / note_f1 on any
+of the 4 pieces, and the incomplete-bar count dropped tctab 49->12, icarus 6->0, reverie 4->1 (the
+remaining bars are OVERFULL, left untouched by design since shrinking a pitched note is the same
+unsafe guess). liminality is a clean no-op: it is really 2/4 but fusion hardcodes 4/4, so the
+corroboration guard (a capacity is trusted only when a strong majority of bars already sum to it)
+refuses to act. So the deliverable is a RENDERING fix: incomplete bars now render at true width with
+the missing beat shown as a rest (the user's reported symptom), guaranteed never-worse on the metric.
+
+NEXT (for a real rhythm metric win): needs per-note duration CONFIDENCE from the engine (then a
+targeted low-confidence-only edit is safe) or recovering the DROPPED notes (a detection problem),
+not a bar-sum post-transform. fusion also hardcodes 4/4 + divisions=4; borrowing Clarity's real
+<time> would let the repair help non-4/4 pieces (liminality) and is the cheap next lever.
+
 ## STATUS: detection robustness SHIPPED; geom runs PRIMARY on cx33; rhythm is next (2026-06-03)
 
 geom is now the PRIMARY engine on the cx33 worker (`OMR_GEOM=1` + `OMR_GEOM_PRIMARY=1`, wins-first,
