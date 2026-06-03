@@ -51,7 +51,9 @@ OMR_LLM_ENV = "OMR_LLM"
 _DEFAULT_MODELS = {
     "anthropic": "claude-sonnet-4-6",
     "openai": "gpt-4o",
-    "gemini": "gemini-2.0-flash",
+    # gemini-2.5-flash has free-tier quota; gemini-2.0-flash returns free-tier limit 0 on a
+    # fresh AI Studio project (needs billing), so 2.5-flash is the right zero-cost default.
+    "gemini": "gemini-2.5-flash",
 }
 _KEY_ENVS = {
     "anthropic": "ANTHROPIC_API_KEY",
