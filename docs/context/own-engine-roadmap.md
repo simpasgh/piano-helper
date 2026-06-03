@@ -4,6 +4,40 @@ Self-contained plan so any session (esp. the one on the GPU PC) can pick up and 
 without the prior machine's local memory. Newest status at the top. NO em dashes in generated
 text (project rule). Ship every code change through the gated flow (see "Constraints" below).
 
+## STATUS: detection robustness SHIPPED; geom runs PRIMARY on cx33; rhythm is next (2026-06-03)
+
+geom is now the PRIMARY engine on the cx33 worker (`OMR_GEOM=1` + `OMR_GEOM_PRIMARY=1`, wins-first,
+box at `2ce71a6`). The role is an env toggle (PR #181): drop `OMR_GEOM_PRIMARY` to demote it to the
+never-worse fallback. The user re-confirmed primary after the detection fix below, accepting the
+documented caveat that geom still fabricates rhythm. See memory deploy-geom-cx33.
+
+DETECTION ROBUSTNESS shipped (PR #182), the lever the previous STATUS flagged. A real-score eval
+showed the YOLO detector was NOT the bottleneck (it finds ~truth-count heads on every piece);
+`detect_systems` was. Real engravings interleave near-full-width INTRUDER rows (a beam over beamed
+eighths, a dense note/ledger row, tempo text) among the 5 staff lines, inflating a staff to 6-7
+detected lines; the old "keep only groups whose size is a multiple of 5" rule then dropped the whole
+staff (icarus detected 5 staves not 6; reverie 4 not 8, orphaning 135 of 185 found heads).
+`geom_omr._extract_staves` now cuts the page into regions and picks the 5 real lines by THINNESS (a
+staff line is a thin full-width rule; a beam/text/dense-note row is thicker), and
+`geom_detector._auto_imgsz` scales the YOLO imgsz with the image long side (a 2-page stitch was
+downscaled too far at imgsz 1280: tctab 321 heads -> 470). Real-score note_f1 (oracle key):
+liminality 0.946 (no regression), tctab 0.719 -> 0.995, icarus 0.394 -> 0.990, reverie 0.136 -> 0.476.
+
+NEXT LEVERS (in order): (1) **rhythm / durations** -- now the top lever AND urgent because geom is
+primary: every note still gets `duration: 1` (duration_acc 0.0 on all 4 pieces), so wins-first geom
+ships rhythm-uniform transcriptions ahead of Clarity on every upload. Needs note-type CV (head fill
+open/filled, stems, flags/beams, dots; `detect_noteheads` already computes a fill ratio). (2)
+key-signature detection (removes the oracle-key assumption). (3) **ottava / 8va** -- reverie's
+residual: all 185 heads are found and the first half decodes perfectly, but its truth has 4
+`<octave-shift>` brackets and geom reads the WRITTEN position (pred = truth - 12 in the bracketed
+region; liminality has ottavas too but they cover little of the piece). (4) chords.
+
+Eval harness recreated at `/opt/geom-omr/eval/real_scores/real_eval.py` on the box (rasterize at 350
+DPI, run the deployed `transcribe_with_detector`, score vs MusicXML with the oracle key; set
+`GEOM_SRC=/dir` to test un-merged engine files before deploy). GOTCHA: GitHub CI runs only the JS
+typecheck/build/test, NOT the omr-worker pytest suite, so a red Python test can hide behind a green
+CI; run `cd omr-worker && python3 -m pytest -q` locally before merge.
+
 ## STATUS: geom is a never-worse FALLBACK on cx33; BARLINES shipped, detection-robustness next (2026-06-03)
 
 The trained detector is deployed to the cx33 prod worker with `OMR_GEOM=1`, but it runs as a
