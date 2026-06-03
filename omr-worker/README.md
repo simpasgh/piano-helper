@@ -149,21 +149,22 @@ python3.11 -m venv /opt/geom-omr/.venv
 # 3. Point the worker at them (env file alongside the R2 creds):
 #      GEOM_PYTHON=/opt/geom-omr/.venv/bin/python
 #      GEOM_WEIGHTS=/opt/geom-omr/notehead.pt
-#      OMR_GEOM=1      # ONLY after validating it beats the baselines on real scores
+#      OMR_GEOM=1            # enable geom (default mode: never-worse last-resort FALLBACK)
+#      OMR_GEOM_PRIMARY=1    # optional: run geom FIRST (wins-first). Remove to return to fallback.
 ```
 
 The worker runs `<GEOM_PYTHON> geom_detector.py <image> --weights <GEOM_WEIGHTS> -o <out>
 --device cpu`. If `GEOM_PYTHON`/`GEOM_WEIGHTS` are unset/missing, or the engine declines
 (exit 2 = nothing recognized), the worker falls back to the existing chain.
 
-**geom is a FALLBACK, not a primary.** It reads pitch well but emits placeholder rhythm (every
-note `duration: 1`, no barlines, hardcoded 4/4), no ties, and no key signature, so on a full
-transcription it loses to Clarity. Two gaps drive this: (1) no **rhythm / barline detection** (the
-core gap vs Clarity); (2) no **key-signature detection**, so non-C-major scores read accidentals a
-semitone off. Until those land it runs ONLY when every other engine fails (replacing the failure
-sentinel), which keeps it strictly never-worse even with `OMR_GEOM=1`. The on-box bake-off that
-exposed this: pitch exact-F1 0.92 on C-major but 0.60 on mixed-key in prod mode, and the rhythm is
-unscored because the engine fabricates it. See
+**Two roles, toggled by env.** By default (`OMR_GEOM=1` alone) geom is a never-worse LAST-RESORT
+FALLBACK: it runs only when every other engine fails, so it can never override Clarity. With
+`OMR_GEOM_PRIMARY=1` it instead runs FIRST and wins if it returns a result. Primary is a DELIBERATE
+not-always-better choice: geom now reads pitch + real measures well (barline detection lifted
+real-score note_f1, e.g. liminality 0.29 -> 0.95), but it still emits placeholder durations (no
+rhythm), no ties, and no key signature (non-C-major accidentals read a semitone off), and its
+detection fails on some engravings, so as a wins-first primary it can override Clarity where geom
+is weaker. Switching role is an env change plus a restart, no redeploy. See
 [own-engine-roadmap.md](../docs/context/own-engine-roadmap.md).
 
 ## Configure R2 credentials

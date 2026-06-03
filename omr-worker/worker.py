@@ -131,19 +131,29 @@ def ensemble_enabled():
     return raw.strip().lower() in ("1", "true")
 
 
-# Our own trained geometric engine (geom_detector.py), gated by OMR_GEOM (default OFF). It is a
-# LAST-RESORT FALLBACK, not a primary: it reads pitch well but has no rhythm / tie / key-signature
-# detection yet, so it must never override Clarity/oemer/homr/LLM. When ON it runs ONLY if every
-# other engine produced nothing, replacing the failure sentinel with a pitch transcription. (It was
-# briefly wired wins-first; that regressed rhythm vs Clarity, so it was demoted until rhythm +
-# barline detection land. See docs/context/own-engine-roadmap.md.)
+# Our own trained geometric engine (geom_detector.py), gated by OMR_GEOM (default OFF). Two modes,
+# toggled by env (no redeploy): by default (OMR_GEOM alone) it is a never-worse LAST-RESORT
+# FALLBACK, run only if every other engine produced nothing. With OMR_GEOM_PRIMARY also set it runs
+# FIRST and wins if it returns a result -- a deliberate not-always-better choice, since geom still
+# lacks note durations / ties / key detection and its detection fails on some scores, so it can
+# override Clarity where it is weaker. See docs/context/own-engine-roadmap.md.
 OMR_GEOM_ENV = "OMR_GEOM"
+GEOM_PRIMARY_ENV = "OMR_GEOM_PRIMARY"
 
 
 def geom_enabled():
     """True when OMR_GEOM is a truthy string ("1"/"true"). Anything else (unset, "0", garbage) is
     OFF. Read in exactly one place, mirroring ensemble_enabled."""
     raw = os.environ.get(OMR_GEOM_ENV)
+    if raw is None:
+        return False
+    return raw.strip().lower() in ("1", "true")
+
+
+def geom_primary():
+    """True when OMR_GEOM_PRIMARY is truthy: geom runs FIRST (wins-first) instead of as the
+    never-worse fallback. Only meaningful when geom_enabled() is also True. Mirrors geom_enabled."""
+    raw = os.environ.get(GEOM_PRIMARY_ENV)
     if raw is None:
         return False
     return raw.strip().lower() in ("1", "true")
@@ -1170,21 +1180,46 @@ def process_job(client, bucket, job_id):
         body = None
         source = None
 
-        # Trained geometric engine (OMR_GEOM, default OFF) is a LAST-RESORT FALLBACK, not a primary
-        # (no rhythm/tie/key detection yet, so it must never override a real engine). It RUNS in the
-        # fallback block below, only when every other engine declined. For a NON-PDF upload we COPY
-        # its raster HERE, while input_path is still intact: rasterize_if_pdf renames a PNG/JPEG in
-        # place when the raster engines run, which would strand geom. The PDF raster is redone
-        # lazily in the fallback (the PDF survives), so nothing is rasterized up front for the
-        # common case where a primary engine succeeds.
+        # Trained geometric engine (OMR_GEOM). It runs either FIRST (OMR_GEOM_PRIMARY, wins-first)
+        # or as the never-worse fallback below. For a NON-PDF upload we COPY its raster HERE, while
+        # input_path is still intact: rasterize_if_pdf renames a PNG/JPEG in place when the raster
+        # engines run, which would strand geom. A PDF is rasterized on demand in _geom_body (the
+        # PDF survives on disk), so nothing is rasterized up front in the common no-geom case.
         geom_input_png = None
         if geom_enabled() and not is_pdf_input:
             try:
                 geom_input_png = os.path.join(workdir, "geom_input.png")
                 shutil.copyfile(input_path, geom_input_png)
             except Exception as err:
-                log("geom input copy failed for %s (%r); geom fallback disabled" % (job_id, err))
+                log("geom input copy failed for %s (%r); geom disabled this job" % (job_id, err))
                 geom_input_png = None
+
+        def _geom_body():
+            """Run geom on this upload (raster prep + run_geom) and return its MusicXML bytes, or
+            None on decline/failure. Shared by the primary and fallback positions below."""
+            try:
+                geom_image = (
+                    rasterize_if_pdf(input_path, workdir)[0] if is_pdf_input else geom_input_png
+                )
+            except Exception as err:
+                log("geom raster prep failed for %s (%r); skipping geom" % (job_id, err))
+                return None
+            if geom_image is None:
+                return None
+            gp = run_geom(geom_image, workdir)
+            if not gp:
+                return None
+            with open(gp, "rb") as fh:
+                return fh.read()
+
+        # geom PRIMARY (OMR_GEOM + OMR_GEOM_PRIMARY): runs FIRST and wins if it returns a result,
+        # ahead of the LLM/ensemble. Override behaviour the user opted into; remove OMR_GEOM_PRIMARY
+        # for never-worse fallback, or OMR_GEOM to disable geom.
+        if geom_enabled() and geom_primary():
+            geom_bytes = _geom_body()
+            if geom_bytes:
+                body, source = geom_bytes, "geom"
+                log("%s recognized via geom (primary)" % job_id)
 
         # LLM-vision transcriber: the "big value, low latency" engine. When enabled+keyed it
         # reads the score image holistically (chords included) in one API round-trip. It returns
@@ -1214,27 +1249,14 @@ def process_job(client, bucket, job_id):
                     body = fh.read()
                 log("%s recognized via %s output %s" % (job_id, source, result_path))
 
-        # geom FALLBACK (OMR_GEOM on): reached only when every primary engine declined (body is
-        # None == the would-be failure-sentinel case). A pitch transcription beats a sentinel, and
-        # because we only run geom when body is None, it can never override a real engine result.
-        # For a PDF the raster is built here (the PDF is still on disk); for a non-PDF we reuse the
-        # geom_input.png copied above before the raster engines renamed the upload.
-        if body is None and geom_enabled():
-            geom_image = None
-            try:
-                geom_image = (
-                    rasterize_if_pdf(input_path, workdir)[0] if is_pdf_input else geom_input_png
-                )
-            except Exception as err:
-                log("geom raster prep failed for %s (%r); skipping geom" % (job_id, err))
-                geom_image = None
-            if geom_image is not None:
-                geom_path = run_geom(geom_image, workdir)
-                if geom_path:
-                    with open(geom_path, "rb") as fh:
-                        body = fh.read()
-                    source = "geom"
-                    log("%s recognized via geom (fallback)" % job_id)
+        # geom FALLBACK (OMR_GEOM on, OMR_GEOM_PRIMARY off): reached only when every other engine
+        # declined (body is None). A pitch transcription beats the failure sentinel, and because we
+        # only run geom when body is None it can never override a real engine result.
+        if body is None and geom_enabled() and not geom_primary():
+            geom_bytes = _geom_body()
+            if geom_bytes:
+                body, source = geom_bytes, "geom"
+                log("%s recognized via geom (fallback)" % job_id)
 
         if body is not None:
             # Post-transforms run UNCONDITIONALLY on every engine's output (incl. the LLM's).
