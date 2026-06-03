@@ -7,6 +7,8 @@ at `/opt/piano-helper`.
 - **Host:** `root@91.98.116.201`
 - **Box:** Hetzner cx33, CPU-only, always-on. Runs `omr-worker.service`.
 - **Existing key (on the Mac):** `~/.ssh/oci_omr` (+ `oci_omr.pub`).
+- **Authorized machines:** Mac (`oci_omr`), Windows GPU PC (`claude-deploy-cx33`,
+  authorized 2026-06-03).
 
 > Never commit a private key to this repo. This file holds instructions only.
 > The server's `/etc/piano-helper-omr.env` contains a Gemini API key flagged for
