@@ -4,6 +4,73 @@ Self-contained plan so any session (esp. the one on the GPU PC) can pick up and 
 without the prior machine's local memory. Newest status at the top. NO em dashes in generated
 text (project rule). Ship every code change through the gated flow (see "Constraints" below).
 
+## STATUS: FULL-SYMBOL detector DATA PIPELINE shipped (steps 1-2); GPU train + decode is step 3 (2026-06-04)
+
+The moat's data foundation is in. Two gated PRs merged: rich synthetic generation (#186) and
+multi-class label extraction (#188). This is the build-up to a trained MULTI-CLASS symbol detector
+that feeds the EXACT geometric decode of durations/key/accidentals/clefs/rests (the "measure, do
+not predict" thesis extended past noteheads). Nothing is wired into the worker yet (research-only,
+same contract as geom_omr was pre-deploy).
+
+THE TAXONOMY (18 classes, single source of truth = `synth_render.CLASS_NAMES`, shared by BOTH the
+synthetic generator and the DeepScores converter): notehead_filled, notehead_open, stem, flag,
+beam, dot, accidental_{sharp,flat,natural,double_sharp,double_flat}, clef_{g,f,c}, rest, timesig,
+tie, ottava. Heads split filled vs open (whole-vs-half is recovered from STEM presence, not a class).
+Key-signature accidentals fold into accidental_* (identical glyph; the decode separates key-sig from
+inline by x-position).
+
+WHAT SHIPPED:
+- `omr_eval.generate_rich_score` (#186): deterministic rich grand-staff scores (whole..sixteenth +
+  dotted durations with correct beams, rests, dense chords, ALL keys with per-note accidentals,
+  ties, clef-changes to bass/alto, ottava brackets, ledger-heavy). The MusicXML is its OWN ground
+  truth: every visual glyph is INVISIBLE to reconcile.to_events, so a rich score self-scores 1.0 on
+  pitch + duration + chords.
+- `llm_omr.score_json_to_musicxml` (#186/#188): emits OPT-IN visual elements (type/dot/accidental/
+  beam/tie, mid-measure clef changes, octave-shift direction) only when the event carries them, so
+  the prod LLM path and the simple generator are byte-identical and unaffected.
+- `synth_render` (#188): `glyph_to_class(css_class, smufl_code)` (pure, tested) + a render JS that
+  reads every symbol group's SMuFL glyph code + pixel box via Playwright getBoundingClientRect.
+  RenderedScore + draw_overlay are multi-class. Overlay sanity-check passed on every glyph type.
+- `synth_dataset` (#188): builds the rich multi-class YOLO dataset + data.yaml (all classes) + a
+  per-class distribution report.
+- `deepscores_to_yolo` (#188): maps DeepScoresV2's 136 categories onto the SAME taxonomy (69 map;
+  the rest dropped). Real data supplies the ties/ottava/clef_c that synthetic is sparse on.
+- `train_detector` is now class-agnostic (reads data.yaml).
+
+GOTCHAS worth not re-learning (verified live on this PC; the render path has NO CI coverage, so a
+label bug ships green -- always overlay-check a few renders after touching synth_render):
+- Verovio emits an EMPTY `<g class="accid"/>` placeholder for EVERY note (only ~the real ones get a
+  glyph child). Filter by rendered bbox: drop only when BOTH w<=0 and h<=0; an empty placeholder is
+  0x0, a real glyph has area.
+- A STEM is a vertical line whose getBoundingClientRect WIDTH is ~0 (stroke excluded), so a naive
+  w>0 filter drops ~90% of stems. Pad thin shapes to a minimum derived from the interline.
+- Verovio NESTS the beamed notes' heads + stems INSIDE `<g class="beam">`, so the group's rect wraps
+  the whole run (~4-5x oversized). The beam box must come from g.beam's DIRECT `<polygon>/<path>`
+  strokes, not its getBoundingClientRect.
+- Mid-score clef-CHANGE codepoints differ from the opening clef: E07A gClefChange, E07B cClefChange,
+  E07C fClefChange (vs E050 gClef / E05C cClef / E062 fClef). Notehead codes: E0A4 black (filled),
+  E0A3 half, E0A2 whole (open). Accidentals: E262 sharp, E260 flat, E261 natural, E263 dbl-sharp,
+  E264 dbl-flat.
+- verovio + playwright(chromium) are now pip-installed in the base Python 3.12 on this PC (the venv
+  from the prior GPU session is gone). torch/ultralytics are NOT installed (step 3 needs the cu128
+  wheel for Blackwell sm_120, per the older STATUS gotchas). Heavy datasets live OUTSIDE the repo
+  under C:\Users\pascu\omr-train (gitignored); a couple of overlay sanity images are in omr-train/smoke.
+
+STEP 3 (GPU, this PC) -- the remaining work to make it a real engine:
+1. Build the full multi-class dataset: `python synth_dataset.py <out> --train 1500 --val 200` (each
+   sample is a Playwright render, so this takes a while) + `python deepscores_to_yolo.py <ds_root>
+   <out>` for real data; combine (see the prior combined.yaml approach).
+2. Train multi-class YOLO (`train_detector.py --data <out>/data.yaml`); set up the cu128 torch venv
+   first. Detection saturates fast for noteheads but the rarer symbols (double accidentals, clef_c,
+   ottava) need enough epochs/examples; watch the per-class metrics.
+3. Extend the EXACT decode in `geom_omr` / `geom_detector` to READ durations (head fill + stem +
+   flag/beam + dots), key (count the clef-anchored sharps/flats), per-note accidentals, clefs, and
+   rests FROM the detected glyphs (measure, do not predict) -- this is the payoff: it turns geom's
+   duration_acc 0.0 into a real rhythm read and removes the oracle-key assumption.
+4. Apply `synth_augment` photo augmentation; eval on `/opt/geom-omr/eval/real_scores/real_eval.py`
+   (the user's 4 MuseScore pieces). Deploy weights+code to cx33 ONLY after it beats the current
+   geom+Clarity fusion AND passes the eval.
+
 ## STATUS: rhythm REPAIR shipped (pitch-safe bar completion); note-stretching measured + REJECTED (2026-06-04)
 
 Shipped `omr-worker/rhythm_repair.py`, the FINAL worker post-transform (runs after
