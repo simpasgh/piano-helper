@@ -192,15 +192,104 @@ def _row_ink(gray) -> "np.ndarray":
     return (gray < 0.5).mean(axis=1)
 
 
+def _extract_staves(centers: List[float], inks: List[float], thick: List[float],
+                    interline: float) -> List[List[float]]:
+    """Turn the ordered staff-line-candidate centers into clean 5-line staves.
+
+    Each candidate carries its peak ink fraction (`inks`) and its cluster thickness in rows
+    (`thick`). The page is first cut into REGIONS at any gap much larger than the interline (the
+    inter-staff / inter-system blank), exactly as the original grouping did, so a staff boundary
+    stays intact and a 5-line window can never straddle two staves. Then per region:
+
+      - 5 lines  -> a clean staff, kept as detected (even if one gap is a little irregular; this is
+        the common case and the original code kept it unconditionally, so we do too).
+      - a multiple of 5 EVENLY spaced -> k staves merged by a small inter-staff gap, split
+        positionally into k blocks of 5 (NOT by a scored window, which could straddle the seam).
+      - anything else (6, 7, ... lines) -> a staff (or staves) PLUS intruder rows. Real engravings
+        interleave near-full-width INTRUDER rows among the 5 staff lines: a beam joining a run of
+        eighth notes, a dense ledger/notehead row, or tempo/expression text can each clear the
+        width threshold and inflate a staff to 6-7 detected lines (icarus: a 7-line group; reverie:
+        6-line groups). The original "keep only multiples of 5" rule then dropped the whole staff.
+        pick_windows recovers it by selecting evenly-spaced 5-line windows and, among overlapping
+        ones, preferring the THINNEST lines: a staff line is a thin full-width rule, while a beam /
+        text band / dense note row is thicker. Thinness (not ink) is the primary signal because a
+        chord crossing a staff line can drop that real line's ink BELOW a full-width intruder
+        beam's, so an ink-only rule would swap in the intruder; ink and spacing break remaining ties.
+
+    NEVER raises (callers wrap in try). One residual limitation: if a page's near-full-width dark
+    rows are DOMINATED by evenly-spaced intruders rather than staff lines (e.g. a wall of full-width
+    text bands), the median-gap interline is mis-estimated and the real staff can be missed. Real
+    piano sheet music is staff-line dominated, so this does not arise in the target domain, and geom
+    is a last-resort fallback regardless."""
+    n = len(centers)
+    out: List[List[float]] = []
+    if n < 5 or interline <= 0:
+        return out
+    tol = 0.35 * interline  # a gap within +/-35% of the interline counts as one staff step
+
+    def pick_windows(idx: List[int]) -> List[List[float]]:
+        m = len(idx)
+        cands = []  # (start, max_thickness, -mean_ink, spacing_dev) for each UNIFORM 5-window
+        for s in range(m - 4):
+            gaps = [centers[idx[s + t + 1]] - centers[idx[s + t]] for t in range(4)]
+            dev = max(abs(g - interline) for g in gaps)
+            if dev > tol:
+                continue  # only evenly-spaced runs can be a staff
+            mx_thick = max(thick[idx[s + t]] for t in range(5))
+            mean_ink = sum(inks[idx[s + t]] for t in range(5)) / 5.0
+            cands.append((s, mx_thick, -mean_ink, dev))
+        cands.sort(key=lambda c: (c[1], c[2], c[3]))  # thinnest, then inkiest, then most uniform
+        used = [False] * m
+        picked = []
+        for (s, _mt, _mi, _d) in cands:
+            if any(used[s : s + 5]):
+                continue
+            for t in range(s, s + 5):
+                used[t] = True
+            picked.append([float(centers[idx[s + t]]) for t in range(5)])
+        return picked
+
+    # Cut into regions at a gap much larger than the interline (the inter-staff blank). 2.5x mirrors
+    # the original break threshold, so staff boundaries are grouped exactly as before.
+    break_gap = 2.5 * interline
+    regions: List[List[int]] = []
+    region = [0]
+    for i in range(1, n):
+        if centers[i] - centers[i - 1] > break_gap:
+            regions.append(region)
+            region = [i]
+        else:
+            region.append(i)
+    regions.append(region)
+
+    for reg in regions:
+        m = len(reg)
+        if m < 5:
+            continue  # too few lines to be a staff
+        if m == 5:
+            out.append([float(centers[j]) for j in reg])
+            continue
+        gaps = [centers[reg[t + 1]] - centers[reg[t]] for t in range(m - 1)]
+        if m % 5 == 0 and all(abs(g - interline) <= tol for g in gaps):
+            for k in range(0, m, 5):  # merged staves, evenly spaced -> split positionally
+                out.append([float(centers[reg[k + t]]) for t in range(5)])
+            continue
+        out.extend(pick_windows(reg))  # staff(s) + intruder rows -> recover the real staff lines
+
+    out.sort(key=lambda s: s[0])
+    return out
+
+
 def detect_systems(gray) -> List[List[float]]:
     """Detect EVERY 5-line staff group on the page. Returns a list of staves, each a list of
     5 staff-line y-centers (top-to-bottom). NEVER raises; returns [] on failure.
 
-    Method: a staff line is a near-full-width dark row. Cluster contiguous dark rows into
-    line centers (a thick line spans a few rows), then chop the ordered line list into groups
-    of 5 by looking for a LARGE vertical gap (the inter-staff gap is much bigger than the
-    interline within a staff). This extends referee._staff_lines (which returns only the
-    first 5) to the whole page.
+    Method: a staff line is a near-full-width dark row. Cluster contiguous dark rows into line
+    centers (a thick line spans a few rows) and record each cluster's peak ink fraction, then hand
+    the centers to _extract_staves, which pulls out runs of 5 evenly-spaced lines (rejecting
+    intruder rows like beams / dense note rows / text that also clear the width threshold). This
+    extends referee._staff_lines (which returns only the first 5) to the whole page and is robust
+    to real engravings where a staff is detected as 6-7 lines.
     """
     if not GEOM_AVAILABLE or gray is None:
         return []
@@ -210,55 +299,42 @@ def detect_systems(gray) -> List[List[float]]:
         # A staff line is a near-full-width dark row, but noteheads/stems sitting ON the line
         # interrupt it, so a strict 0.5*w threshold misses lines in dense music. Use a softer
         # 0.35*w fraction: a true staff line still clears it (noteheads cover only a small
-        # fraction of the width), while text/sparse rows do not. Clustering + the 5-per-staff
-        # grouping below reject the occasional false-positive dark row.
+        # fraction of the width), while sparse rows do not. _extract_staves below rejects the
+        # near-full-width NON-staff rows (beams, dense note/ledger rows) that also clear it.
         th = 0.35 * w
         rows = [i for i, v in enumerate(roww) if v > th]
         if not rows:
             return []
-        # Cluster contiguous dark rows into line centers.
+        # Cluster contiguous dark rows into line centers; record each line's peak ink fraction
+        # (its darkest row's width coverage) and its thickness in rows so _extract_staves can tell a
+        # thin full-width staff line from a thicker partial intruder row (beam / dense note / text).
         centers: List[float] = []
+        inks: List[float] = []
+        thick: List[float] = []
         cur = [rows[0]]
+
+        def _flush(c):
+            centers.append(sum(c) / len(c))
+            inks.append(max(float(roww[r]) for r in c) / w)
+            thick.append(float(c[-1] - c[0] + 1))
+
         for r in rows[1:]:
             if r - cur[-1] <= 3:
                 cur.append(r)
             else:
-                centers.append(sum(cur) / len(cur))
+                _flush(cur)
                 cur = [r]
-        centers.append(sum(cur) / len(cur))
+        _flush(cur)
         if len(centers) < 5:
             return []
 
-        # Typical interline = median of small gaps between consecutive line centers.
-        gaps = [centers[i + 1] - centers[i] for i in range(len(centers) - 1)]
-        gaps_sorted = sorted(gaps)
-        med_gap = gaps_sorted[len(gaps_sorted) // 2]
+        # Typical interline = median of the small gaps between consecutive line centers (most gaps
+        # are intra-staff at the interline; inter-staff and intruder gaps are the minority).
+        gaps = sorted(centers[i + 1] - centers[i] for i in range(len(centers) - 1))
+        med_gap = gaps[len(gaps) // 2]
         if med_gap <= 0:
             return []
-        # A break BETWEEN staves is a gap much larger than the interline.
-        break_th = med_gap * 2.5
-
-        groups: List[List[float]] = []
-        cur_group = [centers[0]]
-        for i in range(1, len(centers)):
-            if centers[i] - centers[i - 1] > break_th:
-                groups.append(cur_group)
-                cur_group = [centers[i]]
-            else:
-                cur_group.append(centers[i])
-        groups.append(cur_group)
-
-        # Keep only groups of exactly 5 lines (a well-formed staff). If a group has a multiple
-        # of 5 (two staves merged because the inter-staff gap was small), split it evenly.
-        staves: List[List[float]] = []
-        for grp in groups:
-            if len(grp) == 5:
-                staves.append([float(v) for v in grp])
-            elif len(grp) > 5 and len(grp) % 5 == 0:
-                for k in range(0, len(grp), 5):
-                    staves.append([float(v) for v in grp[k : k + 5]])
-            # groups that are not a clean multiple of 5 are dropped (noise / partial detection)
-        return staves
+        return _extract_staves(centers, inks, thick, med_gap)
     except Exception:
         return []
 
