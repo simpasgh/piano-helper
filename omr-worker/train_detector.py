@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
-"""Train the notehead detector (YOLOv8) on the synthetic dataset, then hand its detections to
-the existing exact geometric pitch decode (geom_omr.decode_pitch). This is the GPU step the
-roadmap calls the real-score accuracy unlock: the classical detector caps ~0.82 notehead recall
-even on clean renders, so a trained detector is where the headroom is.
+"""Train the MULTI-CLASS symbol detector (YOLOv8) on the synthetic + DeepScores datasets, then
+hand its detections to the geometric decode (geom_omr / geom_detector): noteheads -> exact pitch,
+and the rest of the symbols (head fill, stem, flag, beam, dot, accidentals, clefs, rests, time-sig,
+ties, ottava) -> durations, key, accidentals, clefs (the "measure, do not predict" thesis past
+noteheads). The class set comes from the dataset's data.yaml (synth_render.CLASS_NAMES), so this
+trainer is class-agnostic; it was the single-class notehead trainer and now scales to all symbols
+with no code change beyond the docs.
 
 Design choices that matter for MUSIC (not generic COCO):
   - fliplr=0 and flipud=0: a flipped score is geometrically INVALID (it would teach mirrored
     staff/notehead relationships), so both flips are OFF. This is the one default we must change.
   - small rotation/perspective + hsv + mosaic: cheap robustness toward real phone photos without
-    changing what a notehead is.
-  - single class 'notehead'; the trained weights are a few MB and run fast on the CPU cx33 box.
+    changing what a glyph is.
+  - the trained weights are a few MB and run fast on the CPU cx33 box.
 
-Run (after synth_dataset.py builds <ds>/data.yaml):
+Run (after synth_dataset.py / deepscores_to_yolo.py build <ds>/data.yaml):
     python train_detector.py --data <ds>/data.yaml --epochs 60 --imgsz 1280 \
-        --project C:/Users/pascu/omr-train/runs --name notehead1
+        --project C:/Users/pascu/omr-train/runs --name symbols1
 Best weights land at <project>/<name>/weights/best.pt.
 """
 from __future__ import annotations
@@ -64,7 +67,7 @@ def main(argv=None) -> int:
     ap.add_argument("--imgsz", type=int, default=1280)
     ap.add_argument("--batch", default="16", help="int batch, or -1 for auto")
     ap.add_argument("--project", default="C:/Users/pascu/omr-train/runs")
-    ap.add_argument("--name", default="notehead1")
+    ap.add_argument("--name", default="symbols1")
     ap.add_argument("--device", default="0", help="'0' for first GPU, 'cpu' otherwise")
     ap.add_argument("--mosaic", type=float, default=1.0,
                     help="mosaic aug prob; set 0 for dense real pages (memory + small noteheads)")

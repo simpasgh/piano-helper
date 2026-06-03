@@ -1,22 +1,79 @@
 #!/usr/bin/env python3
-"""Tests for synth_render's pure label logic (the part that turns rendered geometry into YOLO
-labels). These need no verovio/playwright, so they run in CI; the heavy render path is covered by
-the dataset build + the visual overlay sanity-check, not unit tests."""
+"""Tests for synth_render's pure label logic: the multi-class glyph -> YOLO mapping and the
+RenderedScore label rows. These need no verovio/playwright, so they run in CI; the heavy render
+path is covered by the dataset build + the visual overlay sanity-check, not unit tests."""
 import io
 
 import synth_render as sr
 
 
-def _rs(width=1000, height=500, noteheads=None, staves=None):
+def _rs(width=1000, height=500, symbols=None, staves=None):
     return sr.RenderedScore(
         png=b"", width=width, height=height,
-        noteheads=noteheads or [], staves=staves or [],
+        symbols=symbols or [], staves=staves or [],
     )
 
 
-def test_yolo_lines_normalizes_center_and_size():
-    # one box at top-left (100,200) size 40x30 in a 1000x500 image
-    rs = _rs(noteheads=[(100.0, 200.0, 40.0, 30.0)])
+# --- taxonomy + glyph_to_class -----------------------------------------------------------
+
+def test_class_names_and_index_are_consistent():
+    assert sr.CLASS_INDEX["notehead_filled"] == 0
+    assert len(sr.CLASS_NAMES) == len(sr.CLASS_INDEX)
+    assert all(sr.CLASS_NAMES[i] == n for n, i in sr.CLASS_INDEX.items())
+
+
+def test_glyph_to_class_noteheads_by_smufl_code():
+    assert sr.glyph_to_class("notehead", "E0A4") == sr.CLASS_INDEX["notehead_filled"]  # black
+    assert sr.glyph_to_class("notehead", "E0A3") == sr.CLASS_INDEX["notehead_open"]    # half
+    assert sr.glyph_to_class("notehead", "E0A2") == sr.CLASS_INDEX["notehead_open"]    # whole
+    assert sr.glyph_to_class("notehead", "e0a4") == sr.CLASS_INDEX["notehead_filled"]  # case
+
+
+def test_glyph_to_class_accidentals_and_keysig_share_classes():
+    assert sr.glyph_to_class("accid", "E262") == sr.CLASS_INDEX["accidental_sharp"]
+    assert sr.glyph_to_class("accid", "E260") == sr.CLASS_INDEX["accidental_flat"]
+    assert sr.glyph_to_class("accid", "E261") == sr.CLASS_INDEX["accidental_natural"]
+    assert sr.glyph_to_class("accid", "E263") == sr.CLASS_INDEX["accidental_double_sharp"]
+    # a key-signature accidental uses the IDENTICAL glyph -> same class (decode splits by position)
+    assert sr.glyph_to_class("keyAccid", "E260") == sr.CLASS_INDEX["accidental_flat"]
+    assert sr.glyph_to_class("keyAccid", "E262") == sr.CLASS_INDEX["accidental_sharp"]
+
+
+def test_glyph_to_class_clefs_including_mid_score_change_codepoints():
+    assert sr.glyph_to_class("clef", "E050") == sr.CLASS_INDEX["clef_g"]   # gClef
+    assert sr.glyph_to_class("clef", "E07A") == sr.CLASS_INDEX["clef_g"]   # gClefChange
+    assert sr.glyph_to_class("clef", "E062") == sr.CLASS_INDEX["clef_f"]   # fClef
+    assert sr.glyph_to_class("clef", "E07C") == sr.CLASS_INDEX["clef_f"]   # fClefChange
+    assert sr.glyph_to_class("clef", "E05C") == sr.CLASS_INDEX["clef_c"]   # cClef
+    assert sr.glyph_to_class("clef", "E07B") == sr.CLASS_INDEX["clef_c"]   # cClefChange
+
+
+def test_glyph_to_class_shape_and_code_independent_groups():
+    # shape groups (no glyph code): class from the CSS class
+    assert sr.glyph_to_class("stem", None) == sr.CLASS_INDEX["stem"]
+    assert sr.glyph_to_class("beam", None) == sr.CLASS_INDEX["beam"]
+    assert sr.glyph_to_class("dots", None) == sr.CLASS_INDEX["dot"]
+    assert sr.glyph_to_class("tie", None) == sr.CLASS_INDEX["tie"]
+    assert sr.glyph_to_class("octave", None) == sr.CLASS_INDEX["ottava"]
+    # code-independent glyph groups: one class regardless of the specific code
+    assert sr.glyph_to_class("flag", "E242") == sr.CLASS_INDEX["flag"]
+    assert sr.glyph_to_class("rest", "E4E5") == sr.CLASS_INDEX["rest"]
+    assert sr.glyph_to_class("meterSig", None) == sr.CLASS_INDEX["timesig"]
+
+
+def test_glyph_to_class_unknown_or_empty_is_none():
+    assert sr.glyph_to_class("accid", None) is None          # empty placeholder <g class=accid/>
+    assert sr.glyph_to_class("notehead", "FFFF") is None      # unknown notehead code
+    assert sr.glyph_to_class("ledgerLines", None) is None     # not a labeled class
+    assert sr.glyph_to_class("", None) is None
+    assert sr.glyph_to_class(None, None) is None
+
+
+# --- RenderedScore label rows ------------------------------------------------------------
+
+def test_yolo_lines_normalizes_center_and_size_with_class():
+    # one notehead_filled (class 0) box at top-left (100,200) size 40x30 in a 1000x500 image
+    rs = _rs(symbols=[(0, 100.0, 200.0, 40.0, 30.0)])
     lines = rs.yolo_lines()
     assert len(lines) == 1
     cls, xc, yc, w, h = lines[0].split()
@@ -27,22 +84,26 @@ def test_yolo_lines_normalizes_center_and_size():
     assert abs(float(h) - (30.0 / 500)) < 1e-6
 
 
-def test_yolo_lines_custom_class():
-    rs = _rs(noteheads=[(0.0, 0.0, 10.0, 10.0)])
-    assert rs.yolo_lines(cls=3)[0].startswith("3 ")
+def test_yolo_lines_emits_each_class_index():
+    rs = _rs(symbols=[(0, 0.0, 0.0, 10.0, 10.0), (6, 5.0, 5.0, 4.0, 8.0), (12, 1.0, 1.0, 9.0, 20.0)])
+    assert [l.split()[0] for l in rs.yolo_lines()] == ["0", "6", "12"]
 
 
 def test_yolo_lines_empty():
-    assert _rs(noteheads=[]).yolo_lines() == []
+    assert _rs(symbols=[]).yolo_lines() == []
 
 
-def test_notehead_centers():
-    rs = _rs(noteheads=[(10.0, 20.0, 4.0, 6.0), (0.0, 0.0, 2.0, 2.0)])
-    assert rs.notehead_centers() == [(12.0, 23.0), (1.0, 1.0)]
+def test_boxes_for_and_noteheads_and_counts():
+    rs = _rs(symbols=[(0, 10.0, 20.0, 4.0, 6.0),     # filled head
+                      (1, 30.0, 40.0, 4.0, 6.0),     # open head
+                      (2, 31.0, 41.0, 1.0, 20.0)])   # stem
+    assert rs.boxes_for(2) == [(31.0, 41.0, 1.0, 20.0)]
+    assert sorted(rs.noteheads()) == [(10.0, 20.0, 4.0, 6.0), (30.0, 40.0, 4.0, 6.0)]
+    assert rs.notehead_centers() == [(12.0, 23.0), (32.0, 43.0)]
+    assert rs.class_counts() == {"notehead_filled": 1, "notehead_open": 1, "stem": 1}
 
 
 def test_staff_line_ys_sorted_centers():
-    # staff lines given out of order; method returns ascending y-centers
     staff = [(0.0, 50.0, 100.0, 2.0), (0.0, 10.0, 100.0, 2.0), (0.0, 30.0, 100.0, 2.0)]
     rs = _rs(staves=[staff])
     ys = rs.staff_line_ys()
@@ -51,11 +112,10 @@ def test_staff_line_ys_sorted_centers():
 
 
 def test_draw_overlay_returns_png():
-    # 8x8 white PNG via PIL, then overlay a box; result must be a valid PNG image.
     from PIL import Image
     buf = io.BytesIO()
-    Image.new("RGB", (8, 8), (255, 255, 255)).save(buf, format="PNG")
-    out = sr.draw_overlay(buf.getvalue(), [(1.0, 1.0, 3.0, 3.0)], [[2.0]])
+    Image.new("RGB", (40, 40), (255, 255, 255)).save(buf, format="PNG")
+    out = sr.draw_overlay(buf.getvalue(), [(0, 1.0, 1.0, 3.0, 3.0), (6, 10.0, 10.0, 4.0, 8.0)], [[2.0]])
     assert out[:8] == b"\x89PNG\r\n\x1a\n"
     Image.open(io.BytesIO(out)).verify()  # raises if not a valid image
 

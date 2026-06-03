@@ -203,6 +203,30 @@ def test_builder_emits_beams_on_rests():
     assert [b.text for b in note.findall("beam")] == ["continue"]
 
 
+def test_builder_emits_tie_sounding_and_notated_in_order():
+    data = {"divisions": 4, "measures": [{"staff1": [
+        {"duration": 4, "type": "quarter", "tie": "start", "pitches": [{"step": "C", "octave": 5}]},
+        {"duration": 4, "type": "quarter", "tie": "stop", "pitches": [{"step": "C", "octave": 5}]},
+    ], "staff2": []}]}
+    root = ET.fromstring(llm_omr.score_json_to_musicxml(data))
+    notes = root.findall(".//note")
+    assert notes[0].find("tie").get("type") == "start"             # sounding tie (reconcile reads)
+    assert notes[0].find("notations/tied").get("type") == "start"  # engraved arc (verovio draws)
+    assert notes[1].find("tie").get("type") == "stop"
+    # child order: pitch, duration, tie, type, staff, notations
+    assert [c.tag for c in notes[0]] == ["pitch", "duration", "tie", "type", "staff", "notations"]
+    events = _events(llm_omr.score_json_to_musicxml(data))
+    assert any("start" in e.tie for e in events) and any("stop" in e.tie for e in events)
+
+
+def test_builder_tie_both_emits_stop_then_start():
+    data = {"measures": [{"staff1": [
+        {"duration": 4, "tie": "both", "pitches": [{"step": "C", "octave": 5}]}], "staff2": []}]}
+    note = ET.fromstring(llm_omr.score_json_to_musicxml(data)).find(".//note")
+    assert [t.get("type") for t in note.findall("tie")] == ["stop", "start"]
+    assert [t.get("type") for t in note.findall("notations/tied")] == ["stop", "start"]
+
+
 def test_builder_direction_only_content_is_not_a_score():
     # A measure whose only event is a <direction> has no real content -> None (a direction must
     # not by itself rescue an otherwise-empty document).

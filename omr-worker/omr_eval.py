@@ -363,6 +363,8 @@ _ACCIDENTAL_GLYPH = {2: "double-sharp", 1: "sharp", 0: "natural", -1: "flat", -2
 # Per-clef comfortable WRITTEN octave range (lo, hi inclusive) for picking notes that sit on/near
 # the staff. Ledger-heavy mode widens these so the detector sees many ledger-line notes.
 _CLEF_OCTAVES = {"G": (4, 5), "F": (2, 3), "C": (3, 4)}
+# The staff line a clef sits on (the <clef><line>): treble G=2, bass F=4, alto C=3.
+_CHANGE_CLEF_LINE = {"G": 2, "F": 4, "C": 3}
 
 
 def _keyed_alter(step: str, fifths: int) -> int:
@@ -581,7 +583,8 @@ def _note_event(rng: random.Random, slot: dict, type_dots, clef: str, fifths: in
 
 def _staff_measure(rng: random.Random, capacity: int, beat_ticks: int, divisions: int,
                    clef: str, fifths: int, chord_prob: float, accidental_prob: float,
-                   rest_prob: float, density: float, octaves: Tuple[int, int]) -> List[dict]:
+                   rest_prob: float, density: float, octaves: Tuple[int, int],
+                   tie_prob: float = 0.0) -> List[dict]:
     """Build ONE staff's worth of one measure: a varied rhythm, each slot decoded into a
     note/rest/chord with beams computed over the bar. Sums EXACTLY to capacity."""
     slots = _bar_rhythm(rng, capacity, beat_ticks, divisions, density, rest_prob)
@@ -595,8 +598,27 @@ def _staff_measure(rng: random.Random, capacity: int, beat_ticks: int, divisions
         levels.append(level)
         pos += s["ticks"]
     beam_lists = _assign_beams(list(zip(starts, levels)), beat_ticks)
-    return [_note_event(rng, s, tds[i], clef, fifths, chord_prob, accidental_prob,
-                        octaves, beam_lists[i]) for i, s in enumerate(slots)]
+    events = [_note_event(rng, s, tds[i], clef, fifths, chord_prob, accidental_prob,
+                          octaves, beam_lists[i]) for i, s in enumerate(slots)]
+    # Optional ties: tie a single note to the next single note as one HELD pitch (the second
+    # repeats the first's pitch). Gated on tie_prob>0 so the default RNG stream is unchanged.
+    if tie_prob > 0 and len(events) >= 2:
+        i = 0
+        while i < len(events) - 1:
+            a, b = events[i], events[i + 1]
+            if (not a.get("rest") and not b.get("rest")
+                    and isinstance(a.get("pitches"), list) and len(a["pitches"]) == 1
+                    and isinstance(b.get("pitches"), list) and len(b["pitches"]) == 1
+                    and "tie" not in a and "tie" not in b and rng.random() < tie_prob):
+                src = a["pitches"][0]
+                # the tied-to note repeats the pitch with NO accidental glyph (the tie carries it)
+                b["pitches"] = [{"step": src["step"], "octave": src["octave"],
+                                 "alter": src.get("alter", 0)}]
+                a["tie"], b["tie"] = "start", "stop"
+                i += 2  # do not chain a third note into the same tie
+            else:
+                i += 1
+    return events
 
 
 def generate_rich_score(
@@ -610,6 +632,7 @@ def generate_rich_score(
     accidental_prob: float = 0.12,
     rest_prob: float = 0.12,
     density: float = 0.5,
+    tie_prob: float = 0.0,
     clef_changes: bool = False,
     ottava: bool = False,
     ledger_heavy: bool = False,
@@ -618,15 +641,16 @@ def generate_rich_score(
 
     Beyond generate_random_score this varies: note DURATIONS (whole..sixteenth, dotted) with
     correct engraved type/flag/beam, RESTS, dense CHORDS, ALL keys (key_fifths None -> random
-    -7..7) with per-note ACCIDENTALS, optional mid-piece CLEF CHANGES, OTTAVA brackets, and
-    LEDGER-heavy ranges. Same seed + args => byte-identical output.
+    -7..7) with per-note ACCIDENTALS, optional TIES, mid-piece CLEF CHANGES (to bass or alto),
+    OTTAVA brackets, and LEDGER-heavy ranges. Same seed + args => byte-identical output.
 
     Defaults to a simple meter (4/4) with divisions=4 so eighth/sixteenth/dotted values and their
     beams are all exactly representable; exotic meters degrade gracefully (a full-bar note).
 
-    The flags clef_changes / ottava / ledger_heavy add the HARDER cases (a clef the geometric
-    decode does not yet read, an octave bracket, many ledger lines) and are off by default so the
-    plain rich set stays a clean rhythm/key/accidental benchmark. NEVER raises (degrades to b'')."""
+    tie_prob (default 0) ties held notes; clef_changes / ottava / ledger_heavy add the HARDER cases
+    (a clef the geometric decode does not yet read, an octave bracket, many ledger lines) and are
+    off by default so the plain rich set stays a clean rhythm/key/accidental benchmark. NEVER raises
+    (degrades to b'')."""
     try:
         rng = random.Random(seed)
         if key_fifths is None:
@@ -638,10 +662,13 @@ def generate_rich_score(
             beat_ticks = divisions
         capacity = beats * beat_ticks
 
-        # Optional single mid-piece clef change on the treble staff (measure ci): switch to bass
-        # for one bar (so its notes sit in the bass range) then switch back. A clef change is
-        # invisible to the scorer but engraves a clef glyph and re-positions notes -- a step-3 rung.
+        # Optional single mid-piece clef change on the treble staff (measure ci): switch to bass OR
+        # alto for one bar (so its notes sit in that clef's range) then switch back. A clef change
+        # is invisible to the scorer but engraves a clef glyph and re-positions notes (a step-3
+        # rung); randomizing F vs C gives the detector both fClef and cClef change examples.
         clef_change_measure = rng.randint(2, n_measures - 1) if (clef_changes and n_measures >= 4) else None
+        change_sign = rng.choice(("F", "C")) if clef_change_measure is not None else "G"
+        change_line = _CHANGE_CLEF_LINE.get(change_sign, 4)
         # Optional ottava run on the treble staff of one measure (a rendered 8va bracket).
         ottava_measure = rng.randint(1, n_measures) if (ottava and n_measures >= 1) else None
 
@@ -651,19 +678,19 @@ def generate_rich_score(
 
         measures = []
         for m in range(1, n_measures + 1):
-            treble_clef = "F" if m == clef_change_measure else "G"
+            treble_clef = change_sign if m == clef_change_measure else "G"
             measure: dict = {}
             if m == clef_change_measure:
-                measure["clefs"] = [{"number": 1, "sign": "F", "line": 4}]
+                measure["clefs"] = [{"number": 1, "sign": change_sign, "line": change_line}]
             elif clef_change_measure is not None and m == clef_change_measure + 1:
                 measure["clefs"] = [{"number": 1, "sign": "G", "line": 2}]  # switch back
 
             staff1 = _staff_measure(rng, capacity, beat_ticks, divisions, treble_clef, key_fifths,
                                     chord_prob * 0.6, accidental_prob, rest_prob, density,
-                                    octaves_for(treble_clef))
+                                    octaves_for(treble_clef), tie_prob)
             staff2 = _staff_measure(rng, capacity, beat_ticks, divisions, "F", key_fifths,
                                     chord_prob, accidental_prob, rest_prob, density,
-                                    octaves_for("F"))
+                                    octaves_for("F"), tie_prob)
 
             if m == ottava_measure and staff1:
                 # Wrap the treble run in an octave-shift bracket (visual only; written pitch is the
