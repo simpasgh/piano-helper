@@ -739,6 +739,41 @@ def test_geom_fallback_declines_writes_sentinel(tmp_path, monkeypatch):
     assert client.put_body == worker.FAILURE_SENTINEL
 
 
+def test_geom_fallback_pdf_rasterizes_lazily(tmp_path, monkeypatch):
+    # PDF fallback branch: all primaries decline, so geom rasterizes the (still-on-disk) PDF
+    # lazily in the fallback and produces a result. Guards the is_pdf_input branch at the geom
+    # raster prep, which the non-PDF tests above never exercise.
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "_select_ensemble", lambda *a, **k: (None, None))
+
+    rastered = {"n": 0}
+
+    def fake_raster(path, workdir):
+        rastered["n"] += 1
+        return ("/fake/stitched.png", True)
+
+    monkeypatch.setattr(worker, "rasterize_if_pdf", fake_raster)
+    geom_out = tmp_path / "geom.musicxml"
+    geom_out.write_text("<score>geompdf</score>")
+    seen = {}
+
+    def fake_run_geom(image, workdir, **k):
+        seen["image"] = image
+        return str(geom_out)
+
+    monkeypatch.setattr(worker, "run_geom", fake_run_geom)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"%PDF-1.4 fake")
+    _drive_process_job(monkeypatch, client, is_pdf=True)
+    assert client.put_body == b"<score>geompdf</score>"
+    assert rastered["n"] >= 1  # geom lazily rasterized the PDF in the fallback
+    assert seen["image"] == "/fake/stitched.png"  # geom got the stitched raster, not a stale path
+
+
 def test_llm_falls_back_to_engines_when_it_returns_none(tmp_path, monkeypatch):
     # If the LLM returns None (any failure), the worker falls back to the existing engines.
     monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: True)
