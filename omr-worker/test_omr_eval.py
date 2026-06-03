@@ -73,6 +73,22 @@ def test_chord_recall_detects_wrong_chord():
     assert m["chord_recall"] == 0.0  # the chord's exact pitch set was not reproduced
 
 
+def test_chord_recall_is_divisions_invariant():
+    # The SAME bass chord notated with different <divisions> must still score chord_recall 1.0
+    # (the metric is keyed by measure+hand, not raw tick onset).
+    import llm_omr
+    chord = [{"step": "E", "octave": 3}, {"step": "G", "octave": 3}, {"step": "B", "octave": 3}]
+    t = llm_omr.score_json_to_musicxml(
+        {"divisions": 4, "measures": [{"staff1": [], "staff2": [{"duration": 16, "pitches": chord}]}]}
+    )
+    p = llm_omr.score_json_to_musicxml(
+        {"divisions": 3, "measures": [{"staff1": [], "staff2": [{"duration": 12, "pitches": chord}]}]}
+    )
+    m = omr_eval.score_transcription(p, t)
+    assert m["n_truth_chords"] == 1
+    assert m["chord_recall"] == 1.0
+
+
 def test_no_truth_chords_means_chord_recall_one():
     import llm_omr
     t = llm_omr.score_json_to_musicxml({"measures": [{"staff1": [

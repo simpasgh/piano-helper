@@ -45,16 +45,27 @@ def _pitched_by_cell(xml_bytes) -> Dict:
     return out
 
 
-def _onset_chords(xml_bytes) -> Dict:
-    """Parse MusicXML -> {(measure, staff, onset): frozenset of midi} for slots with >= 2 pitched
-    notes (i.e. chords). Used for the chord-correctness metric."""
-    slots: Dict = {}
+def _chords_by_cell(xml_bytes) -> Dict:
+    """Parse MusicXML -> {(measure, staff): Counter of frozenset(midi)} of the CHORDS (onset
+    slots with >= 2 pitched notes) in each measure+hand.
+
+    Keyed by (measure, staff) and NOT by raw onset on purpose: a raw onset is a per-document
+    tick (lcm of that doc's <divisions>), so two engines that read the same chord but emit
+    different <divisions> would never align. Comparing the multiset of chord pitch-sets per
+    measure+hand is tick-base-invariant (and matches the note metric's "grade WHAT per
+    measure+hand, not exact tick placement" philosophy). A chord in the wrong beat of the right
+    measure still counts; a chord moved to another measure does not."""
+    onset_slots: Dict = {}
     for e in reconcile.to_events(xml_bytes, "x"):
         midi = reconcile._pitch_to_midi(e.pitch)
         if midi is None:
             continue
-        slots.setdefault((e.measure, e.staff, e.onset), set()).add(midi)
-    return {k: frozenset(v) for k, v in slots.items() if len(v) >= 2}
+        onset_slots.setdefault((e.measure, e.staff, e.onset), set()).add(midi)
+    cells: Dict = {}
+    for (measure, staff, _onset), midis in onset_slots.items():
+        if len(midis) >= 2:
+            cells.setdefault((measure, staff), Counter())[frozenset(midis)] += 1
+    return cells
 
 
 def score_transcription(pred_xml, truth_xml) -> Dict:
@@ -62,10 +73,15 @@ def score_transcription(pred_xml, truth_xml) -> Dict:
 
     Returns a dict:
       note_precision/recall/f1 : note-level, comparing (measure, staff, midi) MULTISETS (so a
-        right note in the right measure+hand counts even if the rhythm/onset differs).
+        right note in the right measure+hand counts even if the rhythm/onset differs). NOTE:
+        midi is exact incl. octave (C4 != C5, an octave error is a full miss), and duration is
+        NOT scored (a right pitch with the wrong duration still counts). This is a pitch-accuracy
+        metric, not a full transcription score.
       n_truth / n_pred / n_matched : the underlying counts.
       chord_recall : fraction of TRUTH chords (>=2 notes at one onset) whose exact pitch set
-        appears at the same (measure, staff, onset) in the prediction. 1.0 if no truth chords.
+        appears in the same (measure, staff) of the prediction. Tick-base-invariant (keyed by
+        measure+hand, not raw onset), so a different <divisions> does not falsely zero it.
+        1.0 if there are no truth chords.
       per_measure : per (measure, staff) {truth, pred, matched} note counts, for inspection.
 
     Engine-agnostic and never raises; unparseable input yields zeros.
@@ -95,11 +111,15 @@ def score_transcription(pred_xml, truth_xml) -> Dict:
         recall = n_matched / n_truth if n_truth else 0.0
         f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
 
-        truth_chords = _onset_chords(truth_xml)
-        pred_chords = _onset_chords(pred_xml)
-        if truth_chords:
-            chord_hits = sum(1 for k, v in truth_chords.items() if pred_chords.get(k) == v)
-            chord_recall = chord_hits / len(truth_chords)
+        truth_chords = _chords_by_cell(truth_xml)
+        pred_chords = _chords_by_cell(pred_xml)
+        n_truth_chords = sum(sum(c.values()) for c in truth_chords.values())
+        if n_truth_chords:
+            chord_hits = 0
+            for cell, t_sets in truth_chords.items():
+                p_sets = pred_chords.get(cell, Counter())
+                chord_hits += sum((t_sets & p_sets).values())  # multiset intersection of pitch-sets
+            chord_recall = chord_hits / n_truth_chords
         else:
             chord_recall = 1.0
 
@@ -111,7 +131,7 @@ def score_transcription(pred_xml, truth_xml) -> Dict:
             "n_pred": n_pred,
             "n_matched": n_matched,
             "chord_recall": round(chord_recall, 4),
-            "n_truth_chords": len(truth_chords),
+            "n_truth_chords": n_truth_chords,
             "per_measure": per_measure,
         }
     except Exception:
