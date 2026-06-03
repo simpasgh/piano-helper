@@ -159,6 +159,13 @@ def _encode_image(image_path: str) -> Tuple[Optional[str], str]:
     try:
         from PIL import Image
 
+        # Decompression-bomb guard: a non-PDF upload (10 MB cap) is passed straight here, so a
+        # crafted highly-compressible image could balloon during decode. Bound the decoded pixel
+        # area before opening; Pillow raises DecompressionBombError past it, which the surrounding
+        # try/except turns into a clean None -> fallback. Mirrors worker.MAX_STITCH_PIXELS (kept a
+        # local constant to avoid importing worker, which imports this module).
+        Image.MAX_IMAGE_PIXELS = 1_000_000_000
+
         try:
             max_edge = int(os.environ.get("OMR_LLM_MAX_EDGE", "2048"))
         except (TypeError, ValueError):
