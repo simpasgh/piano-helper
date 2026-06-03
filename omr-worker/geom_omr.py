@@ -74,6 +74,27 @@ _BOTTOM_LINE_NOTE = {
     "C": ("F", 3),   # alto (middle-line C4)
 }
 
+# Key-signature accidentals by the circle of fifths: sharps add in the order F C G D A E B,
+# flats in the reverse order B E A D G C F. A key with `fifths` sharps (>0) or flats (<0)
+# sharps/flats exactly the first |fifths| steps of that order. This is the "key prior" the
+# decode docstring refers to: staff geometry gives the diatonic STEP, the key gives its ALTER.
+_SHARP_ORDER = ("F", "C", "G", "D", "A", "E", "B")
+_FLAT_ORDER = ("B", "E", "A", "D", "G", "C", "F")
+
+
+def keyed_alter(step: str, fifths: int) -> int:
+    """The accidental (+1 sharp / -1 flat / 0 natural) that key signature `fifths` applies to a
+    diatonic step. PURE. fifths>0 = sharp keys, fifths<0 = flat keys, 0 = C major (all natural)."""
+    try:
+        f = int(fifths)
+        if f > 0 and step in _SHARP_ORDER[:f]:
+            return 1
+        if f < 0 and step in _FLAT_ORDER[: -f]:
+            return -1
+        return 0
+    except Exception:
+        return 0
+
 
 def _step_octave_to_diatonic_index(step: str, octave: int) -> int:
     """Absolute diatonic index: C0 -> 0, D0 -> 1, ... B0 -> 6, C1 -> 7, ... Monotonic in
@@ -92,6 +113,7 @@ def decode_pitch(
     notehead_center_y: float,
     staff_lines: List[float],
     clef: str = "G",
+    fifths: int = 0,
 ) -> Optional[Tuple[str, int, int]]:
     """Pure-geometry pitch decode: a notehead's vertical pixel center -> (step, alter, octave).
 
@@ -100,13 +122,13 @@ def decode_pitch(
         staff_lines: the 5 staff-line y-centers in pixels, TOP-to-bottom (ascending y). The
             element order is normalized internally, so a bottom-to-top list also works.
         clef: "G" (treble), "F" (bass), or "C" (alto). Defaults to treble.
+        fifths: key signature (sharps>0 / flats<0). Staff geometry fixes the diatonic STEP and
+            octave; the key fixes the ALTER (e.g. an F on the staff is F# in a 3-sharp key). With
+            the default 0 (C major) alter is 0, the original natural-only behavior. This is the
+            "key prior" the module was designed to add later; per-note accidentals (which would
+            override the key for one note) are still not read by this geometric pass.
 
     Returns (step, alter, octave) or None on malformed input. NEVER raises.
-
-    alter is always 0: pure staff geometry gives the LINE/SPACE (the diatonic step + octave);
-    sharps/flats come from accidentals/key, which this geometric pass does not read. That is
-    fine for the pitch-class/octave question we are measuring (and a later pass can add the
-    key prior, exactly as reconcile._diatonic_pitch_classes does).
     """
     try:
         clef = (str(clef) or "G").upper()
@@ -138,7 +160,7 @@ def decode_pitch(
         bottom_step, bottom_octave = ref
         base_idx = _step_octave_to_diatonic_index(bottom_step, bottom_octave)
         step, octave = _diatonic_index_to_step_octave(base_idx + pos)
-        return step, 0, octave
+        return step, keyed_alter(step, fifths), octave
     except Exception:
         return None
 
@@ -421,11 +443,13 @@ def _clef_for_staff_index(idx_in_system: int) -> str:
     return "G" if idx_in_system % 2 == 0 else "F"
 
 
-def transcribe_geometric(image_path_or_gray) -> Optional[bytes]:
+def transcribe_geometric(image_path_or_gray, key_fifths: int = 0) -> Optional[bytes]:
     """Tie it together: detect staves, detect noteheads per staff, decode each to a pitch by
     geometry, group chords, assign treble/bass, and emit a 1-part / 2-staff grand-staff
     MusicXML via llm_omr.score_json_to_musicxml. Returns MusicXML bytes, or None if nothing
     usable was found. NEVER raises.
+
+    key_fifths: key signature handed to decode_pitch for accidentals (default 0 = C major).
 
     Measure structure: this geometric pass does NOT read barlines yet, so it places ALL of a
     staff's chords into a SINGLE measure per hand. The eval metric grades pitch per
@@ -462,7 +486,7 @@ def transcribe_geometric(image_path_or_gray) -> Optional[bytes]:
             for chord in chords:
                 pitches = []
                 for (_x, y) in chord:
-                    p = decode_pitch(y, staff_lines, clef)
+                    p = decode_pitch(y, staff_lines, clef, fifths=key_fifths)
                     if p is not None:
                         pitches.append(p)
                 if not pitches:
@@ -481,7 +505,7 @@ def transcribe_geometric(image_path_or_gray) -> Optional[bytes]:
 
         data = {
             "divisions": 4,
-            "key_fifths": 0,
+            "key_fifths": key_fifths,
             "time": {"beats": 4, "beat_type": 4},
             "measures": measures,
         }

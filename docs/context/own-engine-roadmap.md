@@ -4,6 +4,53 @@ Self-contained plan so any session (esp. the one on the GPU PC) can pick up and 
 without the prior machine's local memory. Newest status at the top. NO em dashes in generated
 text (project rule). Ship every code change through the gated flow (see "Constraints" below).
 
+## STATUS: trained notehead detector works, beats baseline (GPU PC, 2026-06-03)
+
+Executed THE NEXT STEP on the GPU PC (RTX 5060 Ti, 16GB, Blackwell sm_120). The trained
+detector plan works and clears the bar. New code (all in `omr-worker/`, research-only, NOT wired
+into the worker): `synth_render.py`, `synth_dataset.py`, `synth_augment.py`, `train_detector.py`,
+`geom_detector.py`, `eval_detector.py` (+ tests). Heavy artifacts (venv, dataset, runs, weights)
+live OUTSIDE the repo under `~/omr-train` and are gitignored.
+
+Headline (held-out SYNTHETIC, primary benchmark; an 8-epoch model, detection saturates by epoch
+2: notehead recall 1.0 / mAP50 0.995, so a short run already suffices):
+- C-major set (120 scores, where the decode needs no key): **trained exact-F1 0.924, octave 1.0**,
+  chord 0.41, vs the classical detector on the SAME set 0.416 / 0.792 / 0.0. This PASSES the 0.90
+  free-baseline bar and the prior classical-clean 0.774. The roadmap's headline question ("does
+  the trained detector push exact-F1 toward/past 0.90?") is answered YES, with PERFECT octave.
+- ALL keys (240 scores, key prior applied): trained 0.866 / octave 0.998 / chord 0.36, vs
+  classical 0.338 / 0.716 / 0.0. Detection note-recall ~0.98 (26443 of 26954) vs classical ~0.95.
+- The detector is the win the roadmap predicted: it removes the classical detector's ~0.82
+  notehead-recall cap (here ~0.98-1.0), and the EXACT geometric decode then gives octave 1.0.
+
+Found + fixed a decode gap (orthogonal to the detector): `decode_pitch` returned alter=0 always,
+so every accidental in a non-C key read a semitone wrong (this also explains why our mixed-key
+classical numbers sat well below 0.774). Added the key prior `geom_omr.keyed_alter` +
+`decode_pitch(..., fifths=)` (the "key prior" the module was always meant to add). With the key
+applied, the trained engine across all 240 mixed-key scores reaches 0.866 exact-F1 / octave
+0.998 (without the key it was ~0.62 on the same scores, every accidental read a semitone flat).
+Reading the key signature FROM the image is still a separate (classical, no-GPU) recognition
+rung; we proved the decode is exact once the key is known.
+
+Remaining gaps / next rungs (in priority order):
+1. Finish training (50 epochs / early-stop) for final weights, re-measure on GPU.
+2. Real-photo number: `synth_augment.py` (paper tone, uneven light, shadow, blur, sensor noise,
+   JPEG) is built + unit-tested but NOT yet baked into a training run; build an augmented dataset,
+   retrain, and measure on icarus.pdf (the secondary benchmark) to get the phone-photo number.
+3. Key-signature DETECTION from the engraved keySig (count sharps/flats) to remove the oracle-key
+   assumption.
+4. chord_recall (~0.4) and barline-based measures (the cheaper non-GPU rungs).
+5. Deploy weights to the cx33 box (CPU inference) ONLY after it beats baseline AND passes QA.
+
+Gotchas worth not re-learning (this box, Windows):
+- Blackwell sm_120 needs the CUDA 12.8 torch wheel (`pip install torch --index-url
+  .../whl/cu128`); older cu118/cu121 wheels import fine but have no sm_120 kernels.
+- At imgsz 1280, batch=16 oversubscribes the 16GB card; on Windows WDDM that does NOT OOM, it
+  SPILLS VRAM into system RAM and runs ~10x slower (0.3 vs 3 it/s). Use batch=8 (~11-12GB, no
+  spill). Watch the GPU_mem column: >16G = spilling.
+- cairosvg has no system libcairo on Windows, so SVG->PNG goes through Playwright Chromium, which
+  ALSO gives pixel-exact notehead/staff boxes via getBoundingClientRect (free perfect labels).
+
 ## Goal
 
 Build OUR OWN optical-music-recognition engine for the app: the most accurate we can for
