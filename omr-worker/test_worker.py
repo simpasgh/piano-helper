@@ -594,44 +594,8 @@ def test_ensemble_single_engine_reconcile_is_passthrough(tmp_path, monkeypatch):
     assert called["reconcile"] is False, "reconcile must not run with only one engine"
 
 
-def test_job_is_fast_reads_metadata_and_never_raises():
-    # Truthy spellings of the fast flag -> True; absent/empty/missing -> False (accurate).
-    assert worker.job_is_fast(_FakeClient(metadata={"fast": "1"}), "b", "j") is True
-    assert worker.job_is_fast(_FakeClient(metadata={"fast": "true"}), "b", "j") is True
-    assert worker.job_is_fast(_FakeClient(metadata={"fast": "0"}), "b", "j") is False
-    assert worker.job_is_fast(_FakeClient(metadata={}), "b", "j") is False
-    assert worker.job_is_fast(_FakeClient(), "b", "j") is False
-
-    class _Boom:
-        def head_object(self, Bucket, Key):
-            raise RuntimeError("metadata read failed")
-
-    # A read failure must default to accurate (False), never raise.
-    assert worker.job_is_fast(_Boom(), "b", "j") is False
-
-
-def test_fast_flag_takes_legacy_path_even_when_ensemble_on(tmp_path, monkeypatch):
-    # FLAG ON but the upload is tagged fast=1: the worker takes the single-engine legacy path
-    # and NEVER runs the ensemble (no oemer, no reconcile), trading accuracy for ~5x latency.
-    monkeypatch.setenv("OMR_ENSEMBLE", "1")
-    clarity_out = tmp_path / "clarity.musicxml"
-    clarity_out.write_text("<score/>")
-    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clarity_out))
-
-    def ensemble_must_not_run(*a, **k):
-        raise AssertionError("ensemble must not run for a fast-tagged job")
-
-    monkeypatch.setattr(worker, "_select_ensemble", ensemble_must_not_run)
-    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
-    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
-
-    client = _FakeClient(input_bytes=b"%PDF-1.4 fake", metadata={"fast": "1"})
-    _drive_process_job(monkeypatch, client, is_pdf=True)
-    assert client.put_body is not None  # the legacy Clarity path produced the result
-
-
 def test_default_job_with_ensemble_on_runs_ensemble(tmp_path, monkeypatch):
-    # FLAG ON and NO fast flag: the ensemble runs (the default accurate path).
+    # FLAG ON: the ensemble runs (the default accurate path).
     monkeypatch.setenv("OMR_ENSEMBLE", "1")
     ran = {"ensemble": False}
 
@@ -643,14 +607,14 @@ def test_default_job_with_ensemble_on_runs_ensemble(tmp_path, monkeypatch):
     monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
     monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
 
-    client = _FakeClient(input_bytes=b"%PDF-1.4 fake")  # no fast metadata
+    client = _FakeClient(input_bytes=b"%PDF-1.4 fake")
     _drive_process_job(monkeypatch, client, is_pdf=True)
     assert ran["ensemble"] is True
 
 
-def test_llm_used_when_available_and_not_fast(tmp_path, monkeypatch):
-    # When the LLM transcriber is available and the job is not fast, its bytes are used as the
-    # result and the geometry engines are NOT run.
+def test_llm_used_when_available(tmp_path, monkeypatch):
+    # When the LLM transcriber is available, its bytes are used as the result and the geometry
+    # engines are NOT run.
     monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: True)
     monkeypatch.setattr(worker.llm_omr, "transcribe", lambda image: b"<score-partwise/>")
 
@@ -665,25 +629,6 @@ def test_llm_used_when_available_and_not_fast(tmp_path, monkeypatch):
     client = _FakeClient(input_bytes=b"\x89PNG fake")
     _drive_process_job(monkeypatch, client, is_pdf=False)
     assert client.put_body == b"<score-partwise/>"
-
-
-def test_llm_skipped_on_fast_scan(tmp_path, monkeypatch):
-    # A fast scan must skip the LLM (no API cost) and take the free legacy path.
-    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: True)
-
-    def transcribe_must_not_run(image):
-        raise AssertionError("LLM must not run on a fast scan")
-
-    monkeypatch.setattr(worker.llm_omr, "transcribe", transcribe_must_not_run)
-    clarity_out = tmp_path / "clarity.musicxml"
-    clarity_out.write_text("<score/>")
-    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clarity_out))
-    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
-    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
-
-    client = _FakeClient(input_bytes=b"%PDF-1.4 fake", metadata={"fast": "1"})
-    _drive_process_job(monkeypatch, client, is_pdf=True)
-    assert client.put_body is not None  # legacy Clarity result, not the LLM
 
 
 def test_llm_falls_back_to_engines_when_it_returns_none(tmp_path, monkeypatch):

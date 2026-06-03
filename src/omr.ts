@@ -30,10 +30,6 @@ export function isCancelled(err: unknown): boolean {
 }
 
 export interface SubmitOptions {
-  // When true, the upload is tagged "fast scan": the worker runs only the primary engine
-  // (no second OMR engine), so the result is ~5x faster but slightly less accurate. Default
-  // false = the full, most-accurate path. Carried to the worker as R2 customMetadata.
-  fast?: boolean;
   fetchFn?: FetchFn;
 }
 
@@ -41,12 +37,9 @@ export async function submitOmr(
   file: File,
   options: SubmitOptions = {},
 ): Promise<string> {
-  const { fast = false, fetchFn = fetch } = options;
+  const { fetchFn = fetch } = options;
   const form = new FormData();
   form.append("file", file);
-  if (fast) {
-    form.append("fast", "1");
-  }
 
   const res = await fetchFn("/api/omr", { method: "POST", body: form });
   if (!res.ok) {

@@ -30,7 +30,7 @@ function isFilePart(value: unknown): value is FilePart {
 // "file" field; falls back to the raw request body when no form part is present.
 async function readUpload(
   request: Request,
-): Promise<{ bytes: ArrayBuffer; contentType: string | null; fast: boolean }> {
+): Promise<{ bytes: ArrayBuffer; contentType: string | null }> {
   const reqType = request.headers.get("content-type") ?? "";
   if (reqType.includes("multipart/form-data")) {
     const form = await request.formData();
@@ -38,24 +38,18 @@ async function readUpload(
     // narrows FormData.get() to string | null. Feature-detect arrayBuffer at runtime
     // instead of relying on the (overly narrow) static type.
     const entry = form.get("file") as unknown;
-    // "fast" opt-out of the accurate default (skip the slower second OMR engine). Set by the
-    // client only as the literal "1"; absent/empty = the default full (most-accurate) path.
-    const fast = String(form.get("fast") ?? "") === "1";
     if (isFilePart(entry)) {
       return {
         bytes: await entry.arrayBuffer(),
         contentType: entry.type || null,
-        fast,
       };
     }
   }
-  // Fallback: raw body, trust the request Content-Type header. No form fields here, so the
-  // raw-body path is always the default (accurate) scan.
+  // Fallback: raw body, trust the request Content-Type header.
   const bytes = await request.arrayBuffer();
   return {
     bytes,
     contentType: reqType ? reqType.split(";")[0].trim() : null,
-    fast: false,
   };
 }
 
@@ -68,14 +62,14 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     return json({ error: "OMR is not configured." }, 503);
   }
 
-  let upload: { bytes: ArrayBuffer; contentType: string | null; fast: boolean };
+  let upload: { bytes: ArrayBuffer; contentType: string | null };
   try {
     upload = await readUpload(request);
   } catch {
     return json({ error: "Could not read the uploaded file." }, 400);
   }
 
-  const { bytes, contentType, fast } = upload;
+  const { bytes, contentType } = upload;
   const check = validateUpload(contentType, bytes.byteLength);
   if (!check.ok) {
     return json({ error: check.error ?? "Invalid upload." }, check.status);
@@ -87,9 +81,6 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   try {
     await env.OMR_BUCKET.put(key, bytes, {
       httpMetadata: { contentType: contentType ?? undefined },
-      // Per-job "fast scan" flag the worker reads (R2 customMetadata -> S3 x-amz-meta-fast).
-      // Only set when opted in, so existing/default uploads carry no flag = accurate path.
-      ...(fast ? { customMetadata: { fast: "1" } } : {}),
     });
   } catch {
     return json({ error: "Failed to store the upload." }, 502);

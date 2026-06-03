@@ -1075,23 +1075,6 @@ def run_primary_engines(run_clarity_fn, run_oemer_fn, is_pdf_input):
     return results.get("clarity"), results.get("oemer")
 
 
-def job_is_fast(client, bucket, job_id):
-    """True when the upload was tagged "fast scan" (R2 customMetadata fast=1, surfaced as the
-    S3 user-metadata key 'fast'). A fast job skips the ensemble's second engine and takes the
-    single-engine legacy path, trading accuracy for ~5x lower latency. Defaults to False (the
-    full, most-accurate path) on any read failure or absent flag, so a metadata hiccup never
-    silently downgrades quality. Never raises."""
-    try:
-        head = client.head_object(Bucket=bucket, Key=upload_key(job_id))
-        meta = head.get("Metadata") or {}
-        # botocore lowercases user-metadata keys. The client only ever writes "1"; we also
-        # tolerate "true" defensively.
-        return str(meta.get("fast", "")).strip().lower() in ("1", "true")
-    except Exception as err:
-        log("could not read fast flag for %s (%r); defaulting to accurate" % (job_id, err))
-        return False
-
-
 def process_job(client, bucket, job_id):
     """Convert one upload. Always leaves exactly one object at the result key
     (real score or sentinel) and deletes the upload so it is not reprocessed."""
@@ -1108,19 +1091,14 @@ def process_job(client, bucket, job_id):
         # original PDF path stays available for Clarity, which reads the PDF directly.
         is_pdf_input = sniff_mime(input_path) == "application/pdf"
 
-        # Per-job "fast scan" opt-out: the user asked for the cheap/quick single-engine path,
-        # so skip BOTH the LLM (an API cost) and the ensemble's second engine. Default (not
-        # fast) prefers the LLM transcriber when configured, then the ensemble, then legacy.
-        fast = job_is_fast(client, bucket, job_id)
-
         body = None
         source = None
 
-        # LLM-vision transcriber: the "big value, low latency" engine. When enabled+keyed (and
-        # not a fast scan), it reads the score image holistically (chords included) in one API
-        # round-trip. It returns MusicXML bytes directly; on ANY failure it returns None and we
-        # fall through to the existing engines, so this never regresses the free pipeline.
-        if llm_omr.llm_available() and not fast:
+        # LLM-vision transcriber: the "big value, low latency" engine. When enabled+keyed it
+        # reads the score image holistically (chords included) in one API round-trip. It returns
+        # MusicXML bytes directly; on ANY failure it returns None and we fall through to the
+        # existing engines, so this never regresses the free pipeline.
+        if llm_omr.llm_available():
             llm_image = input_path
             if is_pdf_input:
                 try:
@@ -1135,7 +1113,7 @@ def process_job(client, bucket, job_id):
                     log("%s recognized via llm" % job_id)
 
         if body is None:
-            if ensemble_enabled() and not fast:
+            if ensemble_enabled():
                 result_path, source = _select_ensemble(job_id, input_path, workdir, is_pdf_input)
             else:
                 result_path, source = _select_legacy(job_id, input_path, workdir, is_pdf_input)
