@@ -357,6 +357,30 @@ def test_rich_score_exotic_divisions_degrade_without_crash():
     assert omr_eval.score_transcription(xml, xml)["note_f1"] == 1.0
 
 
+def test_rich_score_ties_are_engraved_and_stay_ground_truth():
+    xml = omr_eval.generate_rich_score(seed=3, n_measures=6, key_fifths=0, tie_prob=0.6)
+    assert b"<tied" in xml  # ties engraved (the g.tie arc the detector learns)
+    # ties do not perturb the scorer: a tied score is still its own ground truth (pitch + duration)
+    m = omr_eval.score_transcription(xml, xml)
+    assert m["note_f1"] == 1.0 and m["note_dur_f1"] == 1.0
+    starts = [e for e in reconcile.to_events(xml, "x") if "start" in e.tie]
+    stops = [e for e in reconcile.to_events(xml, "x") if "stop" in e.tie]
+    assert starts and len(starts) == len(stops)
+    # tie_prob=0 (default) engraves no ties (gated, default RNG stream unchanged)
+    assert b"<tied" not in omr_eval.generate_rich_score(seed=3, n_measures=6, key_fifths=0)
+
+
+def test_rich_score_clef_changes_include_bass_and_alto():
+    seen = set()
+    for seed in range(40):
+        xml = omr_eval.generate_rich_score(seed=seed, n_measures=6, key_fifths=0, clef_changes=True)
+        assert omr_eval.score_transcription(xml, xml)["note_f1"] == 1.0
+        for meas in ET.fromstring(xml).findall(".//measure")[1:]:
+            for clef in meas.findall("attributes/clef"):
+                seen.add(clef.findtext("sign"))
+    assert "F" in seen and "C" in seen  # both an fClef-change and a cClef-change occur across seeds
+
+
 def test_rich_score_random_key_when_unspecified_and_never_raises():
     # key_fifths None -> a deterministic in-range random key; odd args degrade, never raise.
     xml = omr_eval.generate_rich_score(seed=99, n_measures=4)

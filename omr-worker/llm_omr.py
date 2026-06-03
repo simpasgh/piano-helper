@@ -449,6 +449,16 @@ _DEFAULT_CLEF_LINE = {"G": 2, "F": 4, "C": 3}
 _VALID_OCTAVE_SHIFT_TYPES = {"up", "down", "stop", "continue"}
 
 
+def _tie_types(tie_val) -> list:
+    """The <tie>/<tied> type values for an event's opt-in 'tie' field. 'both' (a note tied on both
+    sides) emits stop THEN start, matching MusicXML; 'start'/'stop' emit one. Anything else -> []."""
+    if tie_val == "both":
+        return ["stop", "start"]
+    if tie_val in ("start", "stop"):
+        return [tie_val]
+    return []
+
+
 def _int(value, default: int) -> int:
     try:
         return int(value)
@@ -588,10 +598,13 @@ def _build_event(measure_el: ET.Element, event: dict, staff: int) -> int:
         if not _append_pitch(note, pitch):
             measure_el.remove(note)
             continue
-        # MusicXML <note> child order: [chord], pitch, duration, type, dot*, accidental, staff,
-        # beam*. type/dot are per-event; accidental is per-notehead; beams attach to the event's
-        # primary note (the first chord member).
+        # MusicXML <note> child order: [chord], pitch, duration, tie*, type, dot*, accidental,
+        # staff, beam*, notations*. type/dot are per-event; accidental is per-notehead; tie/beams/
+        # notations attach to the event's primary note (the first chord member).
         ET.SubElement(note, "duration").text = str(duration)
+        tie_vals = _tie_types(event.get("tie")) if first else []
+        for t in tie_vals:
+            ET.SubElement(note, "tie", {"type": t})  # sounding tie (reconcile reads this)
         _emit_type_and_dots(note, event)
         acc = pitch.get("accidental")
         if isinstance(acc, str) and acc in _VALID_ACCIDENTALS:
@@ -599,6 +612,10 @@ def _build_event(measure_el: ET.Element, event: dict, staff: int) -> int:
         ET.SubElement(note, "staff").text = str(staff)
         if first:
             _emit_beams(note, event)
+        if tie_vals:  # the engraved tie/slur arc (what verovio draws as g.tie)
+            notations = ET.SubElement(note, "notations")
+            for t in tie_vals:
+                ET.SubElement(notations, "tied", {"type": t})
         first = False
         wrote_any = True
     if not wrote_any:
