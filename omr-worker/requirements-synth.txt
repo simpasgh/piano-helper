@@ -1,0 +1,16 @@
+# Dataset-GENERATION deps for the full-symbol detector (NOT prod worker deps).
+#
+# These power the committed dataset-generation code (synth_render / synth_dataset / the rich
+# generator in omr_eval). They are needed only to BUILD training data on the GPU PC, never on the
+# always-on cx33 worker. The training stack itself (torch + ultralytics) is deliberately kept OUT
+# of the repo per the roadmap; on Blackwell sm_120 install torch from the CUDA 12.8 wheel index
+# (see docs/context/own-engine-roadmap.md gotchas), then `pip install ultralytics`.
+#
+# Setup:
+#   pip install -r requirements-synth.txt
+#   python -m playwright install chromium   # the SVG rasterizer + getBoundingClientRect labels
+#
+# numpy / pillow (used by synth_augment + the overlay) come from the base requirements.txt.
+
+verovio==6.2.1
+playwright==1.60.0
