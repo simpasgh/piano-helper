@@ -49,6 +49,10 @@ from botocore.exceptions import ClientError
 import reconcile
 from reconcile import _clef_sign
 
+# llm_omr is the optional LLM-vision transcriber engine (stdlib-only; gated + key-required,
+# so importing it is free and it is inert until OMR_LLM + a provider key are configured).
+import llm_omr
+
 UPLOAD_PREFIX = "uploads/"
 RESULT_SUFFIX = ".musicxml"
 RESULT_CONTENT_TYPE = "application/vnd.recordare.musicxml+xml"
@@ -1104,23 +1108,47 @@ def process_job(client, bucket, job_id):
         # original PDF path stays available for Clarity, which reads the PDF directly.
         is_pdf_input = sniff_mime(input_path) == "application/pdf"
 
-        # Per-job "fast scan" opt-out: the user asked to skip the slower second engine, so
-        # take the single-engine legacy path regardless of the ensemble flag. Otherwise the
-        # ensemble runs when enabled. (fast + ensemble-off both resolve to the same legacy path.)
+        # Per-job "fast scan" opt-out: the user asked for the cheap/quick single-engine path,
+        # so skip BOTH the LLM (an API cost) and the ensemble's second engine. Default (not
+        # fast) prefers the LLM transcriber when configured, then the ensemble, then legacy.
         fast = job_is_fast(client, bucket, job_id)
-        if ensemble_enabled() and not fast:
-            result_path, source = _select_ensemble(job_id, input_path, workdir, is_pdf_input)
-        else:
-            result_path, source = _select_legacy(job_id, input_path, workdir, is_pdf_input)
 
-        if result_path is not None:
-            with open(result_path, "rb") as fh:
-                body = fh.read()
-            log("%s recognized via %s output %s" % (job_id, source, result_path))
-            # Post-transforms run UNCONDITIONALLY on every engine's output. Each returns
-            # the input unchanged on failure or when it does not apply (oemer is already a
-            # 1-part grand staff with zero ties, so both are safe no-ops there). Order:
-            # collapse 2 parts to a grand staff first, then pair/drop ties.
+        body = None
+        source = None
+
+        # LLM-vision transcriber: the "big value, low latency" engine. When enabled+keyed (and
+        # not a fast scan), it reads the score image holistically (chords included) in one API
+        # round-trip. It returns MusicXML bytes directly; on ANY failure it returns None and we
+        # fall through to the existing engines, so this never regresses the free pipeline.
+        if llm_omr.llm_available() and not fast:
+            llm_image = input_path
+            if is_pdf_input:
+                try:
+                    llm_image, _ = rasterize_if_pdf(input_path, workdir)
+                except Exception as err:
+                    log("LLM rasterize failed for %s (%r); skipping LLM" % (job_id, err))
+                    llm_image = None
+            if llm_image is not None:
+                llm_bytes = llm_omr.transcribe(llm_image)
+                if llm_bytes:
+                    body, source = llm_bytes, "llm"
+                    log("%s recognized via llm" % job_id)
+
+        if body is None:
+            if ensemble_enabled() and not fast:
+                result_path, source = _select_ensemble(job_id, input_path, workdir, is_pdf_input)
+            else:
+                result_path, source = _select_legacy(job_id, input_path, workdir, is_pdf_input)
+            if result_path is not None:
+                with open(result_path, "rb") as fh:
+                    body = fh.read()
+                log("%s recognized via %s output %s" % (job_id, source, result_path))
+
+        if body is not None:
+            # Post-transforms run UNCONDITIONALLY on every engine's output (incl. the LLM's).
+            # Each returns the input unchanged on failure or when it does not apply (the LLM and
+            # oemer both emit a 1-part grand staff with zero ties, so both are safe no-ops
+            # there). Order: collapse 2 parts to a grand staff first, then pair/drop ties.
             body = merge_to_grand_staff(body)
             body = normalize_ties(body)
         else:
