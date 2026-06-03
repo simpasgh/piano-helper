@@ -4,6 +4,34 @@ Self-contained plan so any session (esp. the one on the GPU PC) can pick up and 
 without the prior machine's local memory. Newest status at the top. NO em dashes in generated
 text (project rule). Ship every code change through the gated flow (see "Constraints" below).
 
+## STATUS: geom is a never-worse FALLBACK on cx33; BARLINES shipped, detection-robustness next (2026-06-03)
+
+The trained detector is deployed to the cx33 prod worker with `OMR_GEOM=1`, but it runs as a
+LAST-RESORT FALLBACK, not a primary (PR #178): tried only when the Clarity/oemer ensemble produces
+nothing. It was briefly wired wins-first (PR #172) and that regressed prod (it fabricates rhythm),
+so it was demoted the same day.
+
+A REAL-SCORE eval (the user's own MuseScore pieces icarus/reverie/liminality/tctab as PDF +
+MusicXML ground truth; harness + pieces on the box at `/opt/geom-omr/eval/real_scores`, see memory
+[[geom-improvement-priorities]]) reordered the levers. geom found up to 93% of the pitches but
+binned them 4-per-measure, so per-measure note_f1 collapsed to ~0.29: BARLINES, not rhythm, were
+the biggest gap.
+
+SHIPPED (PR #180): `detect_barlines` (vertical runs crossing the inter-staff gap, which stems do
+not) + the decode now segments chords into real measures by x-position. Measured lift on the real
+pieces: liminality note_f1 0.29 -> **0.95** (chord_recall 0.09 -> 0.79), tctab 0.28 -> 0.71, icarus
+0.15 -> 0.39. A rhythm-aware duration metric was added first (PR #179: `duration_acc`/`note_dur_f1`)
+so the gap is measurable.
+
+NEXT LEVERS (in order): (1) **detection robustness** -- reverie found only 50 of 185 notes and
+icarus's `detect_systems` found 5 staves not 6, so the trained YOLO detector and/or staff detection
+fail on some real engravings; barlines/rhythm cannot help notes never found. Investigate with the
+real_eval harness on reverie/icarus. (2) **rhythm / durations** -- still `duration: 1`; needs
+note-type CV (head fill open/filled, stems, flags/beams, dots; `detect_noteheads` already computes a
+fill ratio). (3) key-signature detection. (4) re-promote geom from fallback once it is genuinely
+competitive (the per-note `referee.py` only arbitrates ALIGNED candidates, so that needs a
+whole-output selector). Deploy + rollback: docs/context/infrastructure.md and omr-worker/README.md.
+
 ## STATUS: trained notehead detector works, beats baseline (GPU PC, 2026-06-03)
 
 Executed THE NEXT STEP on the GPU PC (RTX 5060 Ti, 16GB, Blackwell sm_120). The trained
