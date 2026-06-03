@@ -98,6 +98,9 @@ def _summary(acc: Dict) -> Dict:
         # measure-agnostic recall: same notes, graded per-hand instead of per-(measure, hand).
         # If this is much higher than exact_recall, the measure binning is the bottleneck.
         "staff_pooled_recall": round(acc["exact_sp"] / nt, 4) if nt else 0.0,
+        # micro chord recall: chord hits / truth chords, matching omr_eval.score_transcription's
+        # convention (1.0 when there are no truth chords). _accumulate already tracks both counts.
+        "chord_recall": round(acc["chord_hits"] / acc["truth_chords"], 4) if acc["truth_chords"] else 1.0,
         "n_truth": nt, "n_pred": npd, "n_exact": exact,
     }
 
