@@ -59,16 +59,17 @@ def _accumulate(acc: Dict, pred_xml: Optional[bytes], truth_xml: bytes) -> None:
     truth_sp, pred_sp = _pool_by_staff(truth), _pool_by_staff(pred)
     for staff in set(truth_sp) | set(pred_sp):
         acc["exact_sp"] += sum((truth_sp.get(staff, Counter()) & pred_sp.get(staff, Counter())).values())
-    # chords (>= 2 notes at one onset), accumulated to a micro chord recall. Count truth chords
-    # and their exact-pitch-set hits in pred straight from omr_eval._chords_by_cell: the old
-    # omr_eval.score_transcription call re-parsed BOTH XMLs (its note metrics were discarded
-    # here, only chord_recall/n_truth_chords were used), so calling the chord helper directly
-    # drops two redundant parses per sample. Same arithmetic as score_transcription's chord pass.
+    # chords (>= 2 notes at one onset), accumulated to a micro chord recall. Parse the chord
+    # maps with omr_eval._chords_by_cell and count via the SHARED omr_eval._chord_hit_counts (the
+    # same routine score_transcription uses), so the micro chord_recall cannot drift from the
+    # per-sample scorer. The old code called omr_eval.score_transcription only for these two
+    # numbers, which re-parsed BOTH XMLs for note metrics that were then discarded; going
+    # straight to the chord helper drops two redundant parses per sample.
     truth_chords = omr_eval._chords_by_cell(truth_xml)
     pred_chords = omr_eval._chords_by_cell(pred_xml) if pred_xml else {}
-    acc["truth_chords"] += sum(sum(c.values()) for c in truth_chords.values())
-    for cell, t_sets in truth_chords.items():
-        acc["chord_hits"] += sum((t_sets & pred_chords.get(cell, Counter())).values())
+    ntc, hits = omr_eval._chord_hit_counts(truth_chords, pred_chords)
+    acc["truth_chords"] += ntc
+    acc["chord_hits"] += hits
 
 
 def _summary(acc: Dict) -> Dict:

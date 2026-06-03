@@ -96,6 +96,22 @@ def test_no_truth_chords_means_chord_recall_one():
     assert omr_eval.score_transcription(t, t)["chord_recall"] == 1.0
 
 
+def test_chord_hit_counts_multiset_intersection():
+    # the shared (measure,staff)->Counter-of-frozensets reducer behind both score_transcription
+    # and eval_detector. Counts are a multiset intersection keyed by cell.
+    from collections import Counter
+
+    cell = (1, 2)
+    eg = frozenset({52, 55})   # E3 + G3
+    fa = frozenset({53, 57})   # F3 + A3
+    truth = {cell: Counter({eg: 2, fa: 1})}
+    pred = {cell: Counter({eg: 1})}            # one E-G chord, no F-A
+    assert omr_eval._chord_hit_counts(truth, pred) == (3, 1)  # 3 truth chords, min(2,1)+min(1,0)
+    assert omr_eval._chord_hit_counts({}, pred) == (0, 0)     # no truth chords
+    # a matching chord in the WRONG cell does not count.
+    assert omr_eval._chord_hit_counts({cell: Counter({eg: 1})}, {(9, 9): Counter({eg: 1})}) == (1, 0)
+
+
 def test_score_transcription_never_raises_on_garbage():
     m = omr_eval.score_transcription(b"<not-xml", b"<also-not")
     assert m["note_f1"] == 0.0 and m["n_truth"] == 0
