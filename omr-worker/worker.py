@@ -55,6 +55,11 @@ from reconcile import _clef_sign
 import llm_omr
 import fusion
 
+# rhythm_repair is PURE stdlib (no boto3/torch), like reconcile/fusion, so importing it is free.
+# It is the final post-transform: a music-theory pass that makes each measure's note durations sum
+# to the time signature (never-raise, never-worse). See rhythm_repair.py.
+import rhythm_repair
+
 UPLOAD_PREFIX = "uploads/"
 RESULT_SUFFIX = ".musicxml"
 RESULT_CONTENT_TYPE = "application/vnd.recordare.musicxml+xml"
@@ -1311,9 +1316,13 @@ def process_job(client, bucket, job_id):
             # Post-transforms run UNCONDITIONALLY on every engine's output (incl. the LLM's).
             # Each returns the input unchanged on failure or when it does not apply (the LLM and
             # oemer both emit a 1-part grand staff with zero ties, so both are safe no-ops
-            # there). Order: collapse 2 parts to a grand staff first, then pair/drop ties.
+            # there). Order: collapse 2 parts to a grand staff first, then pair/drop ties, then
+            # the music-theory rhythm repair (it reads the now-final grand-staff layout, the merged
+            # <backup>s and resolved ties, and makes each measure's durations sum to the time
+            # signature when it can do so confidently; a clean no-op on already-valid bars).
             body = merge_to_grand_staff(body)
             body = normalize_ties(body)
+            body = rhythm_repair.repair_measure_durations(body)
         else:
             body = FAILURE_SENTINEL
             log("all engines failed for %s; writing failure sentinel" % job_id)

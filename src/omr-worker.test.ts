@@ -217,17 +217,21 @@ describe("OMR worker Clarity-OMR tie engine (issue #135)", () => {
     expect(worker).toMatch(/is_pdf_input = sniff_mime\(input_path\) == "application\/pdf"/);
   });
 
-  it("applies both MusicXML post-transforms before put_object", () => {
+  it("applies the three MusicXML post-transforms before put_object", () => {
     expect(worker).toContain("def merge_to_grand_staff(");
     expect(worker).toContain("def normalize_ties(");
-    // Both run on the engine body, grand-staff merge first then tie normalization, and the
-    // call site precedes the put_object that writes the result.
+    // The rhythm repair (omr-worker/rhythm_repair.py) is the FINAL post-transform: it reads the
+    // already-merged grand staff + resolved ties and makes each measure's durations sum to the
+    // time signature. It must run AFTER merge+normalize and before the put_object that writes.
+    expect(worker).toContain("import rhythm_repair");
     const merge = worker.indexOf("body = merge_to_grand_staff(body)");
     const ties = worker.indexOf("body = normalize_ties(body)");
+    const repair = worker.indexOf("body = rhythm_repair.repair_measure_durations(body)");
     const put = worker.indexOf("client.put_object(");
     expect(merge).toBeGreaterThan(-1);
     expect(merge).toBeLessThan(ties);
-    expect(ties).toBeLessThan(put);
+    expect(ties).toBeLessThan(repair);
+    expect(repair).toBeLessThan(put);
   });
 
   it("makes the post-transforms safe no-ops that never raise into process_job", () => {

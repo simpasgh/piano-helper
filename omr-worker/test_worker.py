@@ -555,16 +555,59 @@ def test_ensemble_both_engines_reconcile_before_merge_and_normalize(tmp_path, mo
         order.append("normalize")
         return body
 
+    def fake_repair(body, *a, **k):
+        order.append("repair")
+        return body
+
     monkeypatch.setattr(worker.reconcile, "reconcile", fake_reconcile)
     monkeypatch.setattr(worker, "merge_to_grand_staff", fake_merge)
     monkeypatch.setattr(worker, "normalize_ties", fake_normalize)
+    monkeypatch.setattr(worker.rhythm_repair, "repair_measure_durations", fake_repair)
 
     client = _FakeClient(input_bytes=b"%PDF-1.4 fake")
     _drive_process_job(monkeypatch, client, is_pdf=True)
 
-    assert order == ["reconcile", "merge", "normalize"], order
-    # The reconciled bytes (post both no-op transforms) are what gets written.
+    # The rhythm repair runs LAST, after merge+normalize, so it reads the final grand-staff layout.
+    assert order == ["reconcile", "merge", "normalize", "repair"], order
+    # The reconciled bytes (post all no-op transforms) are what gets written.
     assert client.put_body == b"<reconciled/>"
+
+
+def test_post_transforms_repair_broken_bar_end_to_end(tmp_path, monkeypatch):
+    # Exercise the REAL (unstubbed) post-transform chain through process_job: a single engine
+    # returns a 1-part grand staff with five good 4/4 bars and one short middle bar (only 14 of 16
+    # beats). merge/normalize are no-ops on this shape, and the rhythm repair must COMPLETE the
+    # middle bar pitch-safely (a trailing rest, pitched notes untouched) so it sums to the time
+    # signature. Proves the wiring works end to end and never raises on real merged output.
+    import llm_omr
+    import xml.etree.ElementTree as ET
+
+    def _n(dur, step, octave=5):
+        return {"duration": dur, "pitches": [{"step": step, "octave": octave}]}
+
+    good = {"staff1": [_n(8, "C"), _n(8, "D")], "staff2": [_n(8, "C", 3), _n(8, "E", 3)]}
+    broken = {"staff1": [_n(12, "C"), _n(2, "D")], "staff2": [_n(8, "C", 3), _n(8, "E", 3)]}
+    body = llm_omr.score_json_to_musicxml(
+        {"divisions": 4, "time": {"beats": 4, "beat_type": 4},
+         "measures": [good, good, broken, good, good]})
+    engine_out = tmp_path / "engine.musicxml"
+    engine_out.write_bytes(body)
+
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(engine_out))
+
+    client = _FakeClient(input_bytes=b"%PDF-1.4 fake")
+    _drive_process_job(monkeypatch, client, is_pdf=True)
+
+    # The written body must have the middle bar (measure 3) completed: the two notes keep their
+    # durations (12 + 2) and a rest(2) is added so staff 1 sums to a full 4/4 bar.
+    root = ET.fromstring(client.put_body)
+    m3 = [m for m in root.iter("measure") if m.get("number") == "3"][0]
+    s1 = [n for n in m3.findall("note") if n.findtext("staff") == "1" and n.find("chord") is None]
+    pitched = [int(n.findtext("duration")) for n in s1 if n.find("rest") is None]
+    rests = [int(n.findtext("duration")) for n in s1 if n.find("rest") is not None]
+    assert pitched == [12, 2], pitched          # notes untouched (never stretched)
+    assert rests == [2]                          # the gap completed with a rest
+    assert sum(pitched) + sum(rests) == 16
 
 
 def test_ensemble_single_engine_reconcile_is_passthrough(tmp_path, monkeypatch):
