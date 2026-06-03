@@ -1,0 +1,114 @@
+"""Tests for the OMR evaluation foundation (omr_eval.py): the scoring harness + the
+deterministic synthetic-score generator. Pure stdlib, no API key, no verovio."""
+
+import xml.etree.ElementTree as ET
+
+import omr_eval
+import reconcile
+
+
+# --- score_transcription -----------------------------------------------------------------
+
+
+def test_identical_scores_score_perfect():
+    xml = omr_eval.generate_random_score(seed=1, n_measures=4)
+    m = omr_eval.score_transcription(xml, xml)
+    assert m["note_precision"] == 1.0
+    assert m["note_recall"] == 1.0
+    assert m["note_f1"] == 1.0
+    assert m["chord_recall"] == 1.0
+    assert m["n_truth"] == m["n_pred"] == m["n_matched"]
+    assert m["n_truth"] > 0
+
+
+def test_missing_note_drops_recall_not_precision():
+    # truth has C5+E5+G5 in m1 treble; pred has only C5 -> recall 1/3, precision 1/1.
+    truth = omr_eval.generate_random_score(seed=2, n_measures=1)
+    truth_data = {
+        "measures": [
+            {"staff1": [
+                {"duration": 4, "pitches": [{"step": "C", "octave": 5}]},
+                {"duration": 4, "pitches": [{"step": "E", "octave": 5}]},
+                {"duration": 4, "pitches": [{"step": "G", "octave": 5}]},
+            ], "staff2": []}
+        ]
+    }
+    import llm_omr
+    t = llm_omr.score_json_to_musicxml(truth_data)
+    p = llm_omr.score_json_to_musicxml({"measures": [{"staff1": [
+        {"duration": 4, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []}]})
+    m = omr_eval.score_transcription(p, t)
+    assert m["n_truth"] == 3 and m["n_pred"] == 1 and m["n_matched"] == 1
+    assert m["note_recall"] == round(1 / 3, 4)
+    assert m["note_precision"] == 1.0
+
+
+def test_wrong_extra_note_drops_precision():
+    import llm_omr
+    t = llm_omr.score_json_to_musicxml({"measures": [{"staff1": [
+        {"duration": 4, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []}]})
+    # pred adds a wrong B4 alongside the correct C5.
+    p = llm_omr.score_json_to_musicxml({"measures": [{"staff1": [
+        {"duration": 4, "pitches": [{"step": "C", "octave": 5}]},
+        {"duration": 4, "pitches": [{"step": "B", "octave": 4}]}], "staff2": []}]})
+    m = omr_eval.score_transcription(p, t)
+    assert m["n_truth"] == 1 and m["n_pred"] == 2 and m["n_matched"] == 1
+    assert m["note_recall"] == 1.0
+    assert m["note_precision"] == 0.5
+
+
+def test_chord_recall_detects_wrong_chord():
+    import llm_omr
+    # truth bass chord E3+G3+B3; pred reads E3+G3+C4 (one wrong tone) at the same slot.
+    t = llm_omr.score_json_to_musicxml({"measures": [{"staff1": [], "staff2": [
+        {"duration": 16, "pitches": [
+            {"step": "E", "octave": 3}, {"step": "G", "octave": 3}, {"step": "B", "octave": 3}]}]}]})
+    p_right = t
+    p_wrong = llm_omr.score_json_to_musicxml({"measures": [{"staff1": [], "staff2": [
+        {"duration": 16, "pitches": [
+            {"step": "E", "octave": 3}, {"step": "G", "octave": 3}, {"step": "C", "octave": 4}]}]}]})
+    assert omr_eval.score_transcription(p_right, t)["chord_recall"] == 1.0
+    m = omr_eval.score_transcription(p_wrong, t)
+    assert m["n_truth_chords"] == 1
+    assert m["chord_recall"] == 0.0  # the chord's exact pitch set was not reproduced
+
+
+def test_no_truth_chords_means_chord_recall_one():
+    import llm_omr
+    t = llm_omr.score_json_to_musicxml({"measures": [{"staff1": [
+        {"duration": 4, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []}]})
+    assert omr_eval.score_transcription(t, t)["chord_recall"] == 1.0
+
+
+def test_score_transcription_never_raises_on_garbage():
+    m = omr_eval.score_transcription(b"<not-xml", b"<also-not")
+    assert m["note_f1"] == 0.0 and m["n_truth"] == 0
+
+
+# --- generate_random_score ---------------------------------------------------------------
+
+
+def test_generator_is_deterministic_by_seed():
+    a = omr_eval.generate_random_score(seed=42, n_measures=6)
+    b = omr_eval.generate_random_score(seed=42, n_measures=6)
+    c = omr_eval.generate_random_score(seed=43, n_measures=6)
+    assert a == b
+    assert a != c
+
+
+def test_generated_score_is_valid_musicxml_with_expected_measures():
+    xml = omr_eval.generate_random_score(seed=7, n_measures=5)
+    root = ET.fromstring(xml)  # parses
+    assert root.tag == "score-partwise"
+    assert len(root.findall(".//measure")) == 5
+    # has notes on both staves
+    events = reconcile.to_events(xml, "x")
+    staves = {e.staff for e in events if e.pitch is not None}
+    assert staves == {1, 2}
+
+
+def test_generated_score_round_trips_to_perfect_self_score():
+    xml = omr_eval.generate_random_score(seed=9, n_measures=8, chord_prob=0.5)
+    m = omr_eval.score_transcription(xml, xml)
+    assert m["note_f1"] == 1.0 and m["chord_recall"] == 1.0
+    assert m["n_truth_chords"] >= 1  # chord_prob high enough to produce some chords
