@@ -648,6 +648,78 @@ def test_default_job_with_ensemble_on_runs_ensemble(tmp_path, monkeypatch):
     assert ran["ensemble"] is True
 
 
+def test_llm_used_when_available_and_not_fast(tmp_path, monkeypatch):
+    # When the LLM transcriber is available and the job is not fast, its bytes are used as the
+    # result and the geometry engines are NOT run.
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: True)
+    monkeypatch.setattr(worker.llm_omr, "transcribe", lambda image: b"<score-partwise/>")
+
+    def engines_must_not_run(*a, **k):
+        raise AssertionError("geometry engines must not run when the LLM produced a result")
+
+    monkeypatch.setattr(worker, "_select_ensemble", engines_must_not_run)
+    monkeypatch.setattr(worker, "_select_legacy", engines_must_not_run)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"\x89PNG fake")
+    _drive_process_job(monkeypatch, client, is_pdf=False)
+    assert client.put_body == b"<score-partwise/>"
+
+
+def test_llm_skipped_on_fast_scan(tmp_path, monkeypatch):
+    # A fast scan must skip the LLM (no API cost) and take the free legacy path.
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: True)
+
+    def transcribe_must_not_run(image):
+        raise AssertionError("LLM must not run on a fast scan")
+
+    monkeypatch.setattr(worker.llm_omr, "transcribe", transcribe_must_not_run)
+    clarity_out = tmp_path / "clarity.musicxml"
+    clarity_out.write_text("<score/>")
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clarity_out))
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"%PDF-1.4 fake", metadata={"fast": "1"})
+    _drive_process_job(monkeypatch, client, is_pdf=True)
+    assert client.put_body is not None  # legacy Clarity result, not the LLM
+
+
+def test_llm_falls_back_to_engines_when_it_returns_none(tmp_path, monkeypatch):
+    # If the LLM returns None (any failure), the worker falls back to the existing engines.
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: True)
+    monkeypatch.setattr(worker.llm_omr, "transcribe", lambda image: None)
+    clarity_out = tmp_path / "clarity.musicxml"
+    clarity_out.write_text("<score/>")
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clarity_out))
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"\x89PNG fake")
+    _drive_process_job(monkeypatch, client, is_pdf=False)
+    assert client.put_body is not None  # fell back to the engine path
+
+
+def test_llm_off_by_default_keeps_existing_flow(tmp_path, monkeypatch):
+    # With the LLM unavailable (default), behavior is exactly the legacy/ensemble flow.
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+
+    def transcribe_must_not_run(image):
+        raise AssertionError("LLM must not run when unavailable")
+
+    monkeypatch.setattr(worker.llm_omr, "transcribe", transcribe_must_not_run)
+    clarity_out = tmp_path / "clarity.musicxml"
+    clarity_out.write_text("<score/>")
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clarity_out))
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"%PDF-1.4 fake")
+    _drive_process_job(monkeypatch, client, is_pdf=True)
+    assert client.put_body is not None
+
+
 def test_flag_off_never_calls_reconcile(tmp_path, monkeypatch):
     # FLAG OFF (prod default): the legacy path runs and reconcile is NEVER called.
     monkeypatch.delenv("OMR_ENSEMBLE", raising=False)
