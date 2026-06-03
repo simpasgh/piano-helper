@@ -127,13 +127,18 @@ def _viewbox_wh(svg: str) -> Tuple[float, float]:
 
 def _size_outer_svg(svg: str, w_px: int, h_px: int) -> str:
     """Force the OUTER <svg> width/height (px) so Chromium rasterizes at our chosen scale; the
-    inner definition-scale viewBox then maps user units -> pixels uniformly."""
-    return re.sub(
+    inner definition-scale viewBox then maps user units -> pixels uniformly. Raises if the
+    substitution does not happen (e.g. a verovio version reorders the attributes), so a mis-sized
+    render can never silently desync the labels from the pixels."""
+    out, n = re.subn(
         r'(<svg\b[^>]*?)\swidth="[^"]*"\s+height="[^"]*"',
         rf'\1 width="{w_px}px" height="{h_px}px"',
         svg,
         count=1,
     )
+    if n != 1:
+        raise ValueError("could not set outer <svg> width/height; verovio attribute layout changed")
+    return out
 
 
 class ScoreRenderer:

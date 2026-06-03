@@ -23,13 +23,15 @@ import synth_augment as sa
 
 
 def _labels_dir(images_dir: str) -> str:
-    # replace the LAST 'images' path segment with 'labels' (YOLO convention)
+    # replace the LAST 'images' path segment with 'labels' (YOLO convention). Raise if there is no
+    # 'images' segment, so we never silently co-mingle labels into the image dir (out_labels would
+    # otherwise equal out_images) or fail to find the source labels.
     parts = images_dir.replace("\\", "/").rstrip("/").split("/")
     for i in range(len(parts) - 1, -1, -1):
         if parts[i] == "images":
             parts[i] = "labels"
-            break
-    return os.path.normpath("/".join(parts))
+            return os.path.normpath("/".join(parts))
+    raise ValueError(f"images dir must contain an 'images' path segment (YOLO convention): {images_dir}")
 
 
 def _augment_one(task):
