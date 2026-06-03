@@ -22,10 +22,10 @@ import argparse
 
 
 def train(data: str, model: str, epochs: int, imgsz: int, batch, project: str,
-          name: str, device: str) -> str:
+          name: str, device: str, mosaic: float = 1.0) -> str:
     from ultralytics import YOLO
 
-    yolo = YOLO(model)  # transfer-learn from the pretrained COCO checkpoint
+    yolo = YOLO(model)  # transfer-learn from the pretrained COCO checkpoint (or a prior .pt)
     yolo.train(
         data=data,
         epochs=epochs,
@@ -43,7 +43,10 @@ def train(data: str, model: str, epochs: int, imgsz: int, batch, project: str,
         translate=0.1,
         scale=0.5,           # scale jitter -> resolution robustness
         hsv_h=0.0, hsv_s=0.3, hsv_v=0.4,  # lighting/paper-tone variation; no hue shift (B/W music)
-        mosaic=1.0,
+        # mosaic combines 4 images; on DENSE real pages (DeepScores, hundreds of noteheads each)
+        # it both explodes target-memory past 16GB and shrinks the already-tiny real noteheads, so
+        # we make it tunable and disable it (mosaic=0) for dense real-data fine-tunes.
+        mosaic=mosaic,
         close_mosaic=10,
         # noteheads are small + dense; keep more candidate boxes per image.
         verbose=True,
@@ -63,10 +66,12 @@ def main(argv=None) -> int:
     ap.add_argument("--project", default="C:/Users/pascu/omr-train/runs")
     ap.add_argument("--name", default="notehead1")
     ap.add_argument("--device", default="0", help="'0' for first GPU, 'cpu' otherwise")
+    ap.add_argument("--mosaic", type=float, default=1.0,
+                    help="mosaic aug prob; set 0 for dense real pages (memory + small noteheads)")
     args = ap.parse_args(argv)
     batch = int(args.batch)
     train(args.data, args.model, args.epochs, args.imgsz, batch,
-          args.project, args.name, args.device)
+          args.project, args.name, args.device, mosaic=args.mosaic)
     return 0
 
 

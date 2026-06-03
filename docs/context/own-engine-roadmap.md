@@ -9,8 +9,8 @@ text (project rule). Ship every code change through the gated flow (see "Constra
 Executed THE NEXT STEP on the GPU PC (RTX 5060 Ti, 16GB, Blackwell sm_120). The trained
 detector plan works and clears the bar. New code (all in `omr-worker/`, research-only, NOT wired
 into the worker): `synth_render.py`, `synth_dataset.py`, `synth_augment.py`, `train_detector.py`,
-`geom_detector.py`, `eval_detector.py` (+ tests). Heavy artifacts (venv, dataset, runs, weights)
-live OUTSIDE the repo under `~/omr-train` and are gitignored.
+`geom_detector.py`, `eval_detector.py`, `deepscores_to_yolo.py` (+ tests). Heavy artifacts (venv,
+datasets, runs, weights) live OUTSIDE the repo under `~/omr-train` and are gitignored.
 
 Headline (held-out SYNTHETIC, primary benchmark; an 8-epoch model, detection saturates by epoch
 2: notehead recall 1.0 / mAP50 0.995, so a short run already suffices):
@@ -32,11 +32,31 @@ applied, the trained engine across all 240 mixed-key scores reaches 0.866 exact-
 Reading the key signature FROM the image is still a separate (classical, no-GPU) recognition
 rung; we proved the decode is exact once the key is known.
 
+Trained on REAL scores too (DeepScoresV2). The synthetic detector only ever saw our single
+Verovio font, so we added REAL typeset music: DeepScoresV2 "dense" (1714 LilyPond-engraved pages
+in multiple fonts: Gonville/Emmentaler/Beethoven). License is CC BY 4.0 = commercial-OK with
+attribution (MUSCIMA++/CVC-MUSCIMA are CC BY-NC and are deliberately NOT used). `deepscores_to_yolo.py`
+converts its noteheads to our YOLO format (1362 train / 352 val pages, 280k / 76k boxes; labels
+visually verified). Fine-tuning the synthetic model on synthetic+DeepScores combined (6 epochs,
+`--mosaic 0` because dense pages + mosaic both spill VRAM and shrink the tiny real noteheads):
+- On the held-out REAL DeepScores val: mAP50 0.875 / recall 0.874 / precision 0.993 (up from the
+  synthetic-only model's 0.799 / 0.780 / 0.892 on the same real pages: real data mainly bought
+  precision 0.89->0.99 and tighter localization mAP50-95 0.50->0.66).
+- NO synthetic regression: still 0.924 exact-F1 / octave 1.0 on the C-major synthetic set. So the
+  combined model is a strict improvement (same synthetic, better real). Weights:
+  `~/omr-train/runs/notehead_real/weights/best.pt`.
+- Pretrained OMR detectors found online were NOT usable as a drop-in notehead source: v-dvorak
+  /omr-layout-analysis is layout-only (staves/systems), dmgonzalez8/OMR has no license + noteheads
+  unclear. So the win is the DeepScores DATA (CC BY) trained into our own detector, not someone
+  else's weights. (For real PHONE PHOTOS, still apply `synth_augment.py` on top - see below.)
+
 Remaining gaps / next rungs (in priority order):
-1. Finish training (50 epochs / early-stop) for final weights, re-measure on GPU.
-2. Real-photo number: `synth_augment.py` (paper tone, uneven light, shadow, blur, sensor noise,
-   JPEG) is built + unit-tested but NOT yet baked into a training run; build an augmented dataset,
-   retrain, and measure on icarus.pdf (the secondary benchmark) to get the phone-photo number.
+1. Longer/cleaner training run for final weights (detection already saturates fast).
+2. Real-PHOTO number: `synth_augment.py` (paper tone, uneven light, shadow, blur, sensor noise,
+   JPEG) is built + unit-tested but NOT yet baked into a training run; build an augmented dataset
+   (over synthetic AND DeepScores), retrain, and measure on icarus.pdf to get the phone-photo
+   number. DeepScores is clean typeset, so it improves printed-score generality but is not itself
+   a photo benchmark.
 3. Key-signature DETECTION from the engraved keySig (count sharps/flats) to remove the oracle-key
    assumption.
 4. chord_recall (~0.4) and barline-based measures (the cheaper non-GPU rungs).
@@ -48,6 +68,9 @@ Gotchas worth not re-learning (this box, Windows):
 - At imgsz 1280, batch=16 oversubscribes the 16GB card; on Windows WDDM that does NOT OOM, it
   SPILLS VRAM into system RAM and runs ~10x slower (0.3 vs 3 it/s). Use batch=8 (~11-12GB, no
   spill). Watch the GPU_mem column: >16G = spilling.
+- DENSE real pages (DeepScores: hundreds of noteheads each) + mosaic (combines 4 images) spike to
+  ~20G and spill. For dense real-data fine-tunes use `--mosaic 0` and batch=4 (~6-7GB); mosaic
+  also shrinks the already-tiny real noteheads, so disabling it helps accuracy there too.
 - cairosvg has no system libcairo on Windows, so SVG->PNG goes through Playwright Chromium, which
   ALSO gives pixel-exact notehead/staff boxes via getBoundingClientRect (free perfect labels).
 
