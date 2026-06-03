@@ -16,9 +16,14 @@ PITCH-CLASS overlap. Pitch-class (not full MIDI) is deliberate: geom's edge is t
 pitch-class ignores, so a chord still aligns when geom corrected its octave relative to Clarity.
 A geom chord with no Clarity match keeps a neutral quarter-note duration.
 
-This v1 borrows ONLY rhythm; geom's pitches pass through unchanged, so the fused pitch is exactly
-geom's (never worse than geom on pitch). Borrowing Clarity's KEY SIGNATURE (to fix geom's faked key
-on non-C pieces) is a deliberate later enhancement, validated on a non-C piece first.
+geom's pitches pass through unchanged, so the fused pitch is exactly geom's (never worse than geom
+on pitch). Beyond per-note durations, fusion also adopts Clarity's declared TIME SIGNATURE (geom
+fakes 4/4), so a non-4/4 piece declares its real meter: this renders it at true width and lets the
+rhythm-repair post-transform corroborate the bar capacity instead of bailing on a wrong meter. The
+time sig does not affect the rhythm/pitch metric (omr_eval keys on meter-agnostic per-(measure,staff)
+(midi,dur16) multisets), so adopting the real meter cannot regress note_f1/note_dur_f1. Borrowing
+Clarity's KEY SIGNATURE (to fix geom's faked key on non-C pieces) is still a deliberate later
+enhancement, validated on a non-C piece first (all current eval pieces are C major, fifths=0).
 
 PURE stdlib + the existing pure helpers (reconcile.to_events, omr_eval._dur16,
 llm_omr.score_json_to_musicxml). NEVER raises: on ANY failure returns the geom MusicXML unchanged
@@ -42,6 +47,19 @@ def _read_fifths(xml_bytes) -> int:
     except Exception:
         return 0
     return 0
+
+
+def _read_time(xml_bytes) -> Optional[Tuple[int, int]]:
+    """The score's declared meter (first <time>) as (beats, beat_type), or None on a missing /
+    senza-misura / garbage <time>. Mirrors _read_fifths (first element wins). NEVER raises."""
+    try:
+        for t in ET.fromstring(xml_bytes).iter("time"):
+            beats = int((t.findtext("beats") or "0").strip())
+            beat_type = int((t.findtext("beat-type") or "0").strip())
+            return (beats, beat_type) if beats > 0 and beat_type > 0 else None
+    except Exception:
+        return None
+    return None
 
 
 def _chords_by_cell(xml_bytes) -> Dict:
@@ -128,9 +146,18 @@ def _borrow_durations(g_cells: Dict, c_cells: Dict) -> Dict:
     return out
 
 
-def _build(g_cells: Dict, borrowed: Dict, fifths: int, fallback: int = 4) -> Optional[bytes]:
-    """Rebuild geom's notes (pitch + measures) with the borrowed durations. Unmatched geom chords
-    keep a neutral quarter note (fallback=4 sixteenths). PURE; returns None if nothing usable."""
+def _build(g_cells: Dict, borrowed: Dict, fifths: int, beats: int = 4, beat_type: int = 4,
+           fallback: int = 4) -> Optional[bytes]:
+    """Rebuild geom's notes (pitch + measures) with the borrowed durations and Clarity's declared
+    meter (beats/beat_type, so a non-4/4 piece renders at its true width). Unmatched geom chords
+    keep a neutral quarter note (fallback=4 sixteenths). The key stays geom's (a non-C key borrow
+    is a later enhancement, validated on a non-C piece first; all current eval pieces are C major).
+
+    divisions stays 4 and is LOAD-BEARING: the borrowed durations are omr_eval._dur16 SIXTEENTHS,
+    and divisions=4 makes a <duration> value of N equal N sixteenths == N ticks, so the borrowed
+    dur16 numbers are directly usable as tick durations. Only the <time> is borrowed, never
+    <divisions> (changing it would desync every borrowed duration). PURE; returns None if nothing
+    usable."""
     measures: List[dict] = []
     for mm in sorted(set(k[0] for k in g_cells)):
         per_staff = {}
@@ -148,13 +175,18 @@ def _build(g_cells: Dict, borrowed: Dict, fifths: int, fallback: int = 4) -> Opt
     if not measures:
         return None
     return llm_omr.score_json_to_musicxml(
-        {"divisions": 4, "key_fifths": fifths, "time": {"beats": 4, "beat_type": 4}, "measures": measures})
+        {"divisions": 4, "key_fifths": fifths,
+         "time": {"beats": beats, "beat_type": beat_type}, "measures": measures})
 
 
 def fuse(geom_xml, clarity_xml) -> Optional[bytes]:
-    """Fuse geom pitch+measures with Clarity rhythm. Returns fused MusicXML bytes. NEVER raises:
-    on any failure returns geom_xml (never worse than geom alone); returns clarity_xml if geom
-    produced nothing, and None only if both are empty."""
+    """Fuse geom pitch+measures with Clarity rhythm AND Clarity's declared <time> (so a non-4/4
+    piece declares its real meter, which renders it at true width and lets the rhythm-repair
+    post-transform corroborate the capacity; falls back to 4/4 when Clarity has no/garbage <time>).
+    The key still comes from geom (a non-C key borrow is a deliberate later enhancement, validated
+    on a non-C piece first). Returns fused MusicXML bytes. NEVER raises: on any failure returns
+    geom_xml (never worse than geom alone); returns clarity_xml if geom produced nothing, and None
+    only if both are empty."""
     try:
         if not geom_xml:
             return clarity_xml or None
@@ -167,7 +199,8 @@ def fuse(geom_xml, clarity_xml) -> Optional[bytes]:
         if not c_cells:
             return geom_xml
         borrowed = _borrow_durations(g_cells, c_cells)
-        fused = _build(g_cells, borrowed, _read_fifths(geom_xml))
+        beats, beat_type = _read_time(clarity_xml) or (4, 4)
+        fused = _build(g_cells, borrowed, _read_fifths(geom_xml), beats, beat_type)
         return fused or geom_xml
     except Exception:
         return geom_xml or None
