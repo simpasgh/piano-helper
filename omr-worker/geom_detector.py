@@ -47,15 +47,19 @@ class NoteheadDetector:
             self._model = YOLO(self.weights)
         return self._model
 
-    def detect(self, image) -> List[Tuple[float, float, float]]:
+    def detect(self, image, imgsz: Optional[int] = None) -> List[Tuple[float, float, float]]:
         """Run the detector on an image (file path, or HxW / HxWx3 uint8 ndarray). Returns a list
-        of (x_center, y_center, confidence) in pixel coords. NEVER raises; [] on failure."""
+        of (x_center, y_center, confidence) in pixel coords. NEVER raises; [] on failure.
+
+        imgsz overrides the instance default for this call (transcribe_with_detector passes an
+        image-size-aware value via _auto_imgsz so tall multi-page stitches are not downscaled into
+        undetectably-small noteheads)."""
         if not DETECTOR_AVAILABLE:
             return []
         try:
             model = self._load()
             res = model.predict(
-                source=image, imgsz=self.imgsz, conf=self.conf, iou=self.iou,
+                source=image, imgsz=(imgsz or self.imgsz), conf=self.conf, iou=self.iou,
                 max_det=self.max_det, device=self.device, verbose=False,
             )
             if not res:
@@ -68,6 +72,27 @@ class NoteheadDetector:
             return [(float(x), float(y), float(c)) for (x, y, _w, _h), c in zip(xywh, confs)]
         except Exception:
             return []
+
+
+def _auto_imgsz(shape, base: int = 1280, ref: float = 4096.0, cap: int = 2560) -> int:
+    """Pick a YOLO inference size that keeps noteheads detectable on TALL multi-page stitches.
+
+    YOLO resizes the LONGEST image side to imgsz, so notehead pixel size at inference scales with
+    imgsz / longest_side. A single ~A4 page rastered at 350 DPI is ~4096 px on its long side, and
+    base=1280 (a ~3.2x downscale) detects it well. The worker stitches all PDF pages into one tall
+    image, so a 2-page score is ~8192 px tall and base=1280 downscales its noteheads to ~half that
+    size, where the detector misses most of them (tctab: 321 heads at 1280 vs 470 at 1920). Scale
+    imgsz up in proportion to longest_side / ref so the downscale factor (and thus the inference-time
+    notehead size) stays at the single-page value; clamp to [base, cap] so CPU cost stays bounded.
+    Returns base on any odd input. NEVER raises."""
+    try:
+        longest = float(max(shape[0], shape[1]))
+        if longest <= ref:
+            return base
+        imgsz = int(round(base * longest / ref / 32.0)) * 32  # multiple of the YOLO stride
+        return max(base, min(cap, imgsz))
+    except Exception:
+        return base
 
 
 def _assign_to_staves(
@@ -131,7 +156,9 @@ def transcribe_with_detector(image, detector: NoteheadDetector,
         if not staves:
             return None
 
-        centers = detector.detect(image)
+        # Size the detector to the image: a tall multi-page stitch needs a larger imgsz so its
+        # noteheads are not downscaled below the detector's reach (see _auto_imgsz).
+        centers = detector.detect(image, imgsz=_auto_imgsz(gray.shape))
         if not centers:
             return None
         # Trained notehead source: detect globally, then assign each head to its staff so the

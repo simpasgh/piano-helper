@@ -329,6 +329,143 @@ def test_detect_barlines_finds_grand_staff_barlines():
 
 
 @requires_geom
+def test_detect_systems_rejects_intruder_rows_above():
+    """A staff detected as 7 near-full-width rows: two partial-width INTRUDER rows (a beam / dense
+    note row) evenly spaced ABOVE the 5 real staff lines. The staff must still be found with its 5
+    real lines, not dropped (the icarus failure: a 7-line group was discarded whole). Spacing alone
+    cannot separate the intruders here (they sit at the interline), so the ink tiebreak must."""
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    width, interline, top = 400, 16, 80
+    im = Image.new("L", (width, top + interline * 4 + 80), 255)
+    d = ImageDraw.Draw(im)
+    real_lines = [top + i * interline for i in range(5)]
+    for ly in real_lines:
+        d.line([(0, ly), (width, ly)], fill=0, width=2)  # full-width staff lines (high ink)
+    for k in (2, 1):  # two intruder rows, one and two interlines above the top staff line
+        iy = top - k * interline
+        d.line([(0, iy), (int(width * 0.5), iy)], fill=0, width=3)  # half width -> lower ink
+    gray = np.asarray(im, dtype=np.float32) / 255.0
+    staves = geom_omr.detect_systems(gray)
+    assert len(staves) == 1
+    got = np.array(sorted(staves[0]))
+    assert np.allclose(got, np.array(sorted(float(l) for l in real_lines)), atol=2.0)
+
+
+@requires_geom
+def test_detect_systems_keeps_staff_with_trailing_intruder():
+    """reverie failure: a staff detected as 6 rows = 5 evenly-spaced staff lines + 1 partial-width
+    intruder row just BELOW at an irregular gap. The 5 real lines must be recovered."""
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    width, interline, top = 400, 16, 60
+    im = Image.new("L", (width, top + interline * 4 + 80), 255)
+    d = ImageDraw.Draw(im)
+    real_lines = [top + i * interline for i in range(5)]
+    for ly in real_lines:
+        d.line([(0, ly), (width, ly)], fill=0, width=2)
+    d.line([(0, real_lines[-1] + 11), (int(width * 0.6), real_lines[-1] + 11)], fill=0, width=4)
+    gray = np.asarray(im, dtype=np.float32) / 255.0
+    staves = geom_omr.detect_systems(gray)
+    assert len(staves) == 1
+    got = np.array(sorted(staves[0]))
+    assert np.allclose(got, np.array(sorted(float(l) for l in real_lines)), atol=2.0)
+
+
+@requires_geom
+def test_detect_systems_splits_merged_staves():
+    """Two staves whose inter-staff gap is only ~1.5 interlines (smaller than a normal system gap)
+    cluster into one 10-line run. _extract_staves must still return BOTH staves (greedy
+    non-overlapping windows), where the old even-split-on-multiples-of-5 was the only path."""
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    width, interline, top = 400, 16, 40
+    upper = [top + i * interline for i in range(5)]
+    lower = [upper[-1] + int(interline * 1.5) + i * interline for i in range(5)]
+    im = Image.new("L", (width, lower[-1] + 40), 255)
+    d = ImageDraw.Draw(im)
+    for ly in upper + lower:
+        d.line([(0, ly), (width, ly)], fill=0, width=2)
+    gray = np.asarray(im, dtype=np.float32) / 255.0
+    staves = geom_omr.detect_systems(gray)
+    assert len(staves) == 2
+    assert np.allclose(sorted(staves[0]), np.array(sorted(float(l) for l in upper)), atol=2.0)
+    assert np.allclose(sorted(staves[1]), np.array(sorted(float(l) for l in lower)), atol=2.0)
+
+
+@requires_geom
+def test_detect_systems_keeps_isolated_staff_with_one_irregular_gap():
+    """An isolated, well-formed staff whose one interior gap is a little wide (1.5x the interline:
+    a thicker engraved line or a mild local warp) must still be kept. The original code kept any
+    group of exactly 5 unconditionally, so the new code must not drop it to the uniformity gate."""
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    width, interline, top = 400, 16, 60
+    ys = [top, top + interline, top + 2 * interline, top + 3 * interline,
+          top + 3 * interline + int(1.5 * interline)]  # last gap = 1.5 * interline
+    im = Image.new("L", (width, ys[-1] + 60), 255)
+    d = ImageDraw.Draw(im)
+    for ly in ys:
+        d.line([(0, ly), (width, ly)], fill=0, width=2)
+    gray = np.asarray(im, dtype=np.float32) / 255.0
+    staves = geom_omr.detect_systems(gray)
+    assert len(staves) == 1
+    assert np.allclose(sorted(staves[0]), np.array([float(y) for y in ys]), atol=2.0)
+
+
+@requires_geom
+def test_detect_systems_splits_tightly_merged_staves_even_when_seam_is_inkier():
+    """Two staves set so tightly that the inter-staff gap EQUALS the interline (all 10 lines evenly
+    spaced) must split into 2 staves even when the lines near the seam are the darkest, which would
+    fool a window scored by ink. The even multiple-of-5 split handles this positionally."""
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    width, interline, top = 400, 16, 40
+    ys = [top + i * interline for i in range(10)]  # all 9 gaps equal the interline
+    im = Image.new("L", (width, ys[-1] + 60), 255)
+    d = ImageDraw.Draw(im)
+    for i, ly in enumerate(ys):
+        if 2 <= i <= 7:  # interior seam lines drawn full-width + thicker (highest ink)
+            d.line([(0, ly), (width, ly)], fill=0, width=3)
+        else:            # outer lines narrower (lower ink) so an ink rule would prefer the seam
+            d.line([(0, ly), (int(width * 0.6), ly)], fill=0, width=2)
+    gray = np.asarray(im, dtype=np.float32) / 255.0
+    staves = geom_omr.detect_systems(gray)
+    assert len(staves) == 2
+    assert np.allclose(sorted(staves[0]), np.array([float(y) for y in ys[:5]]), atol=2.0)
+    assert np.allclose(sorted(staves[1]), np.array([float(y) for y in ys[5:]]), atol=2.0)
+
+
+@requires_geom
+def test_detect_systems_picks_thin_staff_over_thick_inky_beam():
+    """A 6-row region = a full-width thick BEAM one interline above 5 thin staff lines whose lower
+    lines are partly occluded by a chord (lower ink). An ink-only rule would keep the inky beam and
+    drop a real line; thinness must win so the 5 real staff lines are chosen, not the beam."""
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    width, interline, top = 400, 16, 80
+    staff = [top + i * interline for i in range(5)]
+    im = Image.new("L", (width, staff[-1] + 60), 255)
+    d = ImageDraw.Draw(im)
+    d.line([(0, top - interline), (width, top - interline)], fill=0, width=8)  # thick full-width beam
+    for i, ly in enumerate(staff):
+        if i >= 3:  # lower real lines occluded by a chord -> only ~45% width (lower ink), still thin
+            d.line([(0, ly), (int(width * 0.45), ly)], fill=0, width=2)
+        else:
+            d.line([(0, ly), (width, ly)], fill=0, width=2)
+    gray = np.asarray(im, dtype=np.float32) / 255.0
+    staves = geom_omr.detect_systems(gray)
+    assert len(staves) == 1
+    assert np.allclose(sorted(staves[0]), np.array([float(y) for y in staff]), atol=2.0)
+
+
+@requires_geom
 def test_detect_barlines_ignores_stems():
     # a real barline spans both staves; a STEM lives in one staff and must NOT be detected.
     import numpy as np
