@@ -443,34 +443,36 @@ def _clef_for_staff_index(idx_in_system: int) -> str:
     return "G" if idx_in_system % 2 == 0 else "F"
 
 
-def transcribe_geometric(image_path_or_gray, key_fifths: int = 0) -> Optional[bytes]:
-    """Tie it together: detect staves, detect noteheads per staff, decode each to a pitch by
-    geometry, group chords, assign treble/bass, and emit a 1-part / 2-staff grand-staff
-    MusicXML via llm_omr.score_json_to_musicxml. Returns MusicXML bytes, or None if nothing
-    usable was found. NEVER raises.
+def _decode_staves_to_musicxml(
+    staves: List[List[float]],
+    per_staff_heads: List[List[Tuple[float, float]]],
+    key_fifths: int = 0,
+) -> Optional[bytes]:
+    """Shared decode tail for BOTH notehead sources: the classical detect_noteheads and the
+    trained YOLO detector in geom_detector. Takes the detected staff-line groups and the
+    per-staff notehead (x, y) centers ALREADY assigned to each staff, and turns them into a
+    1-part / 2-staff grand-staff MusicXML. Only the notehead SOURCE differs between the two
+    engines; everything from here on (chord grouping, the exact pitch decode, the treble/bass
+    split, the measure distribution, the MusicXML payload) is identical, so it lives here once.
+    Keeping it shared stops the trained path from silently drifting from the classical baseline
+    it is benchmarked against.
 
-    key_fifths: key signature handed to decode_pitch for accidentals (default 0 = C major).
+    per_staff_heads is index-aligned with staves: per_staff_heads[i] are the (x, y) centers on
+    staves[i] (a staff with no heads contributes nothing). The upper staff of each grand-staff
+    pair is treble (G), the lower is bass (F); treble accumulates all upper-staff chords and
+    bass all lower-staff chords, in page order, then each hand's chord stream is split into
+    measures.
 
-    Measure structure: this geometric pass does NOT read barlines yet, so it places ALL of a
-    staff's chords into a SINGLE measure per hand. The eval metric grades pitch per
-    (measure, staff) multiset and is rhythm-agnostic, but a single bucket would lump every
+    Measure structure: this geometric pass does NOT read barlines yet, so on its own it would
+    place ALL of a staff's chords into a SINGLE measure per hand. The eval metric grades pitch
+    per (measure, staff) multiset and is rhythm-agnostic, but a single bucket would lump every
     measure together; to keep the comparison fair against a multi-measure ground truth we
-    distribute chords across measures EVENLY in time order (best-effort). The headline pitch
-    /octave/chord numbers are what matter; exact bar placement is a later (barline) pass.
-    """
-    if not GEOM_AVAILABLE:
-        return None
-    try:
-        gray = _to_gray(image_path_or_gray)
-        if gray is None:
-            return None
-        staves = detect_systems(gray)
-        if not staves:
-            return None
+    distribute chords across measures EVENLY in time order (best-effort, see _chords_to_measures).
+    The headline pitch/octave/chord numbers are what matter; exact bar placement is a later pass.
 
-        # Pair staves into grand-staff systems: (treble, bass), (treble, bass), ...
-        # treble accumulates all upper-staff chords, bass all lower-staff chords, in page
-        # order. We then split each hand's chord stream into measures.
+    Returns MusicXML bytes, or None if nothing usable was found. NEVER raises.
+    """
+    try:
         treble_chords: List[List[Tuple[str, int, int]]] = []
         bass_chords: List[List[Tuple[str, int, int]]] = []
 
@@ -479,7 +481,7 @@ def transcribe_geometric(image_path_or_gray, key_fifths: int = 0) -> Optional[by
             if sp is None:
                 continue
             clef = _clef_for_staff_index(idx)
-            heads = detect_noteheads(gray, staff_lines)
+            heads = per_staff_heads[idx] if idx < len(per_staff_heads) else []
             if not heads:
                 continue
             chords = group_chords(heads, sp)
@@ -510,6 +512,34 @@ def transcribe_geometric(image_path_or_gray, key_fifths: int = 0) -> Optional[by
             "measures": measures,
         }
         return llm_omr.score_json_to_musicxml(data)
+    except Exception:
+        return None
+
+
+def transcribe_geometric(image_path_or_gray, key_fifths: int = 0) -> Optional[bytes]:
+    """Tie it together for the CLASSICAL engine: detect staves, detect noteheads per staff with
+    the classical detect_noteheads, then hand off to the shared _decode_staves_to_musicxml tail
+    (chord grouping, the exact pitch decode, treble/bass split, measure distribution, MusicXML).
+    Returns MusicXML bytes, or None if nothing usable was found. NEVER raises.
+
+    key_fifths: key signature handed to decode_pitch for accidentals (default 0 = C major).
+
+    The trained-detector counterpart is geom_detector.transcribe_with_detector, which differs
+    ONLY in the notehead source and shares this exact decode tail.
+    """
+    if not GEOM_AVAILABLE:
+        return None
+    try:
+        gray = _to_gray(image_path_or_gray)
+        if gray is None:
+            return None
+        staves = detect_systems(gray)
+        if not staves:
+            return None
+        # Classical notehead source: detect per staff. _decode_staves_to_musicxml expects the
+        # heads index-aligned with staves, so build one list per staff in page order.
+        per_staff_heads = [detect_noteheads(gray, staff_lines) for staff_lines in staves]
+        return _decode_staves_to_musicxml(staves, per_staff_heads, key_fifths=key_fifths)
     except Exception:
         return None
 

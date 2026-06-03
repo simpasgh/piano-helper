@@ -102,6 +102,57 @@ class TestDecodePitchRobustness:
         assert geom_omr.decode_pitch(50.0, [10.0, 20.0, 30.0, 40.0, 50.0], "Z") == ("E", 0, 4)
 
 
+# --- Shared decode tail: _decode_staves_to_musicxml (PURE, runs everywhere) --------------
+# BOTH transcribers funnel their per-staff noteheads through this one helper: the classical
+# geom_omr.transcribe_geometric (detect_noteheads source) and the trained
+# geom_detector.transcribe_with_detector (YOLO + _assign_to_staves source). Only the notehead
+# source differs; this is the shared decode/build tail, so testing it here locks the trained
+# path to the classical baseline's decode. It needs no image and no numpy (decode_pitch,
+# group_chords, _chords_to_measures and the MusicXML builder are all pure).
+
+class TestDecodeStavesToMusicxml:
+    TREBLE = [10.0, 20.0, 30.0, 40.0, 50.0]      # staff index 0 -> treble (G) clef
+    BASS = [110.0, 120.0, 130.0, 140.0, 150.0]   # staff index 1 -> bass (F) clef
+
+    def test_emits_grand_staff_with_decoded_pitches(self):
+        # treble head on line 2 (y=40 -> G4), bass head on the bottom line (y=150 -> G2).
+        out = geom_omr._decode_staves_to_musicxml(
+            [self.TREBLE, self.BASS], [[(150.0, 40.0)], [(150.0, 150.0)]]
+        )
+        assert out is not None
+        assert b"score-partwise" in out
+        assert b"<step>G</step>" in out
+        # both hands carried through to the two-staff part
+        assert b"<staff>1</staff>" in out and b"<staff>2</staff>" in out
+
+    def test_same_x_heads_become_one_chord(self):
+        # two treble heads at nearly the same x (y=50 -> E4, y=40 -> G4) group into one chord,
+        # so the second note carries a <chord/> tag.
+        out = geom_omr._decode_staves_to_musicxml(
+            [self.TREBLE], [[(150.0, 50.0), (152.0, 40.0)]]
+        )
+        assert out is not None
+        assert b"<chord" in out  # ElementTree serializes the empty element as "<chord />"
+
+    def test_key_fifths_applies_accidental(self):
+        # an F head in a 1-sharp key (G major) must decode as F#, i.e. carry an <alter>1</alter>.
+        # y=45 on the treble staff is the first space -> F4; key_fifths=1 sharps F.
+        out = geom_omr._decode_staves_to_musicxml([self.TREBLE], [[(150.0, 45.0)]], key_fifths=1)
+        assert out is not None
+        assert b"<step>F</step>" in out and b"<alter>1</alter>" in out
+
+    def test_no_heads_returns_none(self):
+        assert geom_omr._decode_staves_to_musicxml([self.TREBLE, self.BASS], [[], []]) is None
+
+    def test_never_raises_on_garbage(self):
+        # malformed inputs return None instead of raising (the module's robustness contract).
+        assert geom_omr._decode_staves_to_musicxml(None, None) is None
+        # heads list shorter than staves: the missing staff is treated as empty.
+        assert geom_omr._decode_staves_to_musicxml([self.TREBLE], []) is None
+        # a degenerate staff (one line) is skipped, not crashed on.
+        assert geom_omr._decode_staves_to_musicxml([[10.0]], [[(1.0, 2.0)]]) is None
+
+
 # --- PIL-rendered tier: full detect -> decode (skips without numpy/scipy/PIL) -------------
 
 requires_geom = pytest.mark.skipif(

@@ -17,7 +17,6 @@ from __future__ import annotations
 from typing import List, Optional, Tuple
 
 import geom_omr
-import llm_omr
 
 DETECTOR_AVAILABLE = False
 _IMPORT_ERROR: Optional[str] = None
@@ -111,7 +110,11 @@ def transcribe_with_detector(image, detector: NoteheadDetector,
                              key_fifths: int = 0) -> Optional[bytes]:
     """End-to-end transcription using the TRAINED detector for noteheads and geom_omr for staff
     geometry + the exact pitch decode. Mirrors geom_omr.transcribe_geometric but swaps the
-    notehead source. Returns MusicXML bytes or None. NEVER raises.
+    notehead source: the trained YOLO detector + _assign_to_staves replace the classical
+    detect_noteheads. Everything downstream (chord grouping, the exact pitch decode, treble/bass
+    split, measure distribution, MusicXML) is the SHARED geom_omr._decode_staves_to_musicxml
+    tail, so this path cannot drift from the classical baseline it is benchmarked against.
+    Returns MusicXML bytes or None. NEVER raises.
 
     image: a file path (preferred, YOLO reads it directly) or an ndarray.
     key_fifths: key signature passed to decode_pitch so accidentals come from the key (default 0
@@ -131,37 +134,9 @@ def transcribe_with_detector(image, detector: NoteheadDetector,
         centers = detector.detect(image)
         if not centers:
             return None
+        # Trained notehead source: detect globally, then assign each head to its staff so the
+        # per-staff lists are index-aligned with staves for the shared decode tail.
         per_staff = _assign_to_staves(centers, staves)
-
-        treble_chords: List[List[Tuple[str, int, int]]] = []
-        bass_chords: List[List[Tuple[str, int, int]]] = []
-        for idx, staff_lines in enumerate(staves):
-            sp = geom_omr._interline(staff_lines)
-            if sp is None:
-                continue
-            clef = geom_omr._clef_for_staff_index(idx)
-            heads = per_staff[idx]
-            if not heads:
-                continue
-            chords = geom_omr.group_chords(heads, sp)
-            for chord in chords:
-                pitches = []
-                for (_x, y) in chord:
-                    p = geom_omr.decode_pitch(y, staff_lines, clef, fifths=key_fifths)
-                    if p is not None:
-                        pitches.append(p)
-                if not pitches:
-                    continue
-                (treble_chords if clef == "G" else bass_chords).append(pitches)
-
-        if not treble_chords and not bass_chords:
-            return None
-        measures = geom_omr._chords_to_measures(treble_chords, bass_chords)
-        if not measures:
-            return None
-        return llm_omr.score_json_to_musicxml({
-            "divisions": 4, "key_fifths": key_fifths,
-            "time": {"beats": 4, "beat_type": 4}, "measures": measures,
-        })
+        return geom_omr._decode_staves_to_musicxml(staves, per_staff, key_fifths=key_fifths)
     except Exception:
         return None
