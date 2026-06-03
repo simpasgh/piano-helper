@@ -214,3 +214,80 @@ def test_transcribe_returns_none_when_provider_returns_nothing(monkeypatch, tmp_
     monkeypatch.setattr(llm_omr, "_encode_image", lambda p: ("Zm9v", "image/png"))
     monkeypatch.setattr(llm_omr, "_call_provider", lambda *a, **k: None)
     assert llm_omr.transcribe(str(tmp_path / "any.png")) is None
+
+
+# --- monthly budget cap ------------------------------------------------------------------
+
+
+def _enable_llm(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMR_LLM", "1")
+    monkeypatch.setenv("OMR_LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("OMR_LLM_API_KEY", "sk-test")
+    monkeypatch.setenv("OMR_LLM_USAGE_FILE", str(tmp_path / "usage.json"))
+
+
+def test_record_call_increments_and_resets_monthly(monkeypatch, tmp_path):
+    _enable_llm(monkeypatch, tmp_path)
+    monkeypatch.setenv("OMR_LLM_EST_COST_PER_CALL_EUR", "0.5")
+    llm_omr._record_call()
+    llm_omr._record_call()
+    state = llm_omr._read_usage()
+    assert state["calls"] == 2
+    assert abs(state["eur"] - 1.0) < 1e-6
+    assert state["month"] == llm_omr._month_key()
+    # A stale prior month is reset on the next record.
+    import json as _json
+
+    with open(str(tmp_path / "usage.json"), "w") as fh:
+        _json.dump({"month": "1999-01", "eur": 999.0, "calls": 99}, fh)
+    llm_omr._record_call()
+    state = llm_omr._read_usage()
+    assert state["month"] == llm_omr._month_key() and state["calls"] == 1
+
+
+def test_budget_exceeded_blocks_the_call(monkeypatch, tmp_path):
+    _enable_llm(monkeypatch, tmp_path)
+    monkeypatch.setenv("OMR_LLM_MONTHLY_BUDGET_EUR", "20")
+    import json as _json
+
+    with open(str(tmp_path / "usage.json"), "w") as fh:
+        _json.dump({"month": llm_omr._month_key(), "eur": 20.0, "calls": 1}, fh)
+    assert llm_omr._budget_exceeded() is True
+
+    def provider_must_not_run(*a, **k):
+        raise AssertionError("provider must not be called once the budget is reached")
+
+    monkeypatch.setattr(llm_omr, "_encode_image", lambda p: ("Zm9v", "image/png"))
+    monkeypatch.setattr(llm_omr, "_call_provider", provider_must_not_run)
+    assert llm_omr.transcribe(str(tmp_path / "any.png")) is None
+
+
+def test_budget_zero_means_no_cap(monkeypatch, tmp_path):
+    _enable_llm(monkeypatch, tmp_path)
+    monkeypatch.setenv("OMR_LLM_MONTHLY_BUDGET_EUR", "0")
+    import json as _json
+
+    with open(str(tmp_path / "usage.json"), "w") as fh:
+        _json.dump({"month": llm_omr._month_key(), "eur": 999.0, "calls": 1}, fh)
+    assert llm_omr._budget_exceeded() is False
+
+
+def test_budget_helpers_never_raise_on_bad_usage_file(monkeypatch, tmp_path):
+    # An unreadable/garbage usage file must not raise; _budget_exceeded reads it as 0 spent.
+    monkeypatch.setenv("OMR_LLM_USAGE_FILE", str(tmp_path / "nope" / "usage.json"))
+    assert llm_omr._budget_exceeded() is False
+    llm_omr._record_call()  # creates the dir, no raise
+
+
+def test_transcribe_records_a_call_within_budget(monkeypatch, tmp_path):
+    _enable_llm(monkeypatch, tmp_path)
+    monkeypatch.setenv("OMR_LLM_MONTHLY_BUDGET_EUR", "20")
+    monkeypatch.setattr(llm_omr, "_encode_image", lambda p: ("Zm9v", "image/png"))
+    monkeypatch.setattr(
+        llm_omr,
+        "_call_provider",
+        lambda *a, **k: '{"measures":[{"staff1":[{"duration":4,"pitches":[{"step":"C","octave":5}]}]}]}',
+    )
+    out = llm_omr.transcribe(str(tmp_path / "any.png"))
+    assert out is not None
+    assert llm_omr._read_usage().get("calls") == 1

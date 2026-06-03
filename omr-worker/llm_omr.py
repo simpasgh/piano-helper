@@ -29,11 +29,15 @@ Env:
   OMR_LLM_BASE_URL        override the API base (for OpenAI-compatible gateways / proxies)
   OMR_LLM_MAX_EDGE        max image long-edge px before upload (default 2048; controls cost)
   OMR_LLM_TIMEOUT         per-request timeout seconds (default 120)
+  OMR_LLM_MONTHLY_BUDGET_EUR   monthly estimated-spend cap (default 20; 0 = no cap)
+  OMR_LLM_EST_COST_PER_CALL_EUR  per-call cost estimate for the cap (default 0.01)
+  OMR_LLM_USAGE_FILE      persistent monthly tally path (default /var/lib/piano-helper-omr/llm_usage.json)
 """
 
 from __future__ import annotations
 
 import base64
+import datetime
 import io
 import json
 import os
@@ -122,6 +126,86 @@ _INSTRUCTIONS = (
 )
 
 
+# --- Monthly spend cap (defense-in-depth; the true hard cap is the provider's free tier /
+# billing budget). We track an ESTIMATED monthly spend in a persistent usage file and stop
+# calling the provider once the budget is hit, falling back to the free engines. Erring toward
+# under-spend: we record the attempt BEFORE the billable call, so a failed/free call still
+# counts (we would rather stop early than overspend). All best-effort, NEVER raises, and the
+# usage file holds NO secrets (month / eur / calls only). The API key is never written here. ---
+
+def _usage_path() -> str:
+    return os.environ.get("OMR_LLM_USAGE_FILE", "/var/lib/piano-helper-omr/llm_usage.json")
+
+
+def _month_key() -> str:
+    return datetime.date.today().strftime("%Y-%m")
+
+
+def _budget_eur() -> float:
+    try:
+        return float(os.environ.get("OMR_LLM_MONTHLY_BUDGET_EUR", "20"))
+    except (TypeError, ValueError):
+        return 20.0
+
+
+def _est_cost_per_call_eur() -> float:
+    try:
+        v = float(os.environ.get("OMR_LLM_EST_COST_PER_CALL_EUR", "0.01"))
+        return v if v >= 0 else 0.01
+    except (TypeError, ValueError):
+        return 0.01
+
+
+def _read_usage() -> dict:
+    try:
+        with open(_usage_path(), "r") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _budget_exceeded() -> bool:
+    """True when this month's ESTIMATED spend has reached OMR_LLM_MONTHLY_BUDGET_EUR. A budget
+    of 0 or negative means "no cap". Best-effort: an unreadable usage file reads as 0 spent
+    (allow) and the provider-side budget remains the true backstop. NEVER raises."""
+    try:
+        budget = _budget_eur()
+        if budget <= 0:
+            return False
+        state = _read_usage()
+        if state.get("month") != _month_key():
+            return False  # new month -> counter resets on the next record.
+        return float(state.get("eur", 0) or 0) >= budget
+    except Exception:
+        return False
+
+
+def _record_call() -> None:
+    """Add one estimated call cost to this month's usage tally (resetting on a new month).
+    Best-effort: creates the directory if needed; swallows any IO error. NEVER raises."""
+    try:
+        path = _usage_path()
+        month = _month_key()
+        state = _read_usage()
+        if state.get("month") != month:
+            state = {"month": month, "eur": 0.0, "calls": 0}
+        state["eur"] = round(float(state.get("eur", 0) or 0) + _est_cost_per_call_eur(), 6)
+        state["calls"] = int(state.get("calls", 0) or 0) + 1
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(path, "w") as fh:
+            json.dump(state, fh)
+        # Observability only: counts + EUR, NEVER the key or the model output.
+        print(
+            "llm_omr: month %s call #%d est EUR %.4f / budget %.2f"
+            % (month, state["calls"], state["eur"], _budget_eur())
+        )
+    except Exception:
+        pass
+
+
 # --- Public entry point ------------------------------------------------------------------
 
 def transcribe(image_path: str) -> Optional[bytes]:
@@ -129,6 +213,9 @@ def transcribe(image_path: str) -> Optional[bytes]:
     failure (so the worker falls back to the existing engines). NEVER raises."""
     try:
         if not llm_available():
+            return None
+        if _budget_exceeded():
+            print("llm_omr: monthly budget reached; skipping LLM, falling back to free engines")
             return None
         provider = _provider()
         key = _api_key(provider)
@@ -140,6 +227,9 @@ def transcribe(image_path: str) -> Optional[bytes]:
         if image_b64 is None:
             return None
 
+        # Record the (about-to-be-billable) call BEFORE making it, so a failure still counts
+        # toward the cap (under-spend bias). The key is never part of this record.
+        _record_call()
         text = _call_provider(provider, model, key, image_b64, media_type)
         if not text:
             return None
