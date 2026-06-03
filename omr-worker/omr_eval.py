@@ -46,6 +46,31 @@ def _pitched_by_cell(xml_bytes) -> Dict:
     return out
 
 
+def _dur16(duration: int, base: int) -> int:
+    """Quantize a note duration to an integer number of SIXTEENTH notes, so it is comparable
+    across engines that use different `<divisions>`. `base` is the document's ticks-per-quarter
+    (reconcile sets `event.base` to it after lowering onto the common tick base), so a quarter
+    note -> 4, half -> 8, whole -> 16, eighth -> 2, sixteenth -> 1. base <= 0 -> 0 (degrade,
+    never raise). This is the rhythm signal the pitch-only `_pitched_by_cell` deliberately drops."""
+    if base <= 0:
+        return 0
+    return int(round(duration / base * 4.0))
+
+
+def _pitched_dur_by_cell(xml_bytes) -> Dict:
+    """Like `_pitched_by_cell` but the multiset key is `(midi, dur16)` so the metric scores PITCH
+    AND DURATION together. Rests ignored; robust to parse failure ({}). Folding the duration into
+    the key means a note counts only when BOTH its pitch and its (divisions-invariant) duration
+    match -- the basis for the duration_acc / note_dur_f1 rhythm scores."""
+    out: Dict = {}
+    for e in reconcile.to_events(xml_bytes, "x"):
+        midi = reconcile._pitch_to_midi(e.pitch)
+        if midi is None:
+            continue
+        out.setdefault((e.measure, e.staff), Counter())[(midi, _dur16(e.duration, e.base))] += 1
+    return out
+
+
 def _chords_by_cell(xml_bytes) -> Dict:
     """Parse MusicXML -> {(measure, staff): Counter of frozenset(midi)} of the CHORDS (onset
     slots with >= 2 pitched notes) in each measure+hand.
@@ -131,10 +156,28 @@ def score_transcription(pred_xml, truth_xml) -> Dict:
         n_truth_chords, chord_hits = _chord_hit_counts(truth_chords, pred_chords)
         chord_recall = chord_hits / n_truth_chords if n_truth_chords else 1.0
 
+        # RHYTHM: re-grade folding DURATION into the key (midi, dur16). A note matches only when
+        # its pitch AND duration are both right, so this is the full-transcription score the
+        # pitch-only note_* metrics deliberately omit. note_dur_f1 is the strict P/R/F1;
+        # duration_acc is "of the notes read with the right pitch, the fraction also read with the
+        # right duration" (parallels octave_acc), which isolates rhythm from pitch.
+        truth_d = _pitched_dur_by_cell(truth_xml)
+        pred_d = _pitched_dur_by_cell(pred_xml)
+        n_dur_matched = 0
+        for cell in set(truth_d) | set(pred_d):
+            n_dur_matched += sum((truth_d.get(cell, Counter()) & pred_d.get(cell, Counter())).values())
+        dur_precision = n_dur_matched / n_pred if n_pred else 0.0
+        dur_recall = n_dur_matched / n_truth if n_truth else 0.0
+        dur_f1 = (2 * dur_precision * dur_recall / (dur_precision + dur_recall)) if (dur_precision + dur_recall) else 0.0
+        duration_acc = n_dur_matched / n_matched if n_matched else 0.0
+
         return {
             "note_precision": round(precision, 4),
             "note_recall": round(recall, 4),
             "note_f1": round(f1, 4),
+            "note_dur_f1": round(dur_f1, 4),
+            "duration_acc": round(duration_acc, 4),
+            "n_dur_matched": n_dur_matched,
             "n_truth": n_truth,
             "n_pred": n_pred,
             "n_matched": n_matched,
@@ -147,6 +190,9 @@ def score_transcription(pred_xml, truth_xml) -> Dict:
             "note_precision": 0.0,
             "note_recall": 0.0,
             "note_f1": 0.0,
+            "note_dur_f1": 0.0,
+            "duration_acc": 0.0,
+            "n_dur_matched": 0,
             "n_truth": 0,
             "n_pred": 0,
             "n_matched": 0,

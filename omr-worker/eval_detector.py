@@ -55,6 +55,13 @@ def _accumulate(acc: Dict, pred_xml: Optional[bytes], truth_xml: bytes) -> None:
         acc["pc"] += sum((tpc & ppc).values())
         acc["n_truth"] += sum(t.values())
         acc["n_pred"] += sum(p.values())
+    # duration-aware: fold dur16 into the key to count notes read with the RIGHT pitch AND
+    # duration (the rhythm signal the pitch-only `exact` count ignores). duration_acc in _summary
+    # is dur_exact / exact = of the pitch-correct notes, the fraction also rhythm-correct.
+    truth_d = omr_eval._pitched_dur_by_cell(truth_xml)
+    pred_d = omr_eval._pitched_dur_by_cell(pred_xml) if pred_xml else {}
+    for cell in set(truth_d) | set(pred_d):
+        acc["dur_exact"] += sum((truth_d.get(cell, Counter()) & pred_d.get(cell, Counter())).values())
     # measure-agnostic (staff-pooled) exact matches, to isolate the measure-binning cost.
     truth_sp, pred_sp = _pool_by_staff(truth), _pool_by_staff(pred)
     for staff in set(truth_sp) | set(pred_sp):
@@ -84,7 +91,10 @@ def _summary(acc: Dict) -> Dict:
         "exact_f1": round(f1, 4),
         "pitch_class_recall": round(pc / nt, 4) if nt else 0.0,
         "octave_acc": round(exact / pc, 4) if pc else 0.0,
-        "chord_recall": round(acc["chord_hits"] / acc["truth_chords"], 4) if acc["truth_chords"] else 1.0,
+        # rhythm: of the pitch-correct notes, the fraction also read with the right duration;
+        # note_dur_recall is the full pitch+duration recall over all truth notes.
+        "duration_acc": round(acc["dur_exact"] / exact, 4) if exact else 0.0,
+        "note_dur_recall": round(acc["dur_exact"] / nt, 4) if nt else 0.0,
         # measure-agnostic recall: same notes, graded per-hand instead of per-(measure, hand).
         # If this is much higher than exact_recall, the measure binning is the bottleneck.
         "staff_pooled_recall": round(acc["exact_sp"] / nt, 4) if nt else 0.0,
@@ -94,7 +104,7 @@ def _summary(acc: Dict) -> Dict:
 
 def _new_acc() -> Dict:
     return {"exact": 0, "pc": 0, "n_truth": 0, "n_pred": 0, "truth_chords": 0,
-            "chord_hits": 0, "exact_sp": 0}
+            "chord_hits": 0, "exact_sp": 0, "dur_exact": 0}
 
 
 def evaluate(dataset: str, weights: Optional[str], limit: Optional[int] = None,
