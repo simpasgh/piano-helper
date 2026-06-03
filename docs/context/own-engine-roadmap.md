@@ -37,6 +37,20 @@ targeted low-confidence-only edit is safe) or recovering the DROPPED notes (a de
 not a bar-sum post-transform. fusion also hardcodes 4/4 + divisions=4; borrowing Clarity's real
 <time> would let the repair help non-4/4 pieces (liminality) and is the cheap next lever.
 
+## STATUS: PROGRESSIVE delivery shipped (notes in ~5s, rhythm refines) (2026-06-04)
+
+OMR is now PROGRESSIVE (gated, default OFF): the worker writes the result key MULTIPLE times per job so
+the browser renders the first notes while the rest computes, instead of waiting ~100s for the whole
+file. `OMR_PROGRESSIVE` = fast-then-refine (geom's pitch-only result published as an omr-status=partial
+in ~5s, then the fused geom+Clarity result as the complete). `OMR_PROGRESSIVE_PAGES` = per-page
+streaming for multi-page PDFs (each page transcribed + fused + appended in document order, so measure 1
+shows while measure 20 is still being recognized). This is a DELIVERY change, orthogonal to engine
+ACCURACY: the engine output is byte-identical, just published incrementally. Architecture + rollout are
+in tech-lead.md / infrastructure.md (2026-06-04). The accuracy levers below are unchanged: RHYTHM /
+durations is still the top engine lever (and the reason fast-then-refine helps so much - the geom
+partial already has every pitch, only the slow Clarity rhythm is what the user now waits on in the
+background instead of up front).
+
 ## STATUS: detection robustness SHIPPED; geom runs PRIMARY on cx33; rhythm is next (2026-06-03)
 
 geom is now the PRIMARY engine on the cx33 worker (`OMR_GEOM=1` + `OMR_GEOM_PRIMARY=1`, wins-first,

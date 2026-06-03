@@ -247,6 +247,34 @@ async function loadScoreFile(file: File): Promise<void> {
   await loadScoreXml(xml, file.name);
 }
 
+// Build the Tone.Part that schedules a set of notes. The callback reads handMuted / handBalance /
+// getInstrument FRESH each trigger, so a mute toggle, a balance drag, or the sampler finishing
+// loading all take effect from the next onset with no Part rebuild. Shared by the full load
+// (loadNotes), the in-place edit reload (reloadNotes), and the progressive upgrade (upgradeNotes) so
+// the three never drift. The caller owns disposing the previous Part and setting the transport
+// bpm/position around the swap; this just creates the new Part and starts it at 0.
+function createPart(notes: VisNote[]): Tone.Part {
+  const built = new Tone.Part((time, note) => {
+    // Skip the trigger when this note's hand is muted (issue #37). A skipped trigger has no side
+    // effects, so the export/instrument paths are unaffected.
+    if (note.hand === "left" && handMuted.left) return;
+    if (note.hand === "right" && handMuted.right) return;
+    // Per-hand balance (issue #70): scale velocity by the hand's gain; "unknown" notes are full.
+    const gains = handGains(handBalance);
+    const velocity =
+      note.hand === "left" ? gains.left : note.hand === "right" ? gains.right : 1;
+    // Resolve the instrument per note so playback upgrades to the sampler as soon as it loads.
+    getInstrument().triggerAttackRelease(
+      Tone.Frequency(note.midi, "midi").toFrequency(),
+      note.duration,
+      time,
+      velocity,
+    );
+  }, notes.map((n) => ({ time: n.time, midi: n.midi, duration: n.duration, hand: n.hand })));
+  built.start(0);
+  return built;
+}
+
 // Rebuild the audio + falling-notes pipeline from a ScoreData. Shared by the MusicXML
 // path (which also renders a sheet + cursor) and the audio path (falling notes only).
 // `name` is the default sheet title for this load (issue #44): the MusicXML title or file
@@ -268,28 +296,7 @@ function loadNotes(data: ScoreData, name: string, sheet: boolean): void {
 
   visualizer.setNotes(score.notes);
 
-  part = new Tone.Part((time, note) => {
-    // Skip the trigger when this note's hand is muted (issue #37). The flag is read fresh
-    // each callback, so a mute toggle takes effect from the next onset with no Part rebuild.
-    // A skipped trigger has no side effects, so the export/instrument paths are unaffected.
-    if (note.hand === "left" && handMuted.left) return;
-    if (note.hand === "right" && handMuted.right) return;
-    // Per-hand balance (issue #70): scale this note's velocity by its hand's gain. Read
-    // fresh each callback so slider drags apply from the next onset. "unknown" notes are
-    // unaffected (full velocity).
-    const gains = handGains(handBalance);
-    const velocity =
-      note.hand === "left" ? gains.left : note.hand === "right" ? gains.right : 1;
-    // Resolve the instrument per note so playback upgrades to the sampler as soon as it
-    // loads. Timing/scheduling is unchanged: only the sound source differs.
-    getInstrument().triggerAttackRelease(
-      Tone.Frequency(note.midi, "midi").toFrequency(),
-      note.duration,
-      time,
-      velocity,
-    );
-  }, score.notes.map((n) => ({ time: n.time, midi: n.midi, duration: n.duration, hand: n.hand })));
-  part.start(0);
+  part = createPart(score.notes);
 
   // Apply the current tempo now that the Part is built at BASE_BPM.
   transport.bpm.value = rateToBpm(tempoRate, BASE_BPM);
@@ -356,20 +363,7 @@ function reloadNotes(notes: VisNote[]): void {
   // falling notes and the cursor still read from one timeline (we never changed any note time).
   transport.bpm.value = BASE_BPM;
   visualizer.setNotes(score.notes);
-  part = new Tone.Part((time, note) => {
-    if (note.hand === "left" && handMuted.left) return;
-    if (note.hand === "right" && handMuted.right) return;
-    const gains = handGains(handBalance);
-    const velocity =
-      note.hand === "left" ? gains.left : note.hand === "right" ? gains.right : 1;
-    getInstrument().triggerAttackRelease(
-      Tone.Frequency(note.midi, "midi").toFrequency(),
-      note.duration,
-      time,
-      velocity,
-    );
-  }, score.notes.map((n) => ({ time: n.time, midi: n.midi, duration: n.duration, hand: n.hand })));
-  part.start(0);
+  part = createPart(score.notes);
   transport.bpm.value = rateToBpm(tempoRate, BASE_BPM);
 
   // Restore the playhead. A delete can shorten the score below the old position; clamp it.
@@ -382,6 +376,37 @@ function reloadNotes(notes: VisNote[]): void {
   // knows the sheet below still reflects the original scan. Cleared on a fresh load.
   if (hasEdits(score.notes)) showEditedStatus();
   updateSeekUI(Tone.getTransport().seconds * tempoRate);
+}
+
+// PROGRESSIVE in-place upgrade (progressive OMR). Swap the whole ScoreData (notes, step times,
+// duration) for a refined or larger one the scan produced, WITHOUT resetting the player: keep the
+// playing state, the playhead (clamped to the new duration), the hand mutes, balance, tempo, and the
+// sheet name. The sheet SVG was already re-rendered by the caller (loadScoreXml), so this rebuilds
+// only what depends on the notes: the Tone.Part, the visualizer, the onset list, the count, and the
+// cursor position. This is how a partial scan refines into the complete one, or grows page by page,
+// under the player's feet. The position is preserved as an ABSOLUTE score time (not a fraction) so
+// earlier measures stay put while later pages append at the end.
+function upgradeNotes(data: ScoreData): void {
+  const transport = Tone.getTransport();
+  const wasPlaying = playing;
+  const positionSeconds = transport.seconds;
+  transport.pause();
+
+  score = data;
+  hasSheet = true;
+  part?.dispose();
+  transport.bpm.value = BASE_BPM;
+  visualizer.setNotes(score.notes);
+  part = createPart(score.notes);
+  transport.bpm.value = rateToBpm(tempoRate, BASE_BPM);
+
+  const scoreTime = Math.min(positionSeconds * tempoRate, score.duration);
+  transport.seconds = tempoRate > 0 ? scoreTime / tempoRate : 0;
+  onsets = uniqueOnsets(score.notes);
+  noteCount = score.notes.length;
+  resyncCursor(scoreTime);
+  if (wasPlaying) transport.start();
+  updateSeekUI(scoreTime);
 }
 
 // Apply an edit transform to the selected note and rebuild the playback pipeline. `transform`
@@ -458,7 +483,11 @@ function exitCorrectMode(): void {
 
 // Load MusicXML into OSMD and rebuild the pipeline. Shared by the direct MusicXML file
 // path and the OMR scan result path.
-async function loadScoreXml(xml: string, name: string): Promise<void> {
+async function loadScoreXml(
+  xml: string,
+  name: string,
+  opts: { upgrade?: boolean } = {},
+): Promise<void> {
   await osmd.load(xml);
   osmd.render();
   osmd.cursor.reset();
@@ -466,11 +495,20 @@ async function loadScoreXml(xml: string, name: string): Promise<void> {
   // Rebuild the note-name overlay against the freshly rendered noteheads.
   renderSheetLabels(osmd, sheetContainer, labelMode);
 
+  const data = extractScore(osmd);
+  // Progressive upgrade (a partial refining into the complete result, or a per-page score growing):
+  // keep the player where it is rather than resetting to the top with fresh mutes/name. Only when a
+  // score is already loaded; the first partial falls through to the full load below.
+  if (opts.upgrade && score) {
+    upgradeNotes(data);
+    return;
+  }
+
   // Issue #44: default the sheet name to the MusicXML title when present, else the file name.
   // `osmd.Sheet.TitleString` is the parsed work title; guard defensively in case a score has
   // no title metadata.
   const xmlTitle = (osmd.Sheet as { TitleString?: string } | undefined)?.TitleString ?? null;
-  loadNotes(extractScore(osmd), deriveDefaultSheetName(name, xmlTitle), true);
+  loadNotes(data, deriveDefaultSheetName(name, xmlTitle), true);
 }
 
 // Transcribe an uploaded audio file (issue #19) into falling notes. There is no sheet
@@ -828,18 +866,52 @@ async function scanSheet(file: File): Promise<void> {
   setBusyUI(true);
   showScanOverlay("scan");
   showStatus("Scanning sheet... (the accurate scan can take several minutes)");
+  // True once the first progressive partial has been shown. After that the overlay is gone, the
+  // controls are live, and the score is on screen; later partials and the final complete UPGRADE it
+  // in place (preserving the playhead) rather than reloading from the top.
+  let shownPartial = false;
   try {
     const jobId = await submitOmr(file);
     const xml = await pollOmrResult(jobId, {
-      isCancelledRequested: () => cancelRequested,
+      // Abort the wait on a user cancel OR when a newer job supersedes this one. A progressive job
+      // keeps polling after the overlay is gone (the controls are re-enabled on the first partial),
+      // so a stale loop must stop once the user starts another scan.
+      isCancelledRequested: () => cancelRequested || generation !== jobGeneration,
+      onPartial: async (partialXml) => {
+        if (!shouldApplyResult(generation, jobGeneration, cancelRequested)) return;
+        // First partial: drop the blocking overlay and re-enable the controls so the user can see
+        // and play the score-so-far while the rest is still being recognized.
+        if (!shownPartial) {
+          hideScanOverlay();
+          setBusyUI(false);
+        }
+        await loadScoreXml(partialXml, file.name, { upgrade: shownPartial });
+        shownPartial = true;
+        showStatus("Showing notes. Refining the rest...");
+      },
     });
-    await loadScoreXml(xml, file.name);
+    if (!shouldApplyResult(generation, jobGeneration, cancelRequested)) return;
+    await loadScoreXml(xml, file.name, { upgrade: shownPartial });
+    if (shownPartial) restoreSheetName(); // the refine is done; drop the "Refining..." line.
+  } catch (err) {
+    // Superseded by a newer scan: drop this one silently so its late settle cannot stomp the new
+    // job's overlay/controls (issue #93). The new job owns the UI.
+    if (generation !== jobGeneration) return;
+    // A recognition failure AFTER a partial already rendered: keep the fast result instead of wiping
+    // the screen with an error (the fusion path cannot actually reach this, since a partial means
+    // geom succeeded; this is a defensive degrade). A cancel still propagates so its caller restores
+    // the slot quietly.
+    if (shownPartial && !isCancelled(err)) {
+      console.error("Scan refine failed; keeping the partial result:", err);
+      showStatus("Showing notes (could not refine the rest).");
+      return;
+    }
+    throw err;
   } finally {
-    // Only tear down if this is still the active job. A cancel re-enables the controls and
-    // hides the overlay synchronously and may have started a newer job; a late settle of this
-    // abandoned scan must not stomp the newer job's overlay/controls (issue #93). When this is
-    // still the active job the repeat is harmless: setBusyUI(false), hideScanOverlay, and
-    // restoreSheetName are all idempotent.
+    // Only tear down if this is still the active job. A cancel re-enables the controls and hides the
+    // overlay synchronously and may have started a newer job; a late settle of this abandoned scan
+    // must not stomp the newer job's overlay/controls (issue #93). setBusyUI(false) and
+    // hideScanOverlay are idempotent (and already run on the first partial).
     if (generation === jobGeneration) {
       setBusyUI(false);
       hideScanOverlay();

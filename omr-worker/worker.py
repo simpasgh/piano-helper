@@ -54,6 +54,7 @@ from reconcile import _clef_sign
 # so importing it is free and it is inert until OMR_LLM + a provider key are configured).
 import llm_omr
 import fusion
+import progressive
 
 # rhythm_repair is PURE stdlib (no boto3/torch), like reconcile/fusion, so importing it is free.
 # It is the final post-transform: a music-theory pass that makes each measure's note durations sum
@@ -64,6 +65,12 @@ UPLOAD_PREFIX = "uploads/"
 RESULT_SUFFIX = ".musicxml"
 RESULT_CONTENT_TYPE = "application/vnd.recordare.musicxml+xml"
 DEFAULT_POLL_SECONDS = 5
+
+# Custom R2 object metadata key recording whether a result write is "partial" (a mid-progressive
+# write) or "complete" (terminal). result_is_complete reads it so a partial never satisfies the
+# idempotency gate: the upload is still present and the job must finish. S3/R2 lowercase metadata
+# keys, so this is already lowercase.
+_RESULT_STATUS_META = "omr-status"
 
 # Rasterization DPI for the PDF path. oemer exposes no DPI/quality knob of its own
 # (its CLI is just -o, --use-tf, --save-cache, -d/--without-deskew), so the raster we
@@ -178,6 +185,34 @@ def fusion_enabled():
         return False
     return raw.strip().lower() in ("1", "true")
 
+
+# PROGRESSIVE publishing (progressive.py), gated by OMR_PROGRESSIVE (default OFF). When ON, process_job
+# writes the result key MULTIPLE times: in-progress writes are marked omr-status=partial so the browser
+# renders the first notes while the rest still computes, and the final write is the complete result.
+# Default OFF = exactly one write at the end, byte-identical to today. OMR_PROGRESSIVE_PAGES is a
+# refinement (only meaningful with OMR_PROGRESSIVE): stream a multi-page PDF PAGE BY PAGE (each page
+# transcribed + appended in document order) instead of fast-then-refine on the whole file.
+PROGRESSIVE_ENV = "OMR_PROGRESSIVE"
+PROGRESSIVE_PAGES_ENV = "OMR_PROGRESSIVE_PAGES"
+
+
+def progressive_enabled():
+    """True when OMR_PROGRESSIVE is truthy ("1"/"true"). Anything else is OFF. Read in exactly one
+    place, mirroring ensemble_enabled."""
+    raw = os.environ.get(PROGRESSIVE_ENV)
+    if raw is None:
+        return False
+    return raw.strip().lower() in ("1", "true")
+
+
+def progressive_pages_enabled():
+    """True when OMR_PROGRESSIVE_PAGES is truthy: within progressive, stream a multi-page PDF page by
+    page. Only meaningful when progressive_enabled() is also True. Mirrors geom_primary."""
+    raw = os.environ.get(PROGRESSIVE_PAGES_ENV)
+    if raw is None:
+        return False
+    return raw.strip().lower() in ("1", "true")
+
 # Byte-compatible with src/omr.ts FAILURE_SENTINEL_RE = /name="omr-status"\s*>\s*failed/.
 # Written to the result key when both engines fail so the browser stops polling and
 # shows a friendly error instead of rendering a near-empty score as success.
@@ -263,15 +298,26 @@ def list_upload_job_ids(client, bucket):
             yield job_id
 
 
-def result_exists(client, bucket, job_id):
+def result_is_complete(client, bucket, job_id):
+    """True when a COMPLETE result is already present (idempotent re-runs, or a worker restart after
+    the result was written but before the upload was deleted): skip the work and drop the stale
+    upload. A PARTIAL result (omr-status=partial in the object metadata, written mid-progressive)
+    does NOT count: its upload is still present and the job must finish, so we reprocess. A result
+    with no metadata is a legacy/non-progressive complete write and counts as complete. Returns
+    False when no result exists (404)."""
     try:
-        client.head_object(Bucket=bucket, Key=result_key(job_id))
-        return True
+        resp = client.head_object(Bucket=bucket, Key=result_key(job_id))
     except ClientError as err:
         code = err.response.get("Error", {}).get("Code")
         if code in ("404", "NoSuchKey", "NotFound"):
             return False
         raise
+    # Read the status case-insensitively: boto3 lowercases S3 user-metadata keys, but the whole
+    # crash-recovery guarantee (a partial never satisfies the gate) rests on this read, so normalize
+    # rather than trust the casing of the R2 endpoint's response.
+    metadata = resp.get("Metadata", {}) or {}
+    status = next((v for k, v in metadata.items() if k.lower() == _RESULT_STATUS_META), None)
+    return status != progressive.STATUS_PARTIAL
 
 
 def upload_key(job_id):
@@ -1187,10 +1233,151 @@ def run_primary_engines(run_clarity_fn, run_oemer_fn, is_pdf_input):
     return results.get("clarity"), results.get("oemer")
 
 
+def _put_result(client, bucket, job_id, body, complete):
+    """Write the result key, tagging the object metadata omr-status=complete (the idempotency gate
+    reads it) or =partial (a mid-progressive write that must not block reprocessing). The BODY of a
+    partial is stamped by the caller (progressive.stamp_partial) so the browser sees the marker; this
+    only sets the metadata + content-type. Adding metadata does NOT change the bytes the result
+    endpoint returns, so a non-progressive job stays byte-identical for the client."""
+    client.put_object(
+        Bucket=bucket,
+        Key=result_key(job_id),
+        Body=body,
+        ContentType=RESULT_CONTENT_TYPE,
+        Metadata={_RESULT_STATUS_META: "complete" if complete else progressive.STATUS_PARTIAL},
+    )
+
+
+def _page_index(path):
+    """Numeric page index from a pdfseparate "page-<n>.pdf" name (its %d is NOT zero-padded, so a
+    lexical sort would put page-10 before page-2). Returns 0 on an odd name."""
+    base = os.path.basename(path)
+    try:
+        return int(base[len("page-"):-len(".pdf")])
+    except (ValueError, IndexError):
+        return 0
+
+
+def split_pdf_pages(input_path, workdir):
+    """Split a PDF into single-page PDFs with poppler's pdfseparate (same poppler-utils package as
+    pdftoppm, so no new dependency) and return their paths in document order. Returns [] on any
+    failure (binary missing, bad PDF) so the caller falls back to whole-file fusion. Capped at
+    MAX_STITCH_PAGES so a crafted many-page PDF cannot fan out into unbounded subprocess work.
+    NEVER raises beyond the cap (a deliberate signal the caller treats as "do not stream")."""
+    out_dir = os.path.join(workdir, "pages")
+    os.makedirs(out_dir, exist_ok=True)
+    pattern = os.path.join(out_dir, "page-%d.pdf")
+    try:
+        subprocess.run(["pdfseparate", input_path, pattern], check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError) as err:
+        log("pdfseparate failed (%r); whole-file fusion" % err)
+        return []
+    pages = sorted(
+        (os.path.join(out_dir, p) for p in os.listdir(out_dir)
+         if p.startswith("page-") and p.endswith(".pdf")),
+        key=_page_index,
+    )
+    if len(pages) > MAX_STITCH_PAGES:
+        raise RuntimeError("too many pages to stream: %d > %d" % (len(pages), MAX_STITCH_PAGES))
+    return pages
+
+
+def _geom_page_body(page_pdf, page_dir):
+    """Rasterize a single-page PDF and run geom on it, returning its MusicXML bytes or None. NEVER
+    raises (mirrors process_job._geom_body for the per-page path)."""
+    try:
+        image, _ = rasterize_if_pdf(page_pdf, page_dir)
+    except Exception as err:
+        log("per-page geom raster failed (%r)" % err)
+        return None
+    if image is None:
+        return None
+    gp = run_geom(image, page_dir)
+    if not gp:
+        return None
+    try:
+        with open(gp, "rb") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def _transcribe_one_page(page_pdf, page_dir):
+    """Transcribe ONE single-page PDF with geom + Clarity CONCURRENTLY and fuse them, exactly like
+    the whole-file fusion but scoped to a page. Returns fused MusicXML bytes (geom pitch + Clarity
+    rhythm), geom's bytes if Clarity failed, Clarity's if geom failed, or None if nothing was
+    recognized on the page. NEVER raises."""
+    try:
+        clarity_bytes = None
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            gf = pool.submit(_geom_page_body, page_pdf, page_dir)
+            cf = pool.submit(lambda: run_clarity(page_pdf, page_dir))
+            geom_bytes = gf.result()
+            clarity_path = cf.result()
+        if clarity_path:
+            try:
+                with open(clarity_path, "rb") as fh:
+                    clarity_bytes = fh.read()
+            except OSError:
+                clarity_bytes = None
+        if not geom_bytes and not clarity_bytes:
+            return None
+        fused = fusion.fuse(geom_bytes, clarity_bytes)
+        if not fused:
+            return None
+        # Collapse to ONE grand-staff part BEFORE appending: append_measures concatenates the first
+        # <part>, and a clarity-only page (geom failed -> fuse returns Clarity raw) can be 2 parts, so
+        # appending it raw would drop the bass staff. merge_to_grand_staff is a no-op on the already
+        # 1-part geom/fusion output (parts != 2 returns the bytes unchanged).
+        return merge_to_grand_staff(fused)
+    except Exception as err:
+        log("per-page transcribe failed (%r)" % err)
+        return None
+
+
+def _fusion_per_page(job_id, input_path, workdir, publish_partial):
+    """PER-PAGE progressive fusion (OMR_PROGRESSIVE_PAGES). Split the PDF into single pages, transcribe
+    each (geom + Clarity, fused) in document order, APPEND its measures to the growing score
+    (progressive.append_measures), and publish a partial after each page except the last. Returns the
+    final accumulated MusicXML bytes (the COMPLETE body process_job writes at the end), or None to
+    fall back to whole-file fusion (split unavailable, single page, or nothing recognized anywhere).
+
+    Each page is fused INDEPENDENTLY, so there is no cross-engine measure alignment to get wrong: the
+    pages simply concatenate. A page whose Clarity failed degrades to that page's geom (placeholder
+    rhythm) inside _transcribe_one_page, never below the fast layer. NEVER raises."""
+    try:
+        page_pdfs = split_pdf_pages(input_path, workdir)
+    except Exception as err:
+        log("per-page split failed for %s (%r); whole-file fusion" % (job_id, err))
+        return None
+    if len(page_pdfs) < 2:
+        return None  # single page: nothing to stream, whole-file fusion is simpler + concurrent.
+
+    accumulated = None
+    pages_with_content = 0
+    for index, page_pdf in enumerate(page_pdfs):
+        page_dir = os.path.join(workdir, "page-%d" % index)
+        os.makedirs(page_dir, exist_ok=True)
+        fused_page = _transcribe_one_page(page_pdf, page_dir)
+        if fused_page is None:
+            continue  # nothing on this page; do not publish an empty step.
+        accumulated = progressive.append_measures(accumulated, fused_page)
+        pages_with_content += 1
+        is_last = index == len(page_pdfs) - 1
+        if not is_last:
+            publish_partial(accumulated)
+            log("%s published page %d/%d" % (job_id, index + 1, len(page_pdfs)))
+    if pages_with_content == 0:
+        return None
+    return accumulated
+
+
 def process_job(client, bucket, job_id):
-    """Convert one upload. Always leaves exactly one object at the result key
-    (real score or sentinel) and deletes the upload so it is not reprocessed."""
-    if result_exists(client, bucket, job_id):
+    """Convert one upload. Always leaves exactly one COMPLETE object at the result key
+    (real score or sentinel) and deletes the upload so it is not reprocessed. With OMR_PROGRESSIVE on
+    it may ALSO write earlier partials to the same key (omr-status=partial) so the browser renders
+    while the rest computes; the upload is deleted only after the final complete write."""
+    if result_is_complete(client, bucket, job_id):
         log("result already present for %s; deleting stale upload" % job_id)
         client.delete_object(Bucket=bucket, Key=upload_key(job_id))
         return
@@ -1205,6 +1392,34 @@ def process_job(client, bucket, job_id):
 
         body = None
         source = None
+
+        # Progressive partial publishing (OMR_PROGRESSIVE): finalize + stamp a mid-progress body and
+        # write it to the result key as omr-status=partial WITHOUT deleting the upload, so the browser
+        # renders it and keeps polling. Each call bumps a monotonic version the client uses to
+        # re-render only on change. NEVER raises into the engine flow: a publish hiccup must not fail
+        # the job, and the final complete write still happens at the end of process_job.
+        partial_version = [0]
+
+        def publish_partial(raw_body):
+            try:
+                partial_version[0] += 1
+                # Same post-transform chain as the complete write (merge -> normalize -> rhythm
+                # repair) so a partial renders with the same grand staff, ties, and bar completion.
+                finalized = rhythm_repair.repair_measure_durations(
+                    normalize_ties(merge_to_grand_staff(raw_body))
+                )
+                stamped = progressive.stamp_partial(finalized, partial_version[0])
+                # The client reads partial-vs-complete from the IN-BODY marker (the result endpoint
+                # drops object metadata), so NEVER write an unmarked body to the result key mid-job: an
+                # unmarked body reads as a COMPLETE result and stops the client polling early. If
+                # stamping somehow did not take, skip this partial; the final complete write still runs.
+                if not progressive.is_partial_marked(stamped):
+                    log("%s partial v%d unmarked after stamp; skipping publish" % (job_id, partial_version[0]))
+                    return
+                _put_result(client, bucket, job_id, stamped, complete=False)
+                log("%s published partial v%d" % (job_id, partial_version[0]))
+            except Exception as err:
+                log("publish_partial skipped for %s (%r)" % (job_id, err))
 
         # Trained geometric engine (OMR_GEOM). It runs either FIRST (OMR_GEOM_PRIMARY, wins-first)
         # or as the never-worse fallback below. For a NON-PDF upload we COPY its raster HERE, while
@@ -1245,25 +1460,44 @@ def process_job(client, bucket, job_id):
         # non-PDF upload this degrades to geom alone (fuse returns geom unchanged with no Clarity).
         # Takes precedence over geom_primary.
         if geom_enabled() and fusion_enabled():
-            geom_bytes, clarity_bytes = None, None
-            if is_pdf_input:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                    gf = pool.submit(_geom_body)
-                    cf = pool.submit(lambda: run_clarity(input_path, workdir))
-                    geom_bytes = gf.result()
-                    clarity_path = cf.result()
-                if clarity_path:
-                    try:
-                        with open(clarity_path, "rb") as fh:
-                            clarity_bytes = fh.read()
-                    except Exception as err:
-                        log("fusion: clarity read failed for %s (%r)" % (job_id, err))
-            else:
-                geom_bytes = _geom_body()
-            fused = fusion.fuse(geom_bytes, clarity_bytes)
-            if fused:
-                body, source = fused, "fusion"
-                log("%s recognized via fusion (geom pitch + clarity rhythm)" % job_id)
+            # PER-PAGE streaming (OMR_PROGRESSIVE + OMR_PROGRESSIVE_PAGES, multi-page PDF only): each
+            # page is transcribed + appended + published in document order, so the score grows page by
+            # page (measure 1 shows while measure 20 is still being recognized). Returns None to fall
+            # back to whole-file fusion (single page, split unavailable, or nothing recognized), so it
+            # is a pure refinement of the path below.
+            if progressive_enabled() and progressive_pages_enabled() and is_pdf_input:
+                paged = _fusion_per_page(job_id, input_path, workdir, publish_partial)
+                if paged is not None:
+                    body, source = paged, "fusion"
+                    log("%s recognized via fusion (per-page progressive)" % job_id)
+
+            if body is None:
+                # FAST-THEN-REFINE (OMR_PROGRESSIVE) or the whole-file fusion (progressive off). geom
+                # and Clarity run CONCURRENTLY; geom (~5s) finishes well before Clarity (~100s), so with
+                # progressive on we publish geom's pitch-only result as a partial the moment it is ready
+                # (the browser shows ALL the notes in ~5s) while Clarity keeps running, then fuse for the
+                # complete. Progressive off: no partial is published and the bytes are identical to before.
+                geom_bytes, clarity_bytes = None, None
+                if is_pdf_input:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                        gf = pool.submit(_geom_body)
+                        cf = pool.submit(lambda: run_clarity(input_path, workdir))
+                        geom_bytes = gf.result()
+                        if progressive_enabled() and geom_bytes:
+                            publish_partial(geom_bytes)
+                        clarity_path = cf.result()
+                    if clarity_path:
+                        try:
+                            with open(clarity_path, "rb") as fh:
+                                clarity_bytes = fh.read()
+                        except Exception as err:
+                            log("fusion: clarity read failed for %s (%r)" % (job_id, err))
+                else:
+                    geom_bytes = _geom_body()
+                fused = fusion.fuse(geom_bytes, clarity_bytes)
+                if fused:
+                    body, source = fused, "fusion"
+                    log("%s recognized via fusion (geom pitch + clarity rhythm)" % job_id)
 
         # geom PRIMARY (OMR_GEOM + OMR_GEOM_PRIMARY): runs FIRST and wins if it returns a result,
         # ahead of the LLM/ensemble. Override behaviour the user opted into; remove OMR_GEOM_PRIMARY
@@ -1327,14 +1561,13 @@ def process_job(client, bucket, job_id):
             body = FAILURE_SENTINEL
             log("all engines failed for %s; writing failure sentinel" % job_id)
 
-        client.put_object(
-            Bucket=bucket,
-            Key=result_key(job_id),
-            Body=body,
-            ContentType=RESULT_CONTENT_TYPE,
-        )
+        # The terminal write is tagged complete so the idempotency gate (result_is_complete) treats
+        # the job as done; any progressive partials written earlier carried omr-status=partial.
+        _put_result(client, bucket, job_id, body, complete=True)
 
-    # Only delete the upload after the result is durably written.
+    # Only delete the upload after the COMPLETE result is durably written (a crash after a partial
+    # but before this leaves the upload in place, so the job reprocesses instead of stranding at a
+    # partial).
     client.delete_object(Bucket=bucket, Key=upload_key(job_id))
     log("done %s; upload deleted" % job_id)
 

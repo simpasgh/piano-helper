@@ -30,6 +30,33 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-06-04 - PROGRESSIVE OMR (partial-result protocol + fast-then-refine + per-page streaming).**
+  The worker writes the result key MULTIPLE times per job so the browser renders the first notes while
+  the rest computes. In-progress writes carry `omr-status="partial"` + `omr-version` INSIDE the
+  MusicXML (`omr-worker/progressive.py` `stamp_partial`); the final write is unmarked (= complete).
+  Mirrors the failure-sentinel pattern, so `functions/api/omr/result.ts` is UNCHANGED (200 for partial
+  and complete alike; the marker rides in the body + R2 object metadata). Pure never-raise helpers in
+  `progressive.py` (`stamp_partial` + `append_measures`); orchestration in `process_job` behind two
+  flags: `OMR_PROGRESSIVE` (fast-then-refine: publish geom's pitch-only partial the moment its future
+  resolves while Clarity still runs CONCURRENTLY, then the fused complete - no total-latency
+  regression) and `OMR_PROGRESSIVE_PAGES` (per-page: `split_pdf_pages` via `pdfseparate`, then
+  transcribe + fuse each page INDEPENDENTLY so there is no cross-engine measure alignment to get wrong,
+  `append_measures` + publish per page). Idempotency moved to R2 object metadata: `result_is_complete`
+  (renamed from `result_exists`) skips a job only when a COMPLETE result exists, so a crash
+  mid-progressive reprocesses instead of stranding at a partial; the upload is deleted ONLY after the
+  complete write. CLIENT (`src/omr.ts`): `pollOmrResult` gained `onPartial` (version-deduped, awaited);
+  it still RESOLVES only on the complete result, so a caller without `onPartial` is unchanged.
+  `main.ts`: `scanSheet` drops the blocking overlay + re-enables controls on the FIRST partial, shows a
+  "Refining the rest..." status, and UPGRADES IN PLACE on later partials + the complete via the new
+  `upgradeNotes` (preserves play state, the ABSOLUTE playhead clamped to the new duration, mutes /
+  balance / tempo / name; re-renders the sheet). Extracted `createPart` to share the Tone.Part build
+  across `loadNotes` / `reloadNotes` / `upgradeNotes`. A superseded job aborts (the poll's
+  `isCancelledRequested` also checks `generation !== jobGeneration`) since controls re-enable mid-job.
+  Browser-verified end-to-end with a mocked backend (partial -> "Refining..." -> complete upgrade, 0
+  console errors). Tests: `test_progressive.py` (11), progressive worker tests in `test_worker.py`
+  (17), `omr.test.ts` onPartial (6). Source-guard `omr-worker.test.ts` updated for the new final-write
+  call site (`_put_result(..., complete=True)`). DEFAULT OFF; rollout/rollback in infrastructure.md.
+
 - **2026-06-03 - RUNG 1 of our own OMR engine: GPU-FREE GEOMETRIC PITCH PIPELINE measured. `omr-worker/geom_omr.py` + `test_geom_omr.py`. Branch `feat/omr-geom-pitch`. HEADLINE: geometry SOLVES the LLM octave problem on clean input (synthetic octave-accuracy 0.972 vs the LLM's effective octave-weakness), but the CLASSICAL notehead/staff detector, not the decode, is the bottleneck on REAL scores.** RESEARCH ONLY (pure module, never wired into worker.process_job, mirrors reconcile-before-wired). Module: numpy/scipy/PIL, never-raises; `decode_pitch(y, staff_lines, clef)` is pure diatonic line/space counting from the clef bottom-line reference (treble bottom line=E4, bass=G2), `detect_systems` (every 5-line group via full-width-dark rows, soft 0.35*w threshold), `detect_noteheads` (staff-line removal + SMALL vertical close ~0.3 interline to NOT fuse stacked chord heads + tall-blob row-projection split to recover stacked heads + connected-components size/fill/aspect filter), `group_chords` (x-cluster within 1.2 interline), `transcribe_geometric` -> MusicXML via the tested `llm_omr.score_json_to_musicxml`. Tests (30, all pass on the cx33 scipy/PIL tier; 22 pure-tier pass anywhere incl. CI/local-no-scipy): the core test DRAWS synthetic staves with PIL and asserts decode_pitch returns the exact pitch+octave for treble AND bass at lines/spaces/ledgers, plus never-raise-on-garbage.
   - **MEASURED (cx33, Verovio-rendered clean synthetic, mean over 20 seeds, after detector fixes):** exact note-F1 **0.774**, pitch-class F1 0.796, **octave accuracy 0.972**, chord_recall ~0.01. Before the detector fixes (tighter staff threshold + vertical-close tuning + tall-blob splitting): exact-F1 0.551, octave 0.874, head recall ~80%. So the decode is essentially exact on clean input; the residual exact-F1 gap to the 0.90 baseline is almost entirely notehead-detection RECALL (pred 771 vs truth 836), not octave/pitch errors.
   - **MEASURED on REAL icarus.pdf vs icarus.mscz (mscx_to_truth_musicxml):** per-measure exact-F1 0.166 (hurt by no-barline bucketing). The honest GLOBAL (measure-agnostic) decomposition: pitch-CLASS recall **0.747** (= the LLM's 0.75: geometry reads note NAMES just as well), but exact-midi recall 0.411 and **octave accuracy only 0.55**. Detector found 119 of 146 noteheads (recall ~0.82, much better than the 48/146 before fixes).

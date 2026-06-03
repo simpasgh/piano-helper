@@ -3,6 +3,7 @@ import {
   submitOmr,
   pollOmrResult,
   isFailureSentinel,
+  isPartial,
   isCancelled,
   OMR_CANCELLED,
 } from "./omr";
@@ -201,5 +202,137 @@ describe("pollOmrResult", () => {
         now,
       }),
     ).rejects.toThrow("timed out");
+  });
+});
+
+// A progressive in-progress result: the omr-status="partial" + omr-version markers the worker
+// stamps (omr-worker/progressive.py). The body is otherwise a normal score so it renders.
+const partialXml = (version: number, body = "<part/>") =>
+  `<score-partwise><identification><miscellaneous>` +
+  `<miscellaneous-field name="omr-status">partial</miscellaneous-field>` +
+  `<miscellaneous-field name="omr-version">${version}</miscellaneous-field>` +
+  `</miscellaneous></identification>${body}</score-partwise>`;
+
+describe("isPartial", () => {
+  it("detects the worker's partial marker", () => {
+    expect(isPartial(partialXml(1))).toBe(true);
+  });
+
+  it("does not flag a complete score or the failure sentinel", () => {
+    expect(isPartial("<score-partwise><part/></score-partwise>")).toBe(false);
+    expect(isPartial(SENTINEL_XML)).toBe(false);
+  });
+});
+
+describe("pollOmrResult progressive partials", () => {
+  it("renders each partial then returns the complete result", async () => {
+    const responses = [
+      textResponse(partialXml(1), 200),
+      textResponse(partialXml(2), 200),
+      textResponse("<score-partwise><part/></score-partwise>", 200),
+    ];
+    let i = 0;
+    const fetchFn = vi.fn(async () => responses[i++]) as unknown as typeof fetch;
+    const sleep = vi.fn(async () => {});
+    const partials: Array<{ xml: string; version: number }> = [];
+
+    const xml = await pollOmrResult("job-1", {
+      fetchFn,
+      sleep,
+      now: () => 0,
+      onPartial: (xml, version) => {
+        partials.push({ xml, version });
+      },
+    });
+
+    // Both partials are delivered (in order, with their versions), then the complete is returned.
+    expect(partials.map((p) => p.version)).toEqual([1, 2]);
+    expect(partials[0].xml).toContain('name="omr-status">partial');
+    expect(xml).toBe("<score-partwise><part/></score-partwise>");
+    // Polled three times (two partials + the complete), sleeping between each.
+    expect(sleep).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not re-render a repeated partial of the same version", async () => {
+    const responses = [
+      textResponse(partialXml(1), 200),
+      textResponse(partialXml(1), 200), // same version: must be ignored
+      textResponse("<score-partwise><part/></score-partwise>", 200),
+    ];
+    let i = 0;
+    const fetchFn = vi.fn(async () => responses[i++]) as unknown as typeof fetch;
+    const onPartial = vi.fn();
+
+    await pollOmrResult("job-1", {
+      fetchFn,
+      sleep: async () => {},
+      now: () => 0,
+      onPartial,
+    });
+
+    expect(onPartial).toHaveBeenCalledTimes(1);
+    expect(onPartial).toHaveBeenCalledWith(expect.stringContaining("partial"), 1);
+  });
+
+  it("keeps polling past a partial even when no onPartial handler is given", async () => {
+    const responses = [
+      textResponse(partialXml(1), 200), // skipped (no handler), not returned
+      textResponse("<score-partwise><part/></score-partwise>", 200),
+    ];
+    let i = 0;
+    const fetchFn = vi.fn(async () => responses[i++]) as unknown as typeof fetch;
+    const sleep = vi.fn(async () => {});
+
+    const xml = await pollOmrResult("job-1", { fetchFn, sleep, now: () => 0 });
+
+    // The partial is NOT mistaken for the final result; the complete is what resolves.
+    expect(xml).toBe("<score-partwise><part/></score-partwise>");
+    expect(sleep).toHaveBeenCalledTimes(1);
+  });
+
+  it("awaits an async onPartial before polling again", async () => {
+    const order: string[] = [];
+    const responses = [
+      textResponse(partialXml(1), 200),
+      textResponse("<score-partwise><part/></score-partwise>", 200),
+    ];
+    let i = 0;
+    const fetchFn = vi.fn(async () => {
+      order.push(`poll-${i}`);
+      return responses[i++];
+    }) as unknown as typeof fetch;
+
+    await pollOmrResult("job-1", {
+      fetchFn,
+      sleep: async () => {},
+      now: () => 0,
+      onPartial: async () => {
+        await Promise.resolve();
+        order.push("render-partial");
+      },
+    });
+
+    // The partial render completes before the next poll is issued (poll-0, render, poll-1).
+    expect(order).toEqual(["poll-0", "render-partial", "poll-1"]);
+  });
+
+  it("throws the failure sentinel even after a partial was rendered", async () => {
+    const responses = [
+      textResponse(partialXml(1), 200),
+      textResponse(SENTINEL_XML, 200),
+    ];
+    let i = 0;
+    const fetchFn = vi.fn(async () => responses[i++]) as unknown as typeof fetch;
+    const onPartial = vi.fn();
+
+    await expect(
+      pollOmrResult("job-1", {
+        fetchFn,
+        sleep: async () => {},
+        now: () => 0,
+        onPartial,
+      }),
+    ).rejects.toThrow("Could not recognize any notes");
+    expect(onPartial).toHaveBeenCalledTimes(1); // the partial still rendered before the failure
   });
 });
