@@ -115,6 +115,49 @@ def test_chord_hit_counts_multiset_intersection():
 def test_score_transcription_never_raises_on_garbage():
     m = omr_eval.score_transcription(b"<not-xml", b"<also-not")
     assert m["note_f1"] == 0.0 and m["n_truth"] == 0
+    assert m["note_dur_f1"] == 0.0 and m["duration_acc"] == 0.0
+
+
+# --- rhythm (duration) metric ------------------------------------------------------------
+
+
+def test_dur16_quantization_is_divisions_invariant():
+    # base = ticks per quarter. quarter -> 4 sixteenths, half -> 8, whole -> 16, eighth -> 2.
+    assert omr_eval._dur16(4, 4) == 4     # quarter at divisions 4
+    assert omr_eval._dur16(8, 4) == 8     # half
+    assert omr_eval._dur16(16, 4) == 16   # whole
+    assert omr_eval._dur16(2, 4) == 2     # eighth
+    assert omr_eval._dur16(8, 8) == 4     # quarter at divisions 8 -> same class as 4/4
+    assert omr_eval._dur16(5, 0) == 0     # degrade on base 0, no crash
+
+
+def test_duration_metric_rewards_right_rhythm_and_penalizes_wrong():
+    import llm_omr
+    # One quarter note C5 (divisions 4 -> duration 4 = one beat).
+    t = llm_omr.score_json_to_musicxml({"divisions": 4, "measures": [{"staff1": [
+        {"duration": 4, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []}]})
+    m_same = omr_eval.score_transcription(t, t)
+    assert m_same["note_f1"] == 1.0
+    assert m_same["duration_acc"] == 1.0 and m_same["note_dur_f1"] == 1.0
+    # Same PITCH, wrong DURATION (a half note: duration 8). Pitch still matches; rhythm does not.
+    p_wrong_dur = llm_omr.score_json_to_musicxml({"divisions": 4, "measures": [{"staff1": [
+        {"duration": 8, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []}]})
+    m = omr_eval.score_transcription(p_wrong_dur, t)
+    assert m["note_recall"] == 1.0       # pitch is right (the pitch-only metric is blind to rhythm)
+    assert m["n_dur_matched"] == 0       # ... but the duration is wrong
+    assert m["duration_acc"] == 0.0 and m["note_dur_f1"] == 0.0
+
+
+def test_duration_metric_is_divisions_invariant():
+    import llm_omr
+    # The SAME quarter note notated with different <divisions> must score duration_acc 1.0.
+    t = llm_omr.score_json_to_musicxml({"divisions": 4, "measures": [{"staff1": [
+        {"duration": 4, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []}]})
+    p = llm_omr.score_json_to_musicxml({"divisions": 8, "measures": [{"staff1": [
+        {"duration": 8, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []}]})
+    m = omr_eval.score_transcription(p, t)
+    assert m["note_recall"] == 1.0
+    assert m["duration_acc"] == 1.0 and m["note_dur_f1"] == 1.0
 
 
 # --- generate_random_score ---------------------------------------------------------------
