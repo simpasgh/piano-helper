@@ -104,6 +104,35 @@ def test_score_transcription_never_raises_on_garbage():
 # --- generate_random_score ---------------------------------------------------------------
 
 
+def test_mscx_to_truth_reads_staves_and_chords():
+    # Minimal MuseScore-shape .mscx: staff 1 (treble) a single C5(60); staff 2 (bass) a chord
+    # C3(48)+E3(52)+G3(55). The converter must produce truth MusicXML with that bass chord intact.
+    mscx = """<?xml version="1.0"?><museScore><Score>
+      <Staff id="1"><Measure><voice>
+        <Chord><Note><pitch>60</pitch></Note></Chord>
+      </voice></Measure></Staff>
+      <Staff id="2"><Measure><voice>
+        <Chord><Note><pitch>48</pitch></Note><Note><pitch>52</pitch></Note><Note><pitch>55</pitch></Note></Chord>
+      </voice></Measure></Staff>
+    </Score></museScore>"""
+    truth = omr_eval.mscx_to_truth_musicxml(mscx)
+    assert truth is not None
+    events = reconcile.to_events(truth, "x")
+    treble = [e for e in events if e.staff == 1 and e.pitch is not None]
+    bass = [e for e in events if e.staff == 2 and e.pitch is not None]
+    assert len(treble) == 1 and reconcile._pitch_to_midi(treble[0].pitch) == 60
+    assert sorted(reconcile._pitch_to_midi(e.pitch) for e in bass) == [48, 52, 55]
+    assert len({e.onset for e in bass}) == 1  # the three bass notes form one chord
+    # And it scores perfectly against itself through the harness.
+    assert omr_eval.score_transcription(truth, truth)["chord_recall"] == 1.0
+
+
+def test_mscx_to_truth_never_raises_on_garbage():
+    assert omr_eval.mscx_to_truth_musicxml(b"<not-a-score") is None
+    assert omr_eval.mscx_to_truth_musicxml("") is None
+    assert omr_eval.mscx_to_truth_musicxml("<museScore></museScore>") is None
+
+
 def test_generator_is_deterministic_by_seed():
     a = omr_eval.generate_random_score(seed=42, n_measures=6)
     b = omr_eval.generate_random_score(seed=42, n_measures=6)

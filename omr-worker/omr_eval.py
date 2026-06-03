@@ -24,6 +24,7 @@ NEVER raises into a caller: score_transcription degrades to zeros on unparseable
 from __future__ import annotations
 
 import random
+import xml.etree.ElementTree as ET
 from collections import Counter
 from typing import Dict, List, Optional
 
@@ -163,6 +164,65 @@ def _midi_to_pitch(midi: int) -> Dict:
     octave = midi // 12 - 1
     step, alter = _PC_TO_STEP_ALTER[pc]
     return {"step": step, "alter": alter, "octave": octave}
+
+
+def mscx_to_truth_musicxml(mscx) -> Optional[bytes]:
+    """Convert a MuseScore uncompressed score (.mscx XML, bytes or str) into ground-truth
+    MusicXML the scorer can consume. This is the bridge from OUR ground-truth format (the
+    composer's .mscz -> unzip -> .mscx) to score_transcription.
+
+    We read Staff id=1 (treble) and id=2 (bass), and per <Measure> collect each <Chord> as one
+    event carrying all its <Note><pitch> MIDI values (so real chords stay chords). Rests and
+    durations are dropped (the note/chord metrics ignore rhythm), each event gets duration=1,
+    and the result is built via the tested llm_omr builder so it is always well-formed. Returns
+    None on any failure (e.g. not a .mscx). NEVER raises.
+
+    NOTE: keyed to the MuseScore convention that the score's real staves are id "1"/"2" and
+    hold <Measure>s; a part-definition <Staff> with no measures is skipped.
+    """
+    try:
+        root = ET.fromstring(mscx if isinstance(mscx, (bytes, bytearray)) else str(mscx))
+        by_staff: Dict = {}
+        for staff in root.iter("Staff"):
+            sid = staff.get("id")
+            measures_el = staff.findall("Measure")
+            if sid not in ("1", "2") or not measures_el:
+                continue
+            staff_measures = []
+            for meas in measures_el:
+                events = []
+                for chord in meas.iter("Chord"):
+                    midis = []
+                    for p in chord.iter("pitch"):
+                        try:
+                            midis.append(int((p.text or "").strip()))
+                        except (TypeError, ValueError):
+                            continue
+                    if midis:
+                        events.append(
+                            {"duration": 1, "pitches": [_midi_to_pitch(m) for m in midis]}
+                        )
+                staff_measures.append(events)
+            by_staff[int(sid)] = staff_measures
+        if not by_staff:
+            return None
+
+        n = max((len(v) for v in by_staff.values()), default=0)
+        measures = []
+        for i in range(n):
+            s1 = by_staff.get(1, [])
+            s2 = by_staff.get(2, [])
+            measures.append(
+                {
+                    "staff1": s1[i] if i < len(s1) else [],
+                    "staff2": s2[i] if i < len(s2) else [],
+                }
+            )
+        return llm_omr.score_json_to_musicxml(
+            {"divisions": 4, "measures": measures, "time": {"beats": 4, "beat_type": 4}}
+        )
+    except Exception:
+        return None
 
 
 def generate_random_score(
