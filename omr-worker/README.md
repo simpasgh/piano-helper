@@ -122,6 +122,44 @@ After editing the env file, restart the worker so it picks the vars up:
 gotcha as any worker.py change). On the systemd VM, `EnvironmentFile` already loads the
 same env file, so `sudo systemctl restart omr-worker.service` is enough.
 
+## Trained geometric engine (OMR_GEOM, our own)
+
+Our own engine: a trained YOLO notehead detector feeding the exact geometric pitch decode
+(`geom_detector.py` + `geom_omr.py`, built on the GPU PC; see
+[own-engine-roadmap.md](../docs/context/own-engine-roadmap.md)). Gated by `OMR_GEOM` and **OFF by
+default**. When ON it runs FIRST and only wins if it returns a result; otherwise the existing
+engines run, so enabling it is never-worse for jobs it cannot handle. Like Clarity it needs its
+OWN venv (torch + ultralytics cannot co-install with oemer's stack), so the worker invokes it as a
+subprocess. CPU-only inference (no GPU on the box).
+
+```bash
+# 1. A dedicated py3.11+ venv for the detector stack (CPU torch).
+python3.11 -m venv /opt/geom-omr/.venv
+/opt/geom-omr/.venv/bin/pip install --upgrade pip
+# torch CPU + ultralytics + the geom deps. verovio/cairosvg are only for dataset GENERATION
+# (on the GPU PC), NOT inference, so they are not needed here.
+/opt/geom-omr/.venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+/opt/geom-omr/.venv/bin/pip install ultralytics numpy scipy pillow
+
+# 2. Copy the trained weights to the box (a few MB), e.g. /opt/geom-omr/notehead.pt
+#    (produced by omr-worker/train_detector.py on the GPU PC).
+
+# 3. Point the worker at them (env file alongside the R2 creds):
+#      GEOM_PYTHON=/opt/geom-omr/.venv/bin/python
+#      GEOM_WEIGHTS=/opt/geom-omr/notehead.pt
+#      OMR_GEOM=1      # ONLY after validating it beats the baselines on real scores
+```
+
+The worker runs `<GEOM_PYTHON> geom_detector.py <image> --weights <GEOM_WEIGHTS> -o <out>
+--device cpu`. If `GEOM_PYTHON`/`GEOM_WEIGHTS` are unset/missing, or the engine declines
+(exit 2 = nothing recognized), the worker falls back to the existing chain.
+
+**Before flipping `OMR_GEOM=1`,** validate on real scores. Two known gaps make it unsafe as the
+blind primary today: (1) no **key-signature detection** yet, so non-C-major scores decode
+accidentals as natural (a semitone off); (2) end-to-end accuracy vs Clarity/oemer on real uploads
+is unproven (we have synthetic + detection-mAP numbers, not a real-upload bake-off). Keep it OFF
+in prod until both are addressed.
+
 ## Configure R2 credentials
 
 Mint an R2 S3 API token in the Cloudflare dashboard (R2 -> Manage R2 API Tokens ->

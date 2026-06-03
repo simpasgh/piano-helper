@@ -631,6 +631,95 @@ def test_llm_used_when_available(tmp_path, monkeypatch):
     assert client.put_body == b"<score-partwise/>"
 
 
+# --- Trained geometric engine (OMR_GEOM, default OFF) -------------------------------------
+
+def test_geom_enabled_truthy_parsing(monkeypatch):
+    # Default (unset) is OFF: prod is unaffected until the flag is deliberately set on the box.
+    monkeypatch.delenv("OMR_GEOM", raising=False)
+    assert worker.geom_enabled() is False
+    for on in ("1", "true", "TRUE", " True ", "tRuE"):
+        monkeypatch.setenv("OMR_GEOM", on)
+        assert worker.geom_enabled() is True, on
+    for off in ("0", "false", "", "yes", "on", "2", "garbage"):
+        monkeypatch.setenv("OMR_GEOM", off)
+        assert worker.geom_enabled() is False, off
+
+
+def test_geom_command_shape():
+    # Pure argv builder (mirrors clarity_command): image, --weights, -o out, --device cpu.
+    cmd = worker.geom_command("py", "geom_detector.py", "/img.png", "/w.pt", "/out.musicxml")
+    assert cmd[0] == "py" and cmd[1] == "geom_detector.py" and cmd[2] == "/img.png"
+    assert cmd[cmd.index("--weights") + 1] == "/w.pt"
+    assert cmd[cmd.index("-o") + 1] == "/out.musicxml"
+    assert cmd[cmd.index("--device") + 1] == "cpu"
+
+
+def test_run_geom_returns_none_without_env(tmp_path, monkeypatch):
+    # GEOM_PYTHON / GEOM_WEIGHTS unset -> None (fall back), never raises.
+    monkeypatch.delenv("GEOM_PYTHON", raising=False)
+    monkeypatch.delenv("GEOM_WEIGHTS", raising=False)
+    assert worker.run_geom(str(tmp_path / "x.png"), str(tmp_path)) is None
+
+
+def test_geom_off_by_default_does_not_run(tmp_path, monkeypatch):
+    # OMR_GEOM unset: geom NEVER runs (prod default), so the existing pipeline is byte-identical.
+    monkeypatch.delenv("OMR_GEOM", raising=False)
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+
+    def geom_must_not_run(*a, **k):
+        raise AssertionError("geom must not run when OMR_GEOM is unset")
+
+    monkeypatch.setattr(worker, "run_geom", geom_must_not_run)
+    monkeypatch.setattr(worker, "_select_ensemble", lambda *a, **k: (None, None))
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"\x89PNG fake")
+    _drive_process_job(monkeypatch, client, is_pdf=False)  # no AssertionError = geom skipped
+
+
+def test_geom_used_first_when_enabled(tmp_path, monkeypatch):
+    # OMR_GEOM on and geom returns a result: it WINS and NO other engine runs.
+    monkeypatch.setenv("OMR_GEOM", "1")
+    geom_out = tmp_path / "geom.musicxml"
+    geom_out.write_text("<score>geom</score>")
+    monkeypatch.setattr(worker, "run_geom", lambda *a, **k: str(geom_out))
+
+    def must_not_run(*a, **k):
+        raise AssertionError("no other engine may run when geom produced a result")
+
+    monkeypatch.setattr(worker, "_select_ensemble", must_not_run)
+    monkeypatch.setattr(worker, "_select_legacy", must_not_run)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"\x89PNG fake")
+    _drive_process_job(monkeypatch, client, is_pdf=False)
+    assert client.put_body == b"<score>geom</score>"
+
+
+def test_geom_declines_falls_through_to_ensemble(tmp_path, monkeypatch):
+    # OMR_GEOM on but geom returns None (declined): the existing ensemble path runs (never-worse).
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    monkeypatch.setattr(worker, "run_geom", lambda *a, **k: None)
+    ran = {"ensemble": False}
+
+    def fake_ensemble(*a, **k):
+        ran["ensemble"] = True
+        return None, None
+
+    monkeypatch.setattr(worker, "_select_ensemble", fake_ensemble)
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"\x89PNG fake")
+    _drive_process_job(monkeypatch, client, is_pdf=False)
+    assert ran["ensemble"] is True
+
+
 def test_llm_falls_back_to_engines_when_it_returns_none(tmp_path, monkeypatch):
     # If the LLM returns None (any failure), the worker falls back to the existing engines.
     monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: True)
