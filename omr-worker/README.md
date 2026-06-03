@@ -151,21 +151,26 @@ python3.11 -m venv /opt/geom-omr/.venv
 #      GEOM_WEIGHTS=/opt/geom-omr/notehead.pt
 #      OMR_GEOM=1            # enable geom (default mode: never-worse last-resort FALLBACK)
 #      OMR_GEOM_PRIMARY=1    # optional: run geom FIRST (wins-first). Remove to return to fallback.
+#      OMR_GEOM_FUSION=1     # optional: run geom + Clarity and FUSE (geom pitch + Clarity rhythm).
+#                           # Takes precedence over PRIMARY. Best quality; PDF-only Clarity, so a
+#                           # non-PDF upload degrades to geom alone.
 ```
 
 The worker runs `<GEOM_PYTHON> geom_detector.py <image> --weights <GEOM_WEIGHTS> -o <out>
 --device cpu`. If `GEOM_PYTHON`/`GEOM_WEIGHTS` are unset/missing, or the engine declines
 (exit 2 = nothing recognized), the worker falls back to the existing chain.
 
-**Two roles, toggled by env.** By default (`OMR_GEOM=1` alone) geom is a never-worse LAST-RESORT
+**Three roles, toggled by env.** By default (`OMR_GEOM=1` alone) geom is a never-worse LAST-RESORT
 FALLBACK: it runs only when every other engine fails, so it can never override Clarity. With
-`OMR_GEOM_PRIMARY=1` it instead runs FIRST and wins if it returns a result. Primary is a DELIBERATE
-not-always-better choice: geom now reads pitch + real measures well (barline detection lifted
-real-score note_f1, e.g. liminality 0.29 -> 0.95), but it still emits placeholder durations (no
-rhythm), no ties, and no key signature (non-C-major accidentals read a semitone off), and its
-detection fails on some engravings, so as a wins-first primary it can override Clarity where geom
-is weaker. Switching role is an env change plus a restart, no redeploy. See
-[own-engine-roadmap.md](../docs/context/own-engine-roadmap.md).
+`OMR_GEOM_PRIMARY=1` it instead runs FIRST and wins if it returns a result -- a DELIBERATE
+not-always-better choice, since geom reads pitch + real measures well but still fabricates durations
+(no rhythm), has no ties, and fakes the key. With `OMR_GEOM_FUSION=1` (which takes precedence over
+PRIMARY) the worker instead runs geom AND Clarity concurrently and FUSES them (`fusion.fuse`): it
+keeps geom's pitch + measures and borrows Clarity's rhythm, aligning the two per staff by pitch-class.
+This is the best of both and beats Clarity-alone on every measured piece (full-transcription note_dur_f1
+liminality 0.86 -> 0.95, tctab 0.52 -> 0.88, icarus 0.86 -> 0.88, reverie 0.41 -> 0.46). Clarity is
+PDF-only, so a non-PDF upload degrades to geom alone. Switching role is an env change plus a restart,
+no redeploy. See [own-engine-roadmap.md](../docs/context/own-engine-roadmap.md).
 
 ## Configure R2 credentials
 
