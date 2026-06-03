@@ -26,7 +26,7 @@ from __future__ import annotations
 import random
 import xml.etree.ElementTree as ET
 from collections import Counter
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import reconcile
 import llm_omr
@@ -67,6 +67,20 @@ def _chords_by_cell(xml_bytes) -> Dict:
         if len(midis) >= 2:
             cells.setdefault((measure, staff), Counter())[frozenset(midis)] += 1
     return cells
+
+
+def _chord_hit_counts(truth_chords: Dict, pred_chords: Dict) -> Tuple[int, int]:
+    """Given two {(measure, staff): Counter of frozenset(midi)} chord maps (as built by
+    _chords_by_cell), return (n_truth_chords, n_hits): the total truth chords, and how many of
+    them appear with the EXACT pitch set in the same (measure, staff) of pred. Multiset
+    intersection, so a chord present k times in truth and j times in pred contributes min(k, j)
+    hits. PURE. This is the SINGLE definition of the chord-recall numerator/denominator, shared
+    by score_transcription and eval_detector's micro-average so the two cannot diverge."""
+    n_truth_chords = sum(sum(c.values()) for c in truth_chords.values())
+    n_hits = 0
+    for cell, t_sets in truth_chords.items():
+        n_hits += sum((t_sets & pred_chords.get(cell, Counter())).values())
+    return n_truth_chords, n_hits
 
 
 def score_transcription(pred_xml, truth_xml) -> Dict:
@@ -114,15 +128,8 @@ def score_transcription(pred_xml, truth_xml) -> Dict:
 
         truth_chords = _chords_by_cell(truth_xml)
         pred_chords = _chords_by_cell(pred_xml)
-        n_truth_chords = sum(sum(c.values()) for c in truth_chords.values())
-        if n_truth_chords:
-            chord_hits = 0
-            for cell, t_sets in truth_chords.items():
-                p_sets = pred_chords.get(cell, Counter())
-                chord_hits += sum((t_sets & p_sets).values())  # multiset intersection of pitch-sets
-            chord_recall = chord_hits / n_truth_chords
-        else:
-            chord_recall = 1.0
+        n_truth_chords, chord_hits = _chord_hit_counts(truth_chords, pred_chords)
+        chord_recall = chord_hits / n_truth_chords if n_truth_chords else 1.0
 
         return {
             "note_precision": round(precision, 4),
