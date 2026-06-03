@@ -140,3 +140,39 @@ def transcribe_with_detector(image, detector: NoteheadDetector,
         return geom_omr._decode_staves_to_musicxml(staves, per_staff, key_fifths=key_fifths)
     except Exception:
         return None
+
+
+def main(argv=None) -> int:
+    """CLI entry so the worker can run this engine as a SUBPROCESS in its own torch venv (the same
+    pattern Clarity uses), keeping the torch/ultralytics stack out of the worker's venv. Reads a
+    raster image and writes MusicXML to --out. Exit 0 = wrote a result; 2 = nothing recognized or
+    the detector stack is unavailable (the worker then falls back to the existing engines)."""
+    import argparse
+    import sys
+
+    ap = argparse.ArgumentParser(
+        description="Trained geometric OMR engine (YOLO noteheads + exact pitch decode)")
+    ap.add_argument("image", help="raster image path (PNG/JPG); a PDF must be rasterized first")
+    ap.add_argument("--weights", required=True, help="trained YOLO notehead weights (.pt)")
+    ap.add_argument("-o", "--out", required=True, help="output MusicXML path")
+    ap.add_argument("--device", default="cpu", help="'cpu' (the inference box) or '0' for a GPU")
+    ap.add_argument("--key-fifths", type=int, default=0,
+                    help="key signature for the decode (default 0 = C major). Reading the key FROM "
+                         "the image is a separate rung, so non-C keys decode accidentals as natural "
+                         "until that lands.")
+    args = ap.parse_args(argv)
+
+    if not DETECTOR_AVAILABLE:
+        print("geom_detector: detector stack unavailable (%s)" % _IMPORT_ERROR, file=sys.stderr)
+        return 2
+    detector = NoteheadDetector(args.weights, device=args.device)
+    xml = transcribe_with_detector(args.image, detector, key_fifths=args.key_fifths)
+    if not xml:
+        return 2
+    with open(args.out, "wb") as f:
+        f.write(xml)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

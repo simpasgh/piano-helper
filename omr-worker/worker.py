@@ -32,6 +32,7 @@ Config comes from env vars (no secrets in the file, none on disk):
 
 import concurrent.futures
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -125,6 +126,22 @@ def ensemble_enabled():
     else (unset, "0", "false", garbage) is OFF. Shared by every ensemble slice so the flag
     is read in exactly one place."""
     raw = os.environ.get(OMR_ENSEMBLE_ENV)
+    if raw is None:
+        return False
+    return raw.strip().lower() in ("1", "true")
+
+
+# Our own trained geometric engine (geom_detector.py), gated by OMR_GEOM (default OFF). When ON it
+# runs FIRST and only wins if it returns a result; otherwise the existing engines run, so enabling
+# it is never-worse for jobs it cannot handle. Kept OFF until the weights + torch venv are deployed
+# to the inference box AND it is validated to beat the baselines on real scores.
+OMR_GEOM_ENV = "OMR_GEOM"
+
+
+def geom_enabled():
+    """True when OMR_GEOM is a truthy string ("1"/"true"). Anything else (unset, "0", garbage) is
+    OFF. Read in exactly one place, mirroring ensemble_enabled."""
+    raw = os.environ.get(OMR_GEOM_ENV)
     if raw is None:
         return False
     return raw.strip().lower() in ("1", "true")
@@ -455,6 +472,13 @@ CLARITY_OMR_DIR_ENV = "CLARITY_OMR_DIR"
 CLARITY_PYTHON_ENV = "CLARITY_PYTHON"
 CLARITY_SCRIPT_NAME = "omr.py"
 
+# Our trained geometric engine runs as a subprocess in its OWN venv (torch/ultralytics, which
+# cannot co-install with oemer's stack), exactly like Clarity. GEOM_PYTHON points to that venv's
+# python; GEOM_WEIGHTS to the trained notehead .pt. The script lives beside this file.
+GEOM_PYTHON_ENV = "GEOM_PYTHON"
+GEOM_WEIGHTS_ENV = "GEOM_WEIGHTS"
+GEOM_SCRIPT_NAME = "geom_detector.py"
+
 
 def clarity_command(python, omr_script, pdf_path, out_path, work_dir):
     """Build the Clarity-OMR argv. Pure so it is unit-testable without running the engine
@@ -509,6 +533,56 @@ def run_clarity(pdf_path, workdir, timeout=None):
         return out_path
     # Clarity may have named it differently; fall back to a scan of the work dirs.
     return find_musicxml(workdir, clarity_work)
+
+
+def geom_command(python, script, image_path, weights, out_path, device="cpu"):
+    """Build the trained-geometric-engine argv. Pure so it is unit-testable without running the
+    engine (mirrors clarity_command). Runs geom_detector.py's CLI on a RASTER image (a PDF is
+    rasterized first, like oemer)."""
+    return [
+        python,
+        script,
+        image_path,
+        "--weights",
+        weights,
+        "-o",
+        out_path,
+        "--device",
+        device,
+    ]
+
+
+def run_geom(image_path, workdir, timeout=None):
+    """Run our trained geometric engine as a subprocess in its OWN torch venv. Returns the output
+    .musicxml path or None on ANY failure (env unset/missing, subprocess error, timeout, or exit 2
+    = nothing recognized) so the caller falls back to the existing engines. Never raises into
+    process_job. Gated by GEOM_PYTHON + GEOM_WEIGHTS being set and present on disk."""
+    python = os.environ.get(GEOM_PYTHON_ENV)
+    weights = os.environ.get(GEOM_WEIGHTS_ENV)
+    if not python or not weights:
+        return None
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), GEOM_SCRIPT_NAME)
+    if not os.path.isfile(python) or not os.path.isfile(weights) or not os.path.isfile(script):
+        log("geom env set but python/weights/script missing (python=%r weights=%r)" % (python, weights))
+        return None
+    out_path = os.path.join(workdir, "geom.musicxml")
+    try:
+        subprocess.run(
+            geom_command(python, script, image_path, weights, out_path),
+            check=True,
+            cwd=workdir,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as err:
+        log("geom timed out after %ss" % getattr(err, "timeout", timeout))
+        return None
+    except (subprocess.CalledProcessError, FileNotFoundError) as err:
+        # exit 2 (nothing recognized) lands here too -> fall back to the existing engines, no error.
+        log("geom failed or declined: %s" % err)
+        return None
+    if os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
+        return out_path
+    return None
 
 
 # --- Pure MusicXML post-transforms -------------------------------------------------------
@@ -1094,11 +1168,37 @@ def process_job(client, bucket, job_id):
         body = None
         source = None
 
+        # Our own trained geometric engine (gated by OMR_GEOM, default OFF). Runs FIRST when
+        # enabled; on any failure / nothing-recognized run_geom returns None and we fall through to
+        # the existing engines, so enabling it is never-worse for jobs it cannot handle. It needs a
+        # raster image, so a PDF is rasterized first (the same stitched PNG oemer uses).
+        if geom_enabled():
+            geom_image = None
+            try:
+                if is_pdf_input:
+                    geom_image, _ = rasterize_if_pdf(input_path, workdir)
+                else:
+                    # The upload is the extensionless input.bin; the detector's image reader needs
+                    # a real image extension. COPY (not move) so the original input_path stays
+                    # available for the fallback engines.
+                    geom_image = os.path.join(workdir, "geom_input.png")
+                    shutil.copyfile(input_path, geom_image)
+            except Exception as err:
+                log("geom input prep failed for %s (%r); skipping geom" % (job_id, err))
+                geom_image = None
+            if geom_image is not None:
+                geom_path = run_geom(geom_image, workdir)
+                if geom_path:
+                    with open(geom_path, "rb") as fh:
+                        body = fh.read()
+                    source = "geom"
+                    log("%s recognized via geom" % job_id)
+
         # LLM-vision transcriber: the "big value, low latency" engine. When enabled+keyed it
         # reads the score image holistically (chords included) in one API round-trip. It returns
         # MusicXML bytes directly; on ANY failure it returns None and we fall through to the
         # existing engines, so this never regresses the free pipeline.
-        if llm_omr.llm_available():
+        if body is None and llm_omr.llm_available():
             llm_image = input_path
             if is_pdf_input:
                 try:
