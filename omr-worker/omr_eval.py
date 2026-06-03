@@ -330,3 +330,361 @@ def generate_random_score(
     }
     out = llm_omr.score_json_to_musicxml(data)
     return out if out is not None else b""
+
+
+# --- Rich synthetic score generation (the full-symbol detector's training data) -----------
+#
+# generate_random_score above is the SIMPLE generator: four quarter notes per bar, in-key, no
+# accidentals/beams/clef-changes. It built the notehead-detector eval. generate_rich_score below
+# emits the VARIED scores the next rung needs: a multi-class SYMBOL detector that reads durations,
+# key, per-note accidentals, clefs, and rests FROM the engraved glyphs (the "measure, do not
+# predict" thesis extended past noteheads). The MusicXML is still its OWN ground truth: every
+# extra glyph (<type>/<beam>/<accidental>/<dot>/<direction>/clef change) is INVISIBLE to
+# score_transcription (reconcile.to_events reads only pitch + duration + chord), so a rich score
+# fed to itself still scores a perfect 1.0, while the rendered IMAGE shows the full symbol set.
+#
+# Why this is the right shape for training: the same MusicXML drives BOTH (a) the ground truth the
+# scorer reads and (b) the Verovio render the detector sees, so the engraved eighth flag, sixteenth
+# double-beam, sharp/flat/natural, augmentation dot, and rest glyph are each PERFECTLY consistent
+# with the duration/pitch the score encodes. No hand labeling.
+
+_LETTERS = "CDEFGAB"  # diatonic letter order (matches geom_omr._STEPS)
+
+# Circle-of-fifths key-signature accidentals. Sharps add F C G D A E B; flats the reverse. This is
+# a deliberate private copy of geom_omr.keyed_alter (+ its _SHARP_ORDER/_FLAT_ORDER): omr_eval is
+# the eval SUBSTRATE and geom_omr is an ENGINE, so importing the engine into the substrate is the
+# wrong layering direction (both already depend on the shared llm_omr builder). geom_omr's
+# numpy/scipy imports ARE guarded, so the import would not fail; the copy is about layering, not
+# availability. Keep in sync with geom_omr.keyed_alter (the canonical copy).
+_SHARP_ORDER = ("F", "C", "G", "D", "A", "E", "B")
+_FLAT_ORDER = ("B", "E", "A", "D", "G", "C", "F")
+_ACCIDENTAL_GLYPH = {2: "double-sharp", 1: "sharp", 0: "natural", -1: "flat", -2: "flat-flat"}
+
+# Per-clef comfortable WRITTEN octave range (lo, hi inclusive) for picking notes that sit on/near
+# the staff. Ledger-heavy mode widens these so the detector sees many ledger-line notes.
+_CLEF_OCTAVES = {"G": (4, 5), "F": (2, 3), "C": (3, 4)}
+
+
+def _keyed_alter(step: str, fifths: int) -> int:
+    """The accidental the key signature `fifths` applies to a diatonic step (+1/-1/0). PURE.
+    A private copy of geom_omr.keyed_alter (kept here to avoid importing the engine into the eval
+    substrate; see the constant block above)."""
+    try:
+        f = int(fifths)
+        if f > 0 and step in _SHARP_ORDER[:f]:
+            return 1
+        if f < 0 and step in _FLAT_ORDER[: -f]:
+            return -1
+        return 0
+    except Exception:
+        return 0
+
+
+def _accidental_glyph(step: str, alter: int, fifths: int) -> Optional[str]:
+    """The accidental GLYPH to engrave for a note of (step, alter) in key `fifths`, or None when
+    the key signature already implies that alter (so no glyph is drawn). e.g. F-natural in D major
+    needs a 'natural'; F# in C major needs a 'sharp'; F# in D major needs nothing."""
+    if alter == _keyed_alter(step, fifths):
+        return None
+    return _ACCIDENTAL_GLYPH.get(alter)
+
+
+def _diatonic_step_up(step: str, octave: int, steps: int) -> Tuple[str, int]:
+    """Move `steps` diatonic letters up from (step, octave), carrying the octave at the C boundary.
+    steps=2 is a third, 4 a fifth. PURE."""
+    idx = _LETTERS.index(step) + int(steps)
+    return _LETTERS[idx % 7], octave + idx // 7
+
+
+def _ticks_to_type(ticks: int, divisions: int) -> Optional[Tuple[str, int]]:
+    """Map a duration in ticks to its engraved (note-type, dots), where `divisions` is ticks per
+    quarter. Returns None for a value that is not a plain/dotted/double-dotted power-of-two note.
+    This is what makes the rendered glyph (open vs filled head, flag count) match the duration."""
+    if ticks <= 0 or divisions <= 0:
+        return None
+    q = ticks / float(divisions)  # value in quarter notes
+    bases = [(8.0, "breve"), (4.0, "whole"), (2.0, "half"), (1.0, "quarter"),
+             (0.5, "eighth"), (0.25, "16th"), (0.125, "32nd"), (0.0625, "64th")]
+    for base, name in bases:
+        if abs(q - base) < 1e-9:
+            return name, 0
+        if abs(q - base * 1.5) < 1e-9:
+            return name, 1   # dotted
+        if abs(q - base * 1.75) < 1e-9:
+            return name, 2   # double-dotted
+    return None
+
+
+def _beam_levels(type_name: Optional[str]) -> int:
+    """How many beams/flags a note type carries: eighth 1, 16th 2, 32nd 3, ... ; quarter+ = 0
+    (unbeamable). Dots do not add beams, so this keys off the base type only."""
+    return {"eighth": 1, "16th": 2, "32nd": 3, "64th": 4}.get(type_name or "", 0)
+
+
+def _assign_beams(items: List[Tuple[int, int]], beat_ticks: int) -> List[List[dict]]:
+    """Compute the <beam> markings for a bar. `items` is one (start_tick, beam_level) per slot in
+    order (beam_level 0 = a rest or a quarter-or-longer note, which breaks a beam). Returns a
+    per-slot list of {'number', 'value'} beam dicts. PURE.
+
+    Beams group consecutive beamable notes WITHIN one beat (the simple-meter convention): a group
+    of >= 2 gets a primary beam (number 1) begin/continue/end; deeper levels (number 2 for
+    sixteenths, 3 for 32nds) beam their own consecutive sub-runs, and a lone deeper note gets a
+    hook (backward toward an earlier neighbor, else forward). A single beamable note keeps a flag
+    (no beam). Beat-internal grouping + this hook rule reproduce standard engraving so Verovio
+    draws the eighth/sixteenth beams the detector trains on."""
+    n = len(items)
+    out: List[List[dict]] = [[] for _ in range(n)]
+    if beat_ticks <= 0:
+        return out
+    i = 0
+    while i < n:
+        start_i, lvl_i = items[i]
+        if lvl_i < 1:
+            i += 1
+            continue
+        beat = start_i // beat_ticks
+        j = i
+        while j < n and items[j][1] >= 1 and items[j][0] // beat_ticks == beat:
+            j += 1
+        if j - i >= 2:  # a real beam group
+            for k in range(i, j):  # primary beam (level 1)
+                value = "begin" if k == i else ("end" if k == j - 1 else "continue")
+                out[k].append({"number": 1, "value": value})
+            max_level = max(items[k][1] for k in range(i, j))
+            for level in range(2, max_level + 1):  # secondary beams
+                k = i
+                while k < j:
+                    if items[k][1] < level:
+                        k += 1
+                        continue
+                    r = k
+                    while r < j and items[r][1] >= level:
+                        r += 1
+                    if r - k >= 2:
+                        for t in range(k, r):
+                            value = "begin" if t == k else ("end" if t == r - 1 else "continue")
+                            out[t].append({"number": level, "value": value})
+                    else:  # lone deeper note -> a hook (e.g. dotted-eighth + sixteenth)
+                        out[k].append({"number": level,
+                                       "value": "backward hook" if k > i else "forward hook"})
+                    k = r
+        i = j
+    return out
+
+
+def _bar_rhythm(rng: random.Random, capacity: int, beat_ticks: int, divisions: int,
+                density: float, rest_prob: float) -> List[dict]:
+    """Fill ONE bar with a varied, metrically-exact rhythm. Returns a list of slots
+    {ticks, rest}. `density` in [0,1] biases toward shorter (subdivided) values; `rest_prob` is
+    the per-slot chance a slot is a rest. Built from beat-aligned cells so beaming stays within a
+    beat and the bar always sums EXACTLY to capacity (a valid bar Verovio engraves cleanly)."""
+    bt = beat_ticks
+    if capacity <= 0 or bt <= 0:
+        return []
+    if capacity % bt != 0:
+        # Unusual meter: degrade to a single full-capacity note so the bar still sums exactly.
+        return [{"ticks": capacity, "rest": False}]
+    # Keep only cells whose every value maps to an engraved note TYPE at this divisions, so a
+    # generated note's glyph is always consistent with its duration (the core thesis) even for an
+    # exotic divisions. At the default divisions=4 every cell below qualifies, so this is a no-op
+    # (and the RNG draw sequence is unchanged, keeping generate_rich_score byte-deterministic).
+    ok = lambda cell: all(t > 0 and _ticks_to_type(t, divisions) for t in cell)
+    half = bt // 2 if bt % 2 == 0 else 0
+    quart = bt // 4 if bt % 4 == 0 else 0
+    one_beat = [[bt]]
+    if half:
+        one_beat.append([half, half])                       # two eighths
+    if quart:
+        one_beat += [[quart] * 4,                            # four sixteenths
+                     [half, quart, quart],                   # eighth + two sixteenths
+                     [quart, quart, half],                   # two sixteenths + eighth
+                     [bt * 3 // 4, quart]]                    # dotted-eighth + sixteenth
+    two_beat = [[2 * bt]]                                    # half note
+    if half:
+        two_beat.append([bt + half, half])                  # dotted-quarter + eighth
+    if quart:
+        two_beat.append([bt + half, quart, quart])          # dotted-quarter + two sixteenths
+    three_beat = [[3 * bt]]                                  # dotted half
+    four_beat = [[4 * bt]]                                   # whole
+    one_beat = [c for c in one_beat if ok(c)] or [[bt]]     # always keep at least the plain beat
+    two_beat = [c for c in two_beat if ok(c)]
+    three_beat = [c for c in three_beat if ok(c)]
+    four_beat = [c for c in four_beat if ok(c)]
+
+    beats_total = capacity // bt
+    slots: List[dict] = []
+    remaining = beats_total
+    while remaining > 0:
+        # Longer multi-beat values get LESS likely as density rises (denser = more notes). The
+        # pool-non-empty guards keep span <= remaining and never pick an unrepresentable cell.
+        long_bias = max(0.0, 0.55 - 0.5 * density)
+        span, pool = 1, one_beat
+        if remaining >= 2 and two_beat and rng.random() < long_bias:
+            span, pool = 2, two_beat
+        elif remaining >= 3 and three_beat and rng.random() < long_bias * 0.4:
+            span, pool = 3, three_beat
+        elif remaining == beats_total == 4 and four_beat and rng.random() < long_bias * 0.3:
+            span, pool = 4, four_beat
+        cell = rng.choice(pool)
+        for t in cell:
+            slots.append({"ticks": t, "rest": rng.random() < rest_prob})
+        remaining -= span
+    return slots
+
+
+def _random_pitch(rng: random.Random, clef: str, fifths: int, accidental_prob: float,
+                  octaves: Tuple[int, int]) -> dict:
+    """One in-key (or chromatically altered) pitch dict for the given clef range. A diatonic note
+    takes the key's alter and needs NO glyph; with probability accidental_prob it is shifted a
+    semitone, which sets an explicit <accidental> glyph (sharp/flat/natural/...)."""
+    step = rng.choice(_LETTERS)
+    octave = rng.randint(octaves[0], octaves[1])
+    alter = _keyed_alter(step, fifths)
+    pitch = {"step": step, "octave": octave, "alter": alter}
+    if rng.random() < accidental_prob:
+        new_alter = max(-2, min(2, alter + rng.choice((-1, 1))))
+        glyph = _accidental_glyph(step, new_alter, fifths)
+        if glyph is not None:
+            pitch["alter"] = new_alter
+            pitch["accidental"] = glyph
+    return pitch
+
+
+def _note_event(rng: random.Random, slot: dict, type_dots, clef: str, fifths: int,
+                chord_prob: float, accidental_prob: float, octaves: Tuple[int, int],
+                beams: List[dict]) -> dict:
+    """Turn one rhythm slot into a note/rest/chord event with the engraved type/dots/accidental/
+    beams attached. Chords stack diatonic thirds/fifths on the root. `type_dots` is the slot's
+    precomputed (type, dots) from _staff_measure (or None), so the tick->type map runs once."""
+    type_name, dots = type_dots if type_dots else (None, 0)
+    if slot["rest"]:
+        ev = {"rest": True, "duration": slot["ticks"]}
+        if type_name:
+            ev["type"] = type_name
+            ev["dots"] = dots
+        return ev
+    root = _random_pitch(rng, clef, fifths, accidental_prob, octaves)
+    pitches = [root]
+    if rng.random() < chord_prob:
+        size = rng.choice((2, 3))  # a third, or a third + fifth (triad)
+        for s in (2, 4)[: size - 1]:
+            st, oc = _diatonic_step_up(root["step"], root["octave"], s)
+            pitches.append({"step": st, "octave": oc, "alter": _keyed_alter(st, fifths)})
+    ev: dict = {"duration": slot["ticks"], "pitches": pitches}
+    if type_name:
+        ev["type"] = type_name
+        ev["dots"] = dots
+    if beams:
+        ev["beams"] = beams
+    return ev
+
+
+def _staff_measure(rng: random.Random, capacity: int, beat_ticks: int, divisions: int,
+                   clef: str, fifths: int, chord_prob: float, accidental_prob: float,
+                   rest_prob: float, density: float, octaves: Tuple[int, int]) -> List[dict]:
+    """Build ONE staff's worth of one measure: a varied rhythm, each slot decoded into a
+    note/rest/chord with beams computed over the bar. Sums EXACTLY to capacity."""
+    slots = _bar_rhythm(rng, capacity, beat_ticks, divisions, density, rest_prob)
+    # tick->type once per slot, reused for both the beam level and the engraved <type>/<dot>.
+    tds = [_ticks_to_type(s["ticks"], divisions) for s in slots]
+    # beam level per slot (0 for rests / unbeamable), with running start ticks, then assign beams.
+    starts, levels, pos = [], [], 0
+    for s, td in zip(slots, tds):
+        level = 0 if s["rest"] else _beam_levels(td[0] if td else None)
+        starts.append(pos)
+        levels.append(level)
+        pos += s["ticks"]
+    beam_lists = _assign_beams(list(zip(starts, levels)), beat_ticks)
+    return [_note_event(rng, s, tds[i], clef, fifths, chord_prob, accidental_prob,
+                        octaves, beam_lists[i]) for i, s in enumerate(slots)]
+
+
+def generate_rich_score(
+    seed: int,
+    n_measures: int = 8,
+    key_fifths: Optional[int] = None,
+    divisions: int = 4,
+    beats: int = 4,
+    beat_type: int = 4,
+    chord_prob: float = 0.25,
+    accidental_prob: float = 0.12,
+    rest_prob: float = 0.12,
+    density: float = 0.5,
+    clef_changes: bool = False,
+    ottava: bool = False,
+    ledger_heavy: bool = False,
+) -> bytes:
+    """Deterministic RICH random grand-staff score as MusicXML bytes (its own ground truth).
+
+    Beyond generate_random_score this varies: note DURATIONS (whole..sixteenth, dotted) with
+    correct engraved type/flag/beam, RESTS, dense CHORDS, ALL keys (key_fifths None -> random
+    -7..7) with per-note ACCIDENTALS, optional mid-piece CLEF CHANGES, OTTAVA brackets, and
+    LEDGER-heavy ranges. Same seed + args => byte-identical output.
+
+    Defaults to a simple meter (4/4) with divisions=4 so eighth/sixteenth/dotted values and their
+    beams are all exactly representable; exotic meters degrade gracefully (a full-bar note).
+
+    The flags clef_changes / ottava / ledger_heavy add the HARDER cases (a clef the geometric
+    decode does not yet read, an octave bracket, many ledger lines) and are off by default so the
+    plain rich set stays a clean rhythm/key/accidental benchmark. NEVER raises (degrades to b'')."""
+    try:
+        rng = random.Random(seed)
+        if key_fifths is None:
+            key_fifths = rng.randint(-7, 7)
+        if divisions <= 0:
+            divisions = 4
+        beat_ticks = divisions * 4 // beat_type if beat_type else divisions
+        if beat_ticks <= 0:
+            beat_ticks = divisions
+        capacity = beats * beat_ticks
+
+        # Optional single mid-piece clef change on the treble staff (measure ci): switch to bass
+        # for one bar (so its notes sit in the bass range) then switch back. A clef change is
+        # invisible to the scorer but engraves a clef glyph and re-positions notes -- a step-3 rung.
+        clef_change_measure = rng.randint(2, n_measures - 1) if (clef_changes and n_measures >= 4) else None
+        # Optional ottava run on the treble staff of one measure (a rendered 8va bracket).
+        ottava_measure = rng.randint(1, n_measures) if (ottava and n_measures >= 1) else None
+
+        def octaves_for(clef: str) -> Tuple[int, int]:
+            lo, hi = _CLEF_OCTAVES.get(clef, (4, 5))
+            return (lo - 1, hi + 1) if ledger_heavy else (lo, hi)
+
+        measures = []
+        for m in range(1, n_measures + 1):
+            treble_clef = "F" if m == clef_change_measure else "G"
+            measure: dict = {}
+            if m == clef_change_measure:
+                measure["clefs"] = [{"number": 1, "sign": "F", "line": 4}]
+            elif clef_change_measure is not None and m == clef_change_measure + 1:
+                measure["clefs"] = [{"number": 1, "sign": "G", "line": 2}]  # switch back
+
+            staff1 = _staff_measure(rng, capacity, beat_ticks, divisions, treble_clef, key_fifths,
+                                    chord_prob * 0.6, accidental_prob, rest_prob, density,
+                                    octaves_for(treble_clef))
+            staff2 = _staff_measure(rng, capacity, beat_ticks, divisions, "F", key_fifths,
+                                    chord_prob, accidental_prob, rest_prob, density,
+                                    octaves_for("F"))
+
+            if m == ottava_measure and staff1:
+                # Wrap the treble run in an octave-shift bracket (visual only; written pitch is the
+                # ground truth, matching how reconcile.to_events + the geometric decode read it).
+                staff1 = (
+                    [{"direction": {"octave_shift": {"type": "down", "size": 8, "number": 1}}}]
+                    + staff1
+                    + [{"direction": {"octave_shift": {"type": "stop", "number": 1}}}]
+                )
+
+            measure["staff1"] = staff1
+            measure["staff2"] = staff2
+            measures.append(measure)
+
+        data = {
+            "divisions": divisions,
+            "key_fifths": key_fifths,
+            "time": {"beats": beats, "beat_type": beat_type},
+            "measures": measures,
+        }
+        out = llm_omr.score_json_to_musicxml(data)
+        return out if out is not None else b""
+    except Exception:
+        return b""

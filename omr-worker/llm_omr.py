@@ -427,12 +427,107 @@ def _extract_json(text: str):
 
 _VALID_STEPS = {"A", "B", "C", "D", "E", "F", "G"}
 
+# OPT-IN visual elements (engraved note SHAPE / flags / dots / accidental glyphs / beams /
+# clef changes / octave-shift brackets). These do NOT change the SOUNDING content the scorer
+# reads (reconcile.to_events ignores <type>/<beam>/<accidental>/<dot>/<direction> and any
+# mid-measure <attributes> with no <divisions>), so emitting them is byte-for-byte invisible to
+# score_transcription and to every existing caller that does not set the fields. They exist so
+# the RICH synthetic generator (omr_eval.generate_rich_score) can engrave correctly-shaped
+# glyphs for the trained symbol detector: a quarter note must render as a filled head + stem, an
+# eighth with a flag/beam, a sixteenth with two, a chromatic note with a sharp/flat/natural, etc.
+_VALID_TYPES = {
+    "maxima", "long", "breve", "whole", "half", "quarter", "eighth",
+    "16th", "32nd", "64th", "128th", "256th", "512th", "1024th",
+}
+_VALID_ACCIDENTALS = {
+    "sharp", "flat", "natural", "double-sharp", "double-flat", "flat-flat",
+    "sharp-sharp", "natural-sharp", "natural-flat", "quarter-sharp", "quarter-flat",
+}
+_VALID_BEAM_VALUES = {"begin", "continue", "end", "forward hook", "backward hook"}
+_VALID_CLEF_SIGNS = {"G", "F", "C"}
+_DEFAULT_CLEF_LINE = {"G": 2, "F": 4, "C": 3}
+_VALID_OCTAVE_SHIFT_TYPES = {"up", "down", "stop", "continue"}
+
 
 def _int(value, default: int) -> int:
     try:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _emit_type_and_dots(note_el: ET.Element, event: dict) -> None:
+    """Append optional <type> + <dot> children (MusicXML order: after <duration>, before
+    <staff>). Both opt-in, so an event without them produces byte-identical output to before.
+    <type> drives the engraved note SHAPE (filled vs open head, flag count); the rich generator
+    sets it consistent with <duration> so the detector trains on correctly-rendered glyphs."""
+    type_name = event.get("type")
+    if isinstance(type_name, str) and type_name in _VALID_TYPES:
+        ET.SubElement(note_el, "type").text = type_name
+    for _ in range(max(0, min(_int(event.get("dots", 0), 0), 4))):
+        ET.SubElement(note_el, "dot")
+
+
+def _emit_beams(note_el: ET.Element, event: dict) -> None:
+    """Append optional <beam number=N>value</beam> children (MusicXML order: after <staff>).
+    Opt-in. event['beams'] is a list of {'number': 1..8, 'value': begin|continue|end|...}; the
+    rich generator emits primary (1) + secondary (2) beams for engraved eighth/sixteenth runs."""
+    beams = event.get("beams")
+    if not isinstance(beams, list):
+        return
+    for b in beams:
+        if not isinstance(b, dict) or b.get("value") not in _VALID_BEAM_VALUES:
+            continue
+        number = _int(b.get("number", 1), 1)
+        if 1 <= number <= 8:
+            ET.SubElement(note_el, "beam", {"number": str(number)}).text = b["value"]
+
+
+def _emit_clefs(attrs_el: ET.Element, clefs) -> int:
+    """Append <clef number=N><sign/><line/></clef> children to an <attributes>; return how many
+    valid clefs were emitted. Shared by the first-measure attributes and a later-measure clef
+    CHANGE (an <attributes> carrying only <clef> mid-part). A clef change moves where a pitch sits
+    vertically but not the pitch itself, so it is invisible to the scorer and gives the detector
+    clef glyphs to read (a step-3 rung). The count lets callers keep a valid grand staff even when
+    a (malformed) override lists no usable clef."""
+    n = 0
+    for c in clefs if isinstance(clefs, list) else []:
+        if not isinstance(c, dict):
+            continue
+        sign = str(c.get("sign", "")).strip().upper()
+        if sign not in _VALID_CLEF_SIGNS:
+            continue
+        clef_el = ET.SubElement(attrs_el, "clef", {"number": str(_int(c.get("number", 1), 1))})
+        ET.SubElement(clef_el, "sign").text = sign
+        line = c.get("line")
+        ET.SubElement(clef_el, "line").text = str(
+            _int(line if line is not None else _DEFAULT_CLEF_LINE.get(sign, 2), 2)
+        )
+        n += 1
+    return n
+
+
+def _build_direction(measure_el: ET.Element, direction: dict, staff: int) -> None:
+    """Emit a <direction> (currently an octave-shift / 8va bracket) as a measure child. Opt-in,
+    carries NO duration, and does not advance the cursor: reconcile.to_events ignores <direction>
+    so the ground-truth pitch/duration the scorer reads is unchanged. The bracket is engraved so
+    the symbol detector can learn the ottava glyph; the WRITTEN <octave> on the notes inside the
+    bracket is what the scorer (and the geometric decode) use, so the synthetic ground truth is
+    consistent without modeling the sounding-octave shift."""
+    octave_shift = direction.get("octave_shift")
+    if not isinstance(octave_shift, dict):
+        return
+    shift_type = octave_shift.get("type")
+    if shift_type not in _VALID_OCTAVE_SHIFT_TYPES:
+        return
+    d = ET.SubElement(measure_el, "direction")
+    dt = ET.SubElement(d, "direction-type")
+    attrs = {"type": shift_type, "number": str(_int(octave_shift.get("number", 1), 1))}
+    if shift_type not in ("stop",):
+        size = _int(octave_shift.get("size", 8), 8)
+        attrs["size"] = str(size if size in (8, 15, 22) else 8)
+    ET.SubElement(dt, "octave-shift", attrs)
+    ET.SubElement(d, "staff").text = str(staff)
 
 
 def _append_pitch(note_el: ET.Element, pitch: dict) -> bool:
@@ -455,24 +550,29 @@ def _append_pitch(note_el: ET.Element, pitch: dict) -> bool:
 
 def _build_event(measure_el: ET.Element, event: dict, staff: int) -> int:
     """Append the <note> element(s) for one event (rest, note, or chord) to a measure. Returns
-    the duration consumed by the event (for the backup between staves)."""
+    the duration consumed by the event (for the backup between staves).
+
+    A <direction> pseudo-event (event['direction'], e.g. an octave-shift bracket) is emitted as a
+    measure child and consumes ZERO duration. All visual children (<type>/<dot>/<accidental>/
+    <beam>) are opt-in, so an event dict without them yields byte-identical output to before."""
+    if isinstance(event.get("direction"), dict):
+        _build_direction(measure_el, event["direction"], staff)
+        return 0
+
     duration = _int(event.get("duration", 0), 0)
     if duration <= 0:
         duration = 1
-    if event.get("rest"):
-        note = ET.SubElement(measure_el, "note")
-        ET.SubElement(note, "rest")
-        ET.SubElement(note, "duration").text = str(duration)
-        ET.SubElement(note, "staff").text = str(staff)
-        return duration
-
     pitches = event.get("pitches")
-    if not isinstance(pitches, list) or not pitches:
-        # Treat a pitchless event as a rest so the bar stays metrically intact.
+    if event.get("rest") or not isinstance(pitches, list) or not pitches:
+        # An explicit rest, or a pitchless event treated as a rest so the bar stays metrically
+        # intact. <type>/<dot> still render the correct rest glyph for the detector; rests can also
+        # carry <beam> (a beamed rest inside a run), so honor the field uniformly with notes.
         note = ET.SubElement(measure_el, "note")
         ET.SubElement(note, "rest")
         ET.SubElement(note, "duration").text = str(duration)
+        _emit_type_and_dots(note, event)
         ET.SubElement(note, "staff").text = str(staff)
+        _emit_beams(note, event)
         return duration
 
     first = True
@@ -488,8 +588,17 @@ def _build_event(measure_el: ET.Element, event: dict, staff: int) -> int:
         if not _append_pitch(note, pitch):
             measure_el.remove(note)
             continue
+        # MusicXML <note> child order: [chord], pitch, duration, type, dot*, accidental, staff,
+        # beam*. type/dot are per-event; accidental is per-notehead; beams attach to the event's
+        # primary note (the first chord member).
         ET.SubElement(note, "duration").text = str(duration)
+        _emit_type_and_dots(note, event)
+        acc = pitch.get("accidental")
+        if isinstance(acc, str) and acc in _VALID_ACCIDENTALS:
+            ET.SubElement(note, "accidental").text = acc
         ET.SubElement(note, "staff").text = str(staff)
+        if first:
+            _emit_beams(note, event)
         first = False
         wrote_any = True
     if not wrote_any:
@@ -503,9 +612,10 @@ def _build_event(measure_el: ET.Element, event: dict, staff: int) -> int:
 def _staff_total(events) -> int:
     total = 0
     for e in events if isinstance(events, list) else []:
-        if isinstance(e, dict):
-            d = _int(e.get("duration", 0), 0)
-            total += d if d > 0 else 1
+        if not isinstance(e, dict) or isinstance(e.get("direction"), dict):
+            continue  # a <direction> (e.g. ottava) carries no duration -> not part of the bar sum
+        d = _int(e.get("duration", 0), 0)
+        total += d if d > 0 else 1
     return total
 
 
@@ -554,12 +664,24 @@ def score_json_to_musicxml(data: dict) -> Optional[bytes]:
                 ET.SubElement(t, "beats").text = str(beats)
                 ET.SubElement(t, "beat-type").text = str(beat_type)
                 ET.SubElement(attrs, "staves").text = "2"
-                clef1 = ET.SubElement(attrs, "clef", {"number": "1"})
-                ET.SubElement(clef1, "sign").text = "G"
-                ET.SubElement(clef1, "line").text = "2"
-                clef2 = ET.SubElement(attrs, "clef", {"number": "2"})
-                ET.SubElement(clef2, "sign").text = "F"
-                ET.SubElement(clef2, "line").text = "4"
+                # Default grand-staff clefs (treble/bass); an explicit measure['clefs'] overrides.
+                # If a (malformed) override yields no valid clef, fall back to the defaults so the
+                # <staves>2</staves> declaration always has matching clefs (a valid grand staff).
+                default_clefs = [{"number": 1, "sign": "G", "line": 2},
+                                 {"number": 2, "sign": "F", "line": 4}]
+                clefs = measure.get("clefs")
+                override = clefs if isinstance(clefs, list) and clefs else default_clefs
+                if _emit_clefs(attrs, override) == 0:
+                    _emit_clefs(attrs, default_clefs)
+            else:
+                # A later measure may declare a clef CHANGE (opt-in measure['clefs']): emit an
+                # <attributes> carrying only the changed <clef>(s). Invisible to the scorer. Drop
+                # the <attributes> entirely if no clef was valid (no empty attributes element).
+                clefs = measure.get("clefs")
+                if isinstance(clefs, list) and clefs:
+                    attrs = ET.SubElement(m_el, "attributes")
+                    if _emit_clefs(attrs, clefs) == 0:
+                        m_el.remove(attrs)
 
             staff1 = measure.get("staff1")
             staff2 = measure.get("staff2")
@@ -569,7 +691,10 @@ def score_json_to_musicxml(data: dict) -> Optional[bytes]:
             for event in staff1:
                 if isinstance(event, dict):
                     _build_event(m_el, event, staff=1)
-                    any_content = True
+                    # A direction-only event (e.g. an octave-shift bracket) is not real content, so
+                    # it must not by itself rescue an otherwise-empty score from the None return.
+                    if not isinstance(event.get("direction"), dict):
+                        any_content = True
 
             if staff2:
                 backup_total = _staff_total(staff1)
@@ -579,7 +704,8 @@ def score_json_to_musicxml(data: dict) -> Optional[bytes]:
                 for event in staff2:
                     if isinstance(event, dict):
                         _build_event(m_el, event, staff=2)
-                        any_content = True
+                        if not isinstance(event.get("direction"), dict):
+                            any_content = True
 
         if not any_content:
             return None

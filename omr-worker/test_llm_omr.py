@@ -110,6 +110,122 @@ def test_builder_handles_rests_and_alters():
     assert bflat and bflat[0].pitch == ("B", -1, 4)
 
 
+def test_builder_emits_optin_visual_elements():
+    # type/dots/accidental/beams are emitted ONLY when the event carries them, in MusicXML order
+    # (after duration: type, dot, accidental, staff; beam after staff). They engrave the glyphs the
+    # symbol detector trains on but must not change the pitch/duration the scorer reads.
+    data = {
+        "divisions": 4,
+        "measures": [{"staff1": [
+            {"duration": 3, "type": "eighth", "dots": 1,
+             "pitches": [{"step": "F", "alter": 1, "octave": 5, "accidental": "sharp"}],
+             "beams": [{"number": 1, "value": "begin"}]},
+            {"duration": 1, "type": "16th",
+             "pitches": [{"step": "G", "octave": 5}],
+             "beams": [{"number": 1, "value": "end"}, {"number": 2, "value": "backward hook"}]},
+        ], "staff2": []}]
+    }
+    xml = llm_omr.score_json_to_musicxml(data)
+    root = ET.fromstring(xml)
+    notes = root.findall(".//note")
+    assert notes[0].findtext("type") == "eighth"
+    assert len(notes[0].findall("dot")) == 1
+    assert notes[0].findtext("accidental") == "sharp"
+    assert [b.text for b in notes[0].findall("beam")] == ["begin"]
+    assert {b.get("number"): b.text for b in notes[1].findall("beam")} == {"1": "end", "2": "backward hook"}
+    # child order on the dotted eighth: duration, type, dot, accidental, staff, beam
+    tags = [c.tag for c in notes[0]]
+    assert tags == ["pitch", "duration", "type", "dot", "accidental", "staff", "beam"]
+
+
+def test_builder_visuals_are_invisible_to_the_scorer():
+    # The SAME notes with and without visual markup must lower to identical (pitch, duration, onset)
+    # events, so a rich score stays its own ground truth.
+    plain = {"divisions": 4, "measures": [{"staff1": [
+        {"duration": 2, "pitches": [{"step": "C", "octave": 5}]},
+        {"duration": 2, "pitches": [{"step": "D", "octave": 5}]}], "staff2": []}]}
+    rich = {"divisions": 4, "measures": [{"staff1": [
+        {"duration": 2, "type": "eighth", "pitches": [{"step": "C", "octave": 5}],
+         "beams": [{"number": 1, "value": "begin"}]},
+        {"duration": 2, "type": "eighth", "pitches": [{"step": "D", "octave": 5}],
+         "beams": [{"number": 1, "value": "end"}]}], "staff2": []}]}
+    ep = [(e.pitch, e.duration, e.onset) for e in _events(llm_omr.score_json_to_musicxml(plain))]
+    er = [(e.pitch, e.duration, e.onset) for e in _events(llm_omr.score_json_to_musicxml(rich))]
+    assert ep == er
+
+
+def test_builder_direction_consumes_no_duration():
+    # A <direction> (octave-shift) pseudo-event emits a <direction> child but does not advance the
+    # bar cursor, so the staff backup is computed from the notes only.
+    data = {"divisions": 4, "measures": [{"staff1": [
+        {"duration": 4, "pitches": [{"step": "C", "octave": 5}]},
+        {"direction": {"octave_shift": {"type": "down", "size": 8}}},
+        {"duration": 4, "pitches": [{"step": "D", "octave": 5}]}],
+        "staff2": [{"duration": 8, "pitches": [{"step": "C", "octave": 3}]}]}]}
+    xml = llm_omr.score_json_to_musicxml(data)
+    root = ET.fromstring(xml)
+    assert root.find(".//direction/direction-type/octave-shift") is not None
+    assert root.findtext(".//backup/duration") == "8"  # two quarters, direction not counted
+    events = _events(xml)
+    treble = sorted((e.onset for e in events if e.staff == 1 and e.pitch is not None))
+    assert treble == [0, 4]  # the direction did not shift the second note's onset
+    bass = [e for e in events if e.staff == 2 and e.pitch is not None]
+    assert bass and bass[0].onset == 0
+
+
+def test_builder_invalid_measure1_clefs_fall_back_to_default():
+    # A non-empty but all-invalid measure-1 clefs override must not leave <staves>2 with no clefs;
+    # it falls back to the default grand staff so the document stays valid.
+    data = {"measures": [{"clefs": [{"number": 1, "sign": "X"}],
+                          "staff1": [{"duration": 4, "pitches": [{"step": "C", "octave": 5}]}],
+                          "staff2": [{"duration": 4, "pitches": [{"step": "C", "octave": 3}]}]}]}
+    root = ET.fromstring(llm_omr.score_json_to_musicxml(data))
+    assert [c.findtext("sign") for c in root.findall(".//attributes/clef")] == ["G", "F"]
+
+
+def test_builder_invalid_clef_change_emits_no_empty_attributes():
+    data = {"measures": [
+        {"staff1": [{"duration": 4, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []},
+        {"clefs": [{"sign": "Z"}],  # all-invalid -> no clef change, and no empty <attributes>
+         "staff1": [{"duration": 4, "pitches": [{"step": "D", "octave": 5}]}], "staff2": []},
+    ]}
+    root = ET.fromstring(llm_omr.score_json_to_musicxml(data))
+    assert root.findall(".//measure")[1].find("attributes") is None
+
+
+def test_builder_emits_beams_on_rests():
+    # A beamed rest (a rest inside a run) keeps its <beam>, same as a note.
+    data = {"measures": [{"staff1": [
+        {"rest": True, "duration": 2, "type": "eighth",
+         "beams": [{"number": 1, "value": "continue"}]}], "staff2": []}]}
+    note = ET.fromstring(llm_omr.score_json_to_musicxml(data)).find(".//note")
+    assert note.find("rest") is not None
+    assert [b.text for b in note.findall("beam")] == ["continue"]
+
+
+def test_builder_direction_only_content_is_not_a_score():
+    # A measure whose only event is a <direction> has no real content -> None (a direction must
+    # not by itself rescue an otherwise-empty document).
+    data = {"measures": [{"staff1": [
+        {"direction": {"octave_shift": {"type": "down", "size": 8}}}], "staff2": []}]}
+    assert llm_omr.score_json_to_musicxml(data) is None
+
+
+def test_builder_mid_measure_clef_change():
+    # measure 2 declares a clef change on staff 1; the first measure keeps the default G/F.
+    data = {"divisions": 4, "measures": [
+        {"staff1": [{"duration": 4, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []},
+        {"clefs": [{"number": 1, "sign": "F", "line": 4}],
+         "staff1": [{"duration": 4, "pitches": [{"step": "C", "octave": 3}]}], "staff2": []},
+    ]}
+    root = ET.fromstring(llm_omr.score_json_to_musicxml(data))
+    measures = root.findall(".//measure")
+    m1_signs = [c.findtext("sign") for c in measures[0].findall("attributes/clef")]
+    m2_signs = [c.findtext("sign") for c in measures[1].findall("attributes/clef")]
+    assert m1_signs == ["G", "F"]      # default grand staff
+    assert m2_signs == ["F"]           # the mid-piece clef change
+
+
 def test_builder_returns_none_on_empty_or_garbage():
     assert llm_omr.score_json_to_musicxml({}) is None
     assert llm_omr.score_json_to_musicxml({"measures": []}) is None

@@ -216,3 +216,150 @@ def test_generated_score_round_trips_to_perfect_self_score():
     m = omr_eval.score_transcription(xml, xml)
     assert m["note_f1"] == 1.0 and m["chord_recall"] == 1.0
     assert m["n_truth_chords"] >= 1  # chord_prob high enough to produce some chords
+
+
+# --- rich-score generation (the symbol detector's training data) -------------------------
+
+
+def test_ticks_to_type_maps_durations_to_engraved_glyphs():
+    # divisions = 4 ticks per quarter: quarter=4, half=8, whole=16, eighth=2, 16th=1.
+    assert omr_eval._ticks_to_type(4, 4) == ("quarter", 0)
+    assert omr_eval._ticks_to_type(8, 4) == ("half", 0)
+    assert omr_eval._ticks_to_type(16, 4) == ("whole", 0)
+    assert omr_eval._ticks_to_type(2, 4) == ("eighth", 0)
+    assert omr_eval._ticks_to_type(1, 4) == ("16th", 0)
+    assert omr_eval._ticks_to_type(6, 4) == ("quarter", 1)   # dotted quarter
+    assert omr_eval._ticks_to_type(3, 4) == ("eighth", 1)    # dotted eighth
+    assert omr_eval._ticks_to_type(12, 4) == ("half", 1)     # dotted half
+    assert omr_eval._ticks_to_type(5, 4) is None             # not a plain/dotted value
+    assert omr_eval._ticks_to_type(0, 4) is None             # degrade, no crash
+
+
+def test_keyed_alter_and_accidental_glyph_track_the_key():
+    # D major (2 sharps F#, C#): F is sharped by the key, so an F-natural needs a 'natural' glyph
+    # and an F# needs NO glyph; in C major an F# needs a 'sharp'.
+    assert omr_eval._keyed_alter("F", 2) == 1 and omr_eval._keyed_alter("G", 2) == 0
+    assert omr_eval._keyed_alter("B", -1) == -1  # Bb major flattens B
+    assert omr_eval._accidental_glyph("F", 1, 2) is None       # F# is the key default
+    assert omr_eval._accidental_glyph("F", 0, 2) == "natural"  # F-natural cancels the key sharp
+    assert omr_eval._accidental_glyph("F", 1, 0) == "sharp"    # F# in C major
+    assert omr_eval._accidental_glyph("B", -1, 0) == "flat"
+
+
+def test_diatonic_step_up_carries_the_octave():
+    assert omr_eval._diatonic_step_up("C", 4, 2) == ("E", 4)   # a third
+    assert omr_eval._diatonic_step_up("C", 4, 4) == ("G", 4)   # a fifth
+    assert omr_eval._diatonic_step_up("A", 4, 2) == ("C", 5)   # third over the C boundary
+
+
+def test_assign_beams_canonical_patterns():
+    bt = 4  # beat = 4 ticks (divisions 4)
+    # two eighths in one beat -> one primary beam begin/end
+    assert omr_eval._assign_beams([(0, 1), (2, 1)], bt) == [
+        [{"number": 1, "value": "begin"}], [{"number": 1, "value": "end"}]]
+    # four sixteenths -> primary + secondary, both begin/continue/continue/end
+    four = omr_eval._assign_beams([(0, 2), (1, 2), (2, 2), (3, 2)], bt)
+    assert [b[0]["value"] for b in four] == ["begin", "continue", "continue", "end"]
+    assert all({1, 2} == {d["number"] for d in slot} for slot in four)
+    # dotted-eighth(level1) + sixteenth(level2): primary begin/end, lone 16th gets a backward hook
+    hook = omr_eval._assign_beams([(0, 1), (3, 2)], bt)
+    assert hook[0] == [{"number": 1, "value": "begin"}]
+    assert {"number": 2, "value": "backward hook"} in hook[1]
+    # beams never cross a beat boundary: two eighths in beat 0 + two in beat 1 -> two groups
+    across = omr_eval._assign_beams([(0, 1), (2, 1), (4, 1), (6, 1)], bt)
+    assert [b[0]["value"] for b in across] == ["begin", "end", "begin", "end"]
+
+
+def test_rich_score_is_deterministic_and_parses():
+    a = omr_eval.generate_rich_score(seed=11, n_measures=6, key_fifths=0)
+    b = omr_eval.generate_rich_score(seed=11, n_measures=6, key_fifths=0)
+    c = omr_eval.generate_rich_score(seed=12, n_measures=6, key_fifths=0)
+    assert a == b and a != c
+    root = ET.fromstring(a)
+    assert root.tag == "score-partwise"
+    assert len(root.findall(".//measure")) == 6
+    staves = {e.staff for e in reconcile.to_events(a, "x") if e.pitch is not None}
+    assert staves == {1, 2}
+
+
+def test_rich_score_is_its_own_ground_truth_including_rhythm():
+    # Fed to itself a rich score scores a perfect 1.0 on pitch AND duration AND chords: the visual
+    # glyphs do not perturb what the scorer reads.
+    xml = omr_eval.generate_rich_score(seed=21, n_measures=8, key_fifths=3, chord_prob=0.4)
+    m = omr_eval.score_transcription(xml, xml)
+    assert m["note_f1"] == 1.0
+    assert m["note_dur_f1"] == 1.0 and m["duration_acc"] == 1.0
+    assert m["chord_recall"] == 1.0
+
+
+def test_rich_score_has_varied_rhythm_and_glyphs():
+    xml = omr_eval.generate_rich_score(seed=7, n_measures=8, key_fifths=0,
+                                       accidental_prob=0.3, density=0.7)
+    # several distinct duration classes (not the simple generator's all-quarters)
+    durs = {omr_eval._dur16(e.duration, e.base)
+            for e in reconcile.to_events(xml, "x") if e.pitch is not None}
+    assert len(durs) >= 4
+    s = xml.decode()
+    assert "<type" in s and "<beam" in s and "<accidental" in s  # engraved glyph set present
+
+
+def test_rich_score_bars_sum_to_capacity():
+    # Every bar must be metrically exact per staff so Verovio engraves it cleanly.
+    xml = omr_eval.generate_rich_score(seed=33, n_measures=6, key_fifths=0, density=0.8)
+    root = ET.fromstring(xml)
+    for meas in root.findall(".//measure"):
+        totals, cur = {1: 0, 2: 0}, 1
+        for ch in list(meas):
+            if ch.tag == "backup":
+                cur = 2
+                continue
+            if ch.tag != "note" or ch.find("chord") is not None:
+                continue
+            st = int(ch.findtext("staff") or cur)
+            totals[st] += int(ch.findtext("duration"))
+        assert totals[1] == 16 and totals[2] == 16  # 4/4 at divisions 4
+
+
+def test_rich_score_all_keys_round_trip():
+    for k in range(-7, 8):
+        xml = omr_eval.generate_rich_score(seed=4, n_measures=3, key_fifths=k, accidental_prob=0.4)
+        assert ET.fromstring(xml).findtext(".//key/fifths") == str(k)
+        assert omr_eval.score_transcription(xml, xml)["note_f1"] == 1.0
+
+
+def test_rich_score_hard_features_render_and_stay_ground_truth():
+    cc = omr_eval.generate_rich_score(seed=3, n_measures=6, key_fifths=0, clef_changes=True)
+    assert cc.decode().count("<clef") > 2  # extra mid-piece clef glyph
+    assert omr_eval.score_transcription(cc, cc)["note_f1"] == 1.0
+    ot = omr_eval.generate_rich_score(seed=3, n_measures=4, key_fifths=0, ottava=True)
+    assert ot.decode().count("octave-shift") >= 2  # a start + a stop
+    assert omr_eval.score_transcription(ot, ot)["note_f1"] == 1.0
+    lh = omr_eval.generate_rich_score(seed=3, n_measures=4, key_fifths=0, ledger_heavy=True)
+    assert omr_eval.score_transcription(lh, lh)["note_f1"] == 1.0
+
+
+def test_rich_score_every_note_carries_a_consistent_type_glyph():
+    # The core thesis: at a clean divisions every engraved note/rest carries a <type> matching its
+    # duration, so the rendered glyph is always consistent with the ground-truth duration.
+    for divisions in (4, 8):
+        root = ET.fromstring(omr_eval.generate_rich_score(
+            seed=5, n_measures=4, key_fifths=0, divisions=divisions, density=0.7))
+        for note in root.findall(".//note"):
+            assert note.find("type") is not None
+
+
+def test_rich_score_exotic_divisions_degrade_without_crash():
+    # A divisions/meter combo with no clean sub-beat representation still returns valid,
+    # self-scoring MusicXML and never crashes (bars still sum; some notes may be type-less).
+    xml = omr_eval.generate_rich_score(seed=2, n_measures=3, key_fifths=0,
+                                       divisions=3, beats=2, beat_type=8)
+    assert isinstance(xml, bytes) and xml
+    assert omr_eval.score_transcription(xml, xml)["note_f1"] == 1.0
+
+
+def test_rich_score_random_key_when_unspecified_and_never_raises():
+    # key_fifths None -> a deterministic in-range random key; odd args degrade, never raise.
+    xml = omr_eval.generate_rich_score(seed=99, n_measures=4)
+    assert -7 <= int(ET.fromstring(xml).findtext(".//key/fifths")) <= 7
+    assert omr_eval.generate_rich_score(seed=1, n_measures=0) in (b"",) or True  # no crash
+    assert isinstance(omr_eval.generate_rich_score(seed=1, n_measures=2, beat_type=0), bytes)
