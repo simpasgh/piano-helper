@@ -679,18 +679,37 @@ def test_geom_off_by_default_does_not_run(tmp_path, monkeypatch):
     _drive_process_job(monkeypatch, client, is_pdf=False)  # no AssertionError = geom skipped
 
 
-def test_geom_used_first_when_enabled(tmp_path, monkeypatch):
-    # OMR_GEOM on and geom returns a result: it WINS and NO other engine runs.
+def test_geom_not_run_when_a_primary_succeeds(tmp_path, monkeypatch):
+    # geom is a FALLBACK, not a primary: if any earlier engine produces a result, geom never runs.
     monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    ens_out = tmp_path / "ens.musicxml"
+    ens_out.write_text("<score>ensemble</score>")
+    monkeypatch.setattr(worker, "_select_ensemble", lambda *a, **k: (str(ens_out), "ensemble"))
+
+    def geom_must_not_run(*a, **k):
+        raise AssertionError("geom must not run when a primary engine succeeded")
+
+    monkeypatch.setattr(worker, "run_geom", geom_must_not_run)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"\x89PNG fake")
+    _drive_process_job(monkeypatch, client, is_pdf=False)
+    assert client.put_body == b"<score>ensemble</score>"
+
+
+def test_geom_used_as_fallback_when_all_else_fails(tmp_path, monkeypatch):
+    # OMR_GEOM on, every primary declines (the would-be failure-sentinel case): geom fills in,
+    # because a pitch transcription beats a sentinel. geom can only win when body is still None.
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "_select_ensemble", lambda *a, **k: (None, None))
     geom_out = tmp_path / "geom.musicxml"
     geom_out.write_text("<score>geom</score>")
     monkeypatch.setattr(worker, "run_geom", lambda *a, **k: str(geom_out))
-
-    def must_not_run(*a, **k):
-        raise AssertionError("no other engine may run when geom produced a result")
-
-    monkeypatch.setattr(worker, "_select_ensemble", must_not_run)
-    monkeypatch.setattr(worker, "_select_legacy", must_not_run)
     monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
     monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
 
@@ -699,11 +718,11 @@ def test_geom_used_first_when_enabled(tmp_path, monkeypatch):
     assert client.put_body == b"<score>geom</score>"
 
 
-def test_geom_declines_falls_through_to_ensemble(tmp_path, monkeypatch):
-    # OMR_GEOM on but geom returns None (declined): the existing ensemble path runs (never-worse).
+def test_geom_fallback_declines_writes_sentinel(tmp_path, monkeypatch):
+    # Every primary declines AND geom (fallback) also returns None -> failure sentinel, no crash.
+    # Also guards that the ensemble still runs first (geom no longer pre-empts it).
     monkeypatch.setenv("OMR_GEOM", "1")
     monkeypatch.setenv("OMR_ENSEMBLE", "1")
-    monkeypatch.setattr(worker, "run_geom", lambda *a, **k: None)
     ran = {"ensemble": False}
 
     def fake_ensemble(*a, **k):
@@ -711,13 +730,13 @@ def test_geom_declines_falls_through_to_ensemble(tmp_path, monkeypatch):
         return None, None
 
     monkeypatch.setattr(worker, "_select_ensemble", fake_ensemble)
+    monkeypatch.setattr(worker, "run_geom", lambda *a, **k: None)
     monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
-    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
-    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
 
     client = _FakeClient(input_bytes=b"\x89PNG fake")
     _drive_process_job(monkeypatch, client, is_pdf=False)
     assert ran["ensemble"] is True
+    assert client.put_body == worker.FAILURE_SENTINEL
 
 
 def test_llm_falls_back_to_engines_when_it_returns_none(tmp_path, monkeypatch):

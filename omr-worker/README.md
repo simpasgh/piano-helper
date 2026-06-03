@@ -127,10 +127,12 @@ same env file, so `sudo systemctl restart omr-worker.service` is enough.
 Our own engine: a trained YOLO notehead detector feeding the exact geometric pitch decode
 (`geom_detector.py` + `geom_omr.py`, built on the GPU PC; see
 [own-engine-roadmap.md](../docs/context/own-engine-roadmap.md)). Gated by `OMR_GEOM` and **OFF by
-default**. When ON it runs FIRST and only wins if it returns a result; otherwise the existing
-engines run, so enabling it is never-worse for jobs it cannot handle. Like Clarity it needs its
-OWN venv (torch + ultralytics cannot co-install with oemer's stack), so the worker invokes it as a
-subprocess. CPU-only inference (no GPU on the box).
+default**. When ON it runs as a **last-resort fallback**: it is tried only when every other engine
+(Clarity/oemer/homr/LLM) produced nothing, replacing the failure sentinel with a pitch
+transcription. It has no rhythm/tie/key detection yet, so it must never override those engines; it
+was briefly wired wins-first and that regressed rhythm vs Clarity, hence the demotion until rhythm
++ barline detection land. Like Clarity it needs its OWN venv (torch + ultralytics cannot co-install
+with oemer's stack), so the worker invokes it as a subprocess. CPU-only inference (no GPU on the box).
 
 ```bash
 # 1. A dedicated py3.11+ venv for the detector stack (CPU torch).
@@ -154,11 +156,15 @@ The worker runs `<GEOM_PYTHON> geom_detector.py <image> --weights <GEOM_WEIGHTS>
 --device cpu`. If `GEOM_PYTHON`/`GEOM_WEIGHTS` are unset/missing, or the engine declines
 (exit 2 = nothing recognized), the worker falls back to the existing chain.
 
-**Before flipping `OMR_GEOM=1`,** validate on real scores. Two known gaps make it unsafe as the
-blind primary today: (1) no **key-signature detection** yet, so non-C-major scores decode
-accidentals as natural (a semitone off); (2) end-to-end accuracy vs Clarity/oemer on real uploads
-is unproven (we have synthetic + detection-mAP numbers, not a real-upload bake-off). Keep it OFF
-in prod until both are addressed.
+**geom is a FALLBACK, not a primary.** It reads pitch well but emits placeholder rhythm (every
+note `duration: 1`, no barlines, hardcoded 4/4), no ties, and no key signature, so on a full
+transcription it loses to Clarity. Two gaps drive this: (1) no **rhythm / barline detection** (the
+core gap vs Clarity); (2) no **key-signature detection**, so non-C-major scores read accidentals a
+semitone off. Until those land it runs ONLY when every other engine fails (replacing the failure
+sentinel), which keeps it strictly never-worse even with `OMR_GEOM=1`. The on-box bake-off that
+exposed this: pitch exact-F1 0.92 on C-major but 0.60 on mixed-key in prod mode, and the rhythm is
+unscored because the engine fabricates it. See
+[own-engine-roadmap.md](../docs/context/own-engine-roadmap.md).
 
 ## Configure R2 credentials
 
