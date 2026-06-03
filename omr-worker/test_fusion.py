@@ -25,10 +25,12 @@ def _midis(xml):
 
 
 def _time(xml):
-    """The (beats, beat-type) text of the fused document's first <time>, read straight from the
-    XML (independent of fusion._read_time) so the assertion proves what the document declares."""
+    """The (beats, beat-type) text of the fused document's first <time>, or None if it has none.
+    Read straight from the XML (independent of fusion._read_time) so the assertion proves what the
+    document declares, and returns None rather than raising so a no-<time> regression fails with a
+    readable meter mismatch instead of an AttributeError."""
     t = ET.fromstring(xml).find(".//time")
-    return (t.findtext("beats"), t.findtext("beat-type"))
+    return (t.findtext("beats"), t.findtext("beat-type")) if t is not None else None
 
 
 def _strip_time(xml):
@@ -100,12 +102,31 @@ def test_fuse_borrows_clarity_time_signature():
     assert _durs(fused) == [4, 4]         # clarity's durations still borrowed (two quarters)
 
 
+def test_fuse_borrowed_meter_and_durations_are_consistent():
+    # A 3/4 piece (capacity 12 sixteenths at divisions=4): the borrowed meter and the borrowed
+    # durations must AGREE so the bar is metrically whole (three quarters fill the 3/4 bar). This
+    # guards against declaring a meter whose capacity does not match the durations fusion emits.
+    geom = _xml([{"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]},
+                             {"duration": 1, "pitches": [{"step": "E", "octave": 5}]},
+                             {"duration": 1, "pitches": [{"step": "G", "octave": 5}]}], "staff2": []}])
+    clarity = _xml([{"staff1": [{"duration": 4, "pitches": [{"step": "C", "octave": 5}]},
+                                {"duration": 4, "pitches": [{"step": "E", "octave": 5}]},
+                                {"duration": 4, "pitches": [{"step": "G", "octave": 5}]}], "staff2": []}],
+                   time={"beats": 3, "beat_type": 4})
+    fused = fusion.fuse(geom, clarity)
+    assert _time(fused) == ("3", "4")     # 3/4 borrowed from clarity
+    assert sum(_durs(fused)) == 12        # three borrowed quarters == the 3/4 bar capacity (3*4)
+
+
 def test_fuse_falls_back_to_4_4_when_clarity_has_no_time():
     # Clarity stripped of its <time>: _read_time returns None and the fused output declares 4/4.
-    geom = _xml([{"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []}])
+    # geom deliberately declares a NON-4/4 meter (3/4) so this proves the fallback is the 4/4 default
+    # and NOT geom's meter leaking through: a fuse-reads-geom-time bug would make the output 3/4 here.
+    geom = _xml([{"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []}],
+                time={"beats": 3, "beat_type": 4})
     clarity = _xml([{"staff1": [{"duration": 4, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []}])
     fused = fusion.fuse(geom, _strip_time(clarity))
-    assert _time(fused) == ("4", "4")     # no usable clarity <time> -> 4/4 fallback
+    assert _time(fused) == ("4", "4")     # no usable clarity <time> -> 4/4 fallback (NOT geom's 3/4)
     assert _midis(fused) == [72]          # geom's pitch still preserved
     assert _durs(fused) == [4]            # clarity's duration still borrowed
 
@@ -159,6 +180,12 @@ class TestReadTime:
     def test_none_on_zero_beat_type(self):
         xml = b'<score-partwise><part><measure><attributes><time>' \
               b'<beats>4</beats><beat-type>0</beat-type></time></attributes></measure></part></score-partwise>'
+        assert fusion._read_time(xml) is None
+
+    def test_none_on_time_without_numeric_children(self):
+        # A <time> present but with no <beats>/<beat-type> (senza-misura) -> None, per the docstring.
+        xml = b'<score-partwise><part><measure><attributes><time><senza-misura/></time>' \
+              b'</attributes></measure></part></score-partwise>'
         assert fusion._read_time(xml) is None
 
     def test_never_raises_on_unparseable(self):
