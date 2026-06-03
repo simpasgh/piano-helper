@@ -101,15 +101,12 @@ describe("OMR worker Clarity-OMR tie engine (issue #135)", () => {
     expect(worker).toContain("def ensemble_enabled(");
     // Truthy parsing: only "1"/"true" enable it (anything else, incl. unset, stays OFF).
     expect(worker).toMatch(/in \("1", "true"\)/);
-    // process_job branches on the flag AND the per-job fast opt-out: ensemble path when the
-    // flag is ON and the job is NOT fast; otherwise the legacy single-engine path.
+    // process_job branches on the flag: ensemble path when the flag is ON, otherwise the
+    // legacy single-engine path.
     expect(worker).toMatch(
-      /if ensemble_enabled\(\) and not fast:\s*\n\s*result_path, source = _select_ensemble\(/,
+      /if ensemble_enabled\(\):\s*\n\s*result_path, source = _select_ensemble\(/,
     );
     expect(worker).toMatch(/else:\s*\n\s*result_path, source = _select_legacy\(/);
-    // The per-job "fast scan" flag is read from the upload's R2 metadata.
-    expect(worker).toContain("def job_is_fast(");
-    expect(worker).toMatch(/fast = job_is_fast\(/);
   });
 
   it("legacy path (flag OFF) short-circuits at Clarity for a PDF, no oemer/raster on success", () => {

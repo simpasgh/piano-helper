@@ -48,7 +48,6 @@ import {
 const canvas = document.getElementById("stage") as HTMLCanvasElement;
 const fileInput = document.getElementById("file-input") as HTMLInputElement;
 const scanInput = document.getElementById("scan-input") as HTMLInputElement;
-const fastScanToggle = document.getElementById("fast-scan") as HTMLInputElement | null;
 const audioInput = document.getElementById("audio-input") as HTMLInputElement;
 const playBtn = document.getElementById("play-btn") as HTMLButtonElement;
 const prevNoteBtn = document.getElementById("prev-note-btn") as HTMLButtonElement;
@@ -824,17 +823,13 @@ scanOverlay.addEventListener("keydown", (e) => {
   }
 });
 
-async function scanSheet(file: File, fast: boolean): Promise<void> {
+async function scanSheet(file: File): Promise<void> {
   const generation = ++jobGeneration;
   setBusyUI(true);
   showScanOverlay("scan");
-  showStatus(
-    fast
-      ? "Scanning sheet (fast)... (about a minute)"
-      : "Scanning sheet... (the accurate scan can take several minutes)",
-  );
+  showStatus("Scanning sheet... (the accurate scan can take several minutes)");
   try {
-    const jobId = await submitOmr(file, { fast });
+    const jobId = await submitOmr(file);
     const xml = await pollOmrResult(jobId, {
       isCancelledRequested: () => cancelRequested,
     });
@@ -856,8 +851,7 @@ scanInput.addEventListener("change", () => {
   if (busy) return;
   const file = scanInput.files?.[0];
   if (!file) return;
-  const fast = fastScanToggle?.checked ?? false;
-  scanSheet(file, fast).catch((err) => {
+  scanSheet(file).catch((err) => {
     // A cancel is a deliberate abandon, not a failure: just restore the slot quietly.
     if (isCancelled(err)) {
       restoreSheetName();
