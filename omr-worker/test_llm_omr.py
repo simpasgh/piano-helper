@@ -173,6 +173,44 @@ def test_builder_direction_consumes_no_duration():
     assert bass and bass[0].onset == 0
 
 
+def test_builder_invalid_measure1_clefs_fall_back_to_default():
+    # A non-empty but all-invalid measure-1 clefs override must not leave <staves>2 with no clefs;
+    # it falls back to the default grand staff so the document stays valid.
+    data = {"measures": [{"clefs": [{"number": 1, "sign": "X"}],
+                          "staff1": [{"duration": 4, "pitches": [{"step": "C", "octave": 5}]}],
+                          "staff2": [{"duration": 4, "pitches": [{"step": "C", "octave": 3}]}]}]}
+    root = ET.fromstring(llm_omr.score_json_to_musicxml(data))
+    assert [c.findtext("sign") for c in root.findall(".//attributes/clef")] == ["G", "F"]
+
+
+def test_builder_invalid_clef_change_emits_no_empty_attributes():
+    data = {"measures": [
+        {"staff1": [{"duration": 4, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []},
+        {"clefs": [{"sign": "Z"}],  # all-invalid -> no clef change, and no empty <attributes>
+         "staff1": [{"duration": 4, "pitches": [{"step": "D", "octave": 5}]}], "staff2": []},
+    ]}
+    root = ET.fromstring(llm_omr.score_json_to_musicxml(data))
+    assert root.findall(".//measure")[1].find("attributes") is None
+
+
+def test_builder_emits_beams_on_rests():
+    # A beamed rest (a rest inside a run) keeps its <beam>, same as a note.
+    data = {"measures": [{"staff1": [
+        {"rest": True, "duration": 2, "type": "eighth",
+         "beams": [{"number": 1, "value": "continue"}]}], "staff2": []}]}
+    note = ET.fromstring(llm_omr.score_json_to_musicxml(data)).find(".//note")
+    assert note.find("rest") is not None
+    assert [b.text for b in note.findall("beam")] == ["continue"]
+
+
+def test_builder_direction_only_content_is_not_a_score():
+    # A measure whose only event is a <direction> has no real content -> None (a direction must
+    # not by itself rescue an otherwise-empty document).
+    data = {"measures": [{"staff1": [
+        {"direction": {"octave_shift": {"type": "down", "size": 8}}}], "staff2": []}]}
+    assert llm_omr.score_json_to_musicxml(data) is None
+
+
 def test_builder_mid_measure_clef_change():
     # measure 2 declares a clef change on staff 1; the first measure keeps the default G/F.
     data = {"divisions": 4, "measures": [

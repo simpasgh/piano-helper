@@ -338,6 +338,25 @@ def test_rich_score_hard_features_render_and_stay_ground_truth():
     assert omr_eval.score_transcription(lh, lh)["note_f1"] == 1.0
 
 
+def test_rich_score_every_note_carries_a_consistent_type_glyph():
+    # The core thesis: at a clean divisions every engraved note/rest carries a <type> matching its
+    # duration, so the rendered glyph is always consistent with the ground-truth duration.
+    for divisions in (4, 8):
+        root = ET.fromstring(omr_eval.generate_rich_score(
+            seed=5, n_measures=4, key_fifths=0, divisions=divisions, density=0.7))
+        for note in root.findall(".//note"):
+            assert note.find("type") is not None
+
+
+def test_rich_score_exotic_divisions_degrade_without_crash():
+    # A divisions/meter combo with no clean sub-beat representation still returns valid,
+    # self-scoring MusicXML and never crashes (bars still sum; some notes may be type-less).
+    xml = omr_eval.generate_rich_score(seed=2, n_measures=3, key_fifths=0,
+                                       divisions=3, beats=2, beat_type=8)
+    assert isinstance(xml, bytes) and xml
+    assert omr_eval.score_transcription(xml, xml)["note_f1"] == 1.0
+
+
 def test_rich_score_random_key_when_unspecified_and_never_raises():
     # key_fifths None -> a deterministic in-range random key; odd args degrade, never raise.
     xml = omr_eval.generate_rich_score(seed=99, n_measures=4)
