@@ -293,13 +293,17 @@ def _pick_rest_slot(bar: _Bar, deficit: int) -> Optional[_Slot]:
     return biggest if biggest.dur + deficit >= 0 else None
 
 
-def _remove_slot(bar: _Bar, slot: _Slot) -> None:
-    """Remove a slot's element(s) from the measure (used when a rest shrinks to zero duration)."""
+def _remove_slot(bar: _Bar, slot: _Slot) -> bool:
+    """Remove a slot's element(s) from the measure (used when a rest shrinks to zero duration).
+    Returns True only if every element was removed, so the caller can keep the rest edit and the
+    backup update atomic (it bumps the backup only when the removal actually happened)."""
+    ok = True
     for el in slot.elems:
         try:
             bar.measure_el.remove(el)
         except ValueError:
-            pass
+            ok = False
+    return ok
 
 
 def _build_rest(duration: int, staff: int) -> ET.Element:
@@ -312,29 +316,43 @@ def _build_rest(duration: int, staff: int) -> ET.Element:
 
 
 def _append_staff_rest(bar: _Bar, duration: int) -> None:
-    """Append a trailing rest of the given duration to this bar's staff, at the end of that staff's
-    stream. Staff 1 ends at the cross-staff <backup>, so its rest is inserted BEFORE the backup;
-    staff 2 (and any backup-less measure) ends at the measure end, so its rest is appended there.
-    The backup is adjusted by the caller via _fix_backup."""
+    """Insert a trailing rest of the given duration right AFTER this staff's last note, which is the
+    end of that staff's stream in document order: for staff 1 that is just before the cross-staff
+    <backup>; for staff 2 it is after the last bass note but before any trailing <barline>/<print>/
+    <direction> (anchoring on the last note rather than the measure end keeps the rest inside the
+    bar). The backup is adjusted by the caller via _fix_backup. bar.slots is non-empty here (a short
+    rest-free bar always has at least one pitched slot)."""
     rest = _build_rest(duration, bar.staff)
-    if bar.staff == 1 and bar.backup_el is not None:
-        try:
-            idx = list(bar.measure_el).index(bar.backup_el)
-            bar.measure_el.insert(idx, rest)
-            return
-        except ValueError:
-            pass
-    bar.measure_el.append(rest)
+    anchor = bar.slots[-1].elems[-1]
+    try:
+        idx = list(bar.measure_el).index(anchor)
+        bar.measure_el.insert(idx + 1, rest)
+    except ValueError:
+        bar.measure_el.append(rest)
+
+
+def _backup_adjustable(bar: _Bar, delta: int) -> bool:
+    """True unless a staff-1 edit would leave the cross-staff <backup> inconsistent. A staff-1 edit
+    changes that staff's advance by delta, so the backup must change by the same delta to keep
+    staff 2 rewinding to the measure start. We require a well-formed positive backup that stays
+    positive after the change; if it does not, we DECLINE the whole bar up front (return False)
+    rather than commit the rest edit and silently leave the backup unmoved (a staff-2 desync). Not
+    a staff-1 edit, or no backup -> trivially adjustable."""
+    if bar.staff != 1 or bar.backup_el is None:
+        return True
+    cur = _int_text(bar.backup_el.find("duration"))
+    return cur is not None and cur + delta > 0
 
 
 def _fix_backup(bar: _Bar, delta: int) -> None:
-    """A change of +delta ticks to staff 1's fill must add +delta to the cross-staff <backup> so
-    staff 2 still rewinds to the measure start. Staff 2 has no following backup, so nothing to do."""
+    """Add delta to the cross-staff <backup> so staff 2 still rewinds to the measure start after a
+    staff-1 fill change. Only called once _backup_adjustable(bar, delta) has confirmed this is safe,
+    so the write always succeeds; staff 2 has no following backup, so it is a no-op there."""
     if bar.staff != 1 or bar.backup_el is None or delta == 0:
         return
     dur_el = bar.backup_el.find("duration")
     cur = _int_text(dur_el)
-    if dur_el is not None and cur is not None and cur + delta > 0:
+    if dur_el is not None and cur is not None:
         dur_el.text = str(cur + delta)
 
 
@@ -352,6 +370,11 @@ def _repair_bar(bar: _Bar) -> bool:
     if deficit == 0:
         return False
 
+    # Decline up front if a staff-1 edit could not keep the cross-staff backup consistent, so the
+    # rest edit and the backup update stay atomic (never a committed half-edit that desyncs staff 2).
+    if not _backup_adjustable(bar, deficit):
+        return False
+
     rest_slot = _pick_rest_slot(bar, deficit)
     if rest_slot is not None:
         # Pitch-safe: grow / shrink the rest to absorb the deficit. A rest shrunk exactly to zero
@@ -359,8 +382,8 @@ def _repair_bar(bar: _Bar) -> bool:
         new_rest = rest_slot.dur + deficit
         if new_rest > 0:
             _set_slot_duration(rest_slot, new_rest)
-        else:
-            _remove_slot(bar, rest_slot)
+        elif not _remove_slot(bar, rest_slot):
+            return False  # removal failed -> do not bump the backup (keep the edit atomic).
         _fix_backup(bar, deficit)
         return True
 

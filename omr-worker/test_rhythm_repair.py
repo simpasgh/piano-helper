@@ -144,6 +144,16 @@ class TestRestResize:
         xml = _xml([{"staff1": [_note(8, "C"), _note(8, "D"), _note(4, "E"), _rest(2)], "staff2": []}])
         assert _open(xml) == xml
 
+    def test_staff1_rest_grow_adjusts_backup(self):
+        # A staff-1 REST that grows (not a pad) must also grow the cross-staff <backup> so staff 2
+        # stays anchored at the measure start. [quarter, rest(4)] = 8, short by 8 -> rest 4 -> 12.
+        xml = _xml([{"staff1": [_note(4, "C"), _rest(4)],
+                     "staff2": [_note(4, "C", 3), _note(4, "D", 3), _note(4, "E", 3), _note(4, "F", 3)]}])
+        assert _onsets(xml, 1, 2) == [0, 4, 8, 12]
+        out = _open(xml)
+        assert _rest_durs(out, 1, 1) == [12]                       # rest grew 4 -> 12
+        assert _onsets(out, 1, 2) == [0, 4, 8, 12]                 # backup grew with it
+
 
 class TestBackupAdjustment:
     def test_staff1_pad_preserves_staff2_onsets(self):
@@ -191,6 +201,16 @@ class TestCorroboration:
         out = rhythm_repair.repair_measure_durations(_xml(measures))
         assert _durs(out, 3, 1, pitched_only=True) == [12, 2]      # measure 3 notes untouched
         assert sum(_durs(out, 3, 1)) == 16                         # but completed via a rest
+
+    def test_bails_when_too_many_overfull_bars(self):
+        # The over_max guard: capacity 16 is hit EXACTLY by 50% of bars (>= exact_min) but 50%
+        # OVERFLOW it (> over_max 0.2), the fingerprint of a wrong meter. So the capacity is NOT
+        # trusted and the whole piece is a no-op (no rest is shrunk on the overfull bars).
+        over = {"staff1": [_note(8, "C"), _note(8, "D"), _note(4, "E")],      # 20, overfull
+                "staff2": [_note(8, "C", 3), _note(8, "E", 3)]}               # 16, exact
+        measures = [_good(), over, over, over, _good()]
+        xml = _xml(measures)
+        assert rhythm_repair.repair_measure_durations(xml) == xml
 
 
 class TestSkips:
@@ -258,7 +278,46 @@ def test_repair_is_metric_neutral_and_completes_a_dropped_note_bar():
     assert _durs(repaired, 3, 1, pitched_only=True) == [8, 4]   # surviving notes never stretched
 
 
+class TestRobustLayouts:
+    def test_declines_when_backup_is_malformed(self):
+        # A staff-1 edit must keep the cross-staff <backup> consistent. With a well-formed backup the
+        # short staff-1 bar is completed; but if the <backup> has no <duration> the repair cannot
+        # bump it, so it DECLINES that bar rather than commit a desyncing half-edit.
+        xml = _xml([{"staff1": [_note(12, "C"), _note(2, "D")],
+                     "staff2": [_note(4, "C", 3), _note(4, "D", 3), _note(4, "E", 3), _note(4, "F", 3)]}])
+        assert sum(_durs(_open(xml), 1, 1)) == 16                  # well-formed: completed
+        malformed = _strip_backup_duration(xml)
+        assert _open(malformed) == malformed                       # malformed: declined, untouched
+
+    def test_pad_inserted_before_trailing_barline(self):
+        # The trailing pad rest must land inside the bar (after the last note), not after a closing
+        # <barline> that follows the notes.
+        xml = _append_barline(
+            _xml([{"staff1": [_note(4, "C"), _note(4, "D"), _note(4, "E")], "staff2": []}]))
+        children = list(ET.fromstring(_open(xml)).find(".//measure"))
+        assert children[-1].tag == "barline"                       # barline stays last in the bar
+        assert children[-2].tag == "note" and children[-2].find("rest") is not None  # pad before it
+
+
 # --- low-level fixtures that need raw XML ------------------------------------------------
+
+def _strip_backup_duration(xml):
+    """Remove the <duration> child from every <backup> (simulates a malformed engine backup)."""
+    root = ET.fromstring(xml)
+    for b in root.iter("backup"):
+        d = b.find("duration")
+        if d is not None:
+            b.remove(d)
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def _append_barline(xml):
+    """Append a closing <barline location='right'> to the (first) measure."""
+    root = ET.fromstring(xml)
+    bl = ET.SubElement(root.find(".//measure"), "barline", {"location": "right"})
+    ET.SubElement(bl, "bar-style").text = "light-heavy"
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
 
 def _multivoice_doc():
     """One 4/4 measure whose staff 1 holds TWO voices (voice 1: 4 quarters; voice 2: 4 quarters)
