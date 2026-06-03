@@ -4,6 +4,34 @@ Self-contained plan so any session (esp. the one on the GPU PC) can pick up and 
 without the prior machine's local memory. Newest status at the top. NO em dashes in generated
 text (project rule). Ship every code change through the gated flow (see "Constraints" below).
 
+## STATUS: fusion borrows Clarity's real TIME SIGNATURE (rhythm-repair now helps non-4/4) (2026-06-04)
+
+Shipped PR #191; deployed to cx33 (ed1f003). The geom+Clarity fusion (prod-primary, `OMR_GEOM_FUSION=1`)
+now declares Clarity's real `<time>` instead of hardcoding 4/4. `fusion._read_time` (never-raise,
+mirrors `_read_fifths`) reads Clarity's `<beats>/<beat-type>`, threaded through `_build` into
+`score_json_to_musicxml`; falls back to 4/4 on a no/garbage/senza-misura `<time>`. `divisions` stays 4
+(LOAD-BEARING: the borrowed durations are `omr_eval._dur16` SIXTEENTHS and divisions=4 makes a duration
+value of N == N ticks, so the borrowed numbers are usable as-is; only `<time>` changes). The KEY still
+comes from geom; a non-C key borrow remains the next enhancement, pending a non-C validation piece (all
+4 eval pieces are C major). The time sig is meter-agnostic to `omr_eval`'s per-(measure,staff)
+(midi,dur16) scoring, so this CANNOT regress note_f1/note_dur_f1/duration_acc.
+
+WHY IT MATTERS: rhythm_repair only repairs toward a CORROBORATED capacity (a meter a strong majority of
+bars already sum to), so on the user's 2/4 "liminality" (which fusion declared 4/4) the repair was a
+clean no-op. Borrowing the real meter lets it engage on non-4/4 pieces.
+
+VALIDATED on the box (`fusion_repair_eval.py`, deployed code): liminality flips from `cap=[] / 0/0 -> 0/0`
+to `cap=[8] / 1/56 -> 0/56` (its one incomplete bar completed); NO regression on note_dur_f1 /
+duration_acc / note_f1 on any of the 4 pieces.
+
+CLARITY METER-DETECTION NUANCE (surfaced, not a blocker): Clarity reads tctab and icarus as 2/2 (truth
+4/4), reverie as 4/4, liminality as 2/4. At divisions=4, 2/2 and 4/4 share capacity 16, so borrowing
+2/2 for tctab/icarus is metric-neutral and the repair behavior is byte-identical (same incomplete-bar
+counts); only the printed time-signature glyph differs (cut-time vs 4/4). This is a Clarity
+meter-detection limit, not a fusion one. A capacity-aware refinement (keep the 4/4 default when
+Clarity's borrowed meter is metrically equivalent to it, so a cut-time misread cannot relabel a genuine
+4/4 piece) is the obvious follow-up if the cut-time glyph on those pieces is undesirable.
+
 ## STATUS: FULL-SYMBOL detector DATA PIPELINE shipped (steps 1-2); GPU train + decode is step 3 (2026-06-04)
 
 The moat's data foundation is in. Two gated PRs merged: rich synthetic generation (#186) and
@@ -101,8 +129,8 @@ the missing beat shown as a rest (the user's reported symptom), guaranteed never
 
 NEXT (for a real rhythm metric win): needs per-note duration CONFIDENCE from the engine (then a
 targeted low-confidence-only edit is safe) or recovering the DROPPED notes (a detection problem),
-not a bar-sum post-transform. fusion also hardcodes 4/4 + divisions=4; borrowing Clarity's real
-<time> would let the repair help non-4/4 pieces (liminality) and is the cheap next lever.
+not a bar-sum post-transform. (UPDATE: borrowing Clarity's real `<time>` SHIPPED in PR #191, so the
+repair now helps non-4/4 pieces like liminality; see the top STATUS. divisions still stays 4.)
 
 ## STATUS: PROGRESSIVE delivery shipped (notes in ~5s, rhythm refines) (2026-06-04)
 
