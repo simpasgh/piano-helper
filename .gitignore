@@ -11,3 +11,12 @@ dist-ssr
 # Python
 __pycache__/
 *.pyc
+.venv/
+.pytest_cache/
+
+# OMR detector training: venv, pretrained/trained weights, datasets, run outputs are heavy and
+# machine-local. The generator/trainer/eval CODE is committed; the artifacts it produces are not.
+# (Datasets + runs live outside the repo under ~/omr-train; weights can land in CWD on download.)
+*.pt
+omr-worker/runs/
+omr-worker/datasets/
