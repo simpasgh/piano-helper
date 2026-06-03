@@ -774,6 +774,60 @@ def test_geom_fallback_pdf_rasterizes_lazily(tmp_path, monkeypatch):
     assert seen["image"] == "/fake/stitched.png"  # geom got the stitched raster, not a stale path
 
 
+def test_geom_primary_truthy_parsing(monkeypatch):
+    monkeypatch.delenv("OMR_GEOM_PRIMARY", raising=False)
+    assert worker.geom_primary() is False
+    for on in ("1", "true", "TRUE", " True "):
+        monkeypatch.setenv("OMR_GEOM_PRIMARY", on)
+        assert worker.geom_primary() is True, on
+    for off in ("0", "false", "", "garbage"):
+        monkeypatch.setenv("OMR_GEOM_PRIMARY", off)
+        assert worker.geom_primary() is False, off
+
+
+def test_geom_primary_wins_first(tmp_path, monkeypatch):
+    # OMR_GEOM + OMR_GEOM_PRIMARY: geom runs FIRST and wins; NO other engine runs.
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_PRIMARY", "1")
+    geom_out = tmp_path / "geom.musicxml"
+    geom_out.write_text("<score>geom</score>")
+    monkeypatch.setattr(worker, "run_geom", lambda *a, **k: str(geom_out))
+
+    def must_not_run(*a, **k):
+        raise AssertionError("no other engine may run when geom (primary) produced a result")
+
+    monkeypatch.setattr(worker, "_select_ensemble", must_not_run)
+    monkeypatch.setattr(worker, "_select_legacy", must_not_run)
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"\x89PNG fake")
+    _drive_process_job(monkeypatch, client, is_pdf=False)
+    assert client.put_body == b"<score>geom</score>"
+
+
+def test_geom_primary_declines_falls_through_to_ensemble(tmp_path, monkeypatch):
+    # OMR_GEOM_PRIMARY on but geom declines (None): the existing ensemble still runs (never-worse
+    # for the jobs geom cannot handle, even in primary mode).
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_PRIMARY", "1")
+    monkeypatch.setenv("OMR_ENSEMBLE", "1")
+    monkeypatch.setattr(worker, "run_geom", lambda *a, **k: None)
+    ran = {"ensemble": False}
+
+    def fake_ensemble(*a, **k):
+        ran["ensemble"] = True
+        return None, None
+
+    monkeypatch.setattr(worker, "_select_ensemble", fake_ensemble)
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+
+    client = _FakeClient(input_bytes=b"\x89PNG fake")
+    _drive_process_job(monkeypatch, client, is_pdf=False)
+    assert ran["ensemble"] is True
+
+
 def test_llm_falls_back_to_engines_when_it_returns_none(tmp_path, monkeypatch):
     # If the LLM returns None (any failure), the worker falls back to the existing engines.
     monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: True)
