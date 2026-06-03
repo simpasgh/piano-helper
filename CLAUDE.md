@@ -52,10 +52,11 @@ Full SOP: [docs/workflow.md](docs/workflow.md). Non-negotiables:
 5. **Release = `/release`.** It rebases, runs tests + review, opens/merges the PR, then
    deploy + a **prod smoke test** (`/smoke-test`) run automatically. Investigate any smoke
    failure immediately; `main` must stay green.
-6. **Live QA after merge.** CI and the smoke test do not click the actual feature. The
-   **QA role** drives every user-visible change in a real browser on `main` and files a bug
-   on any failure. A change is "done" only after this pass, not when CI goes green. See the
-   post-merge QA gate in [docs/workflow.md](docs/workflow.md).
+6. **Live QA is on demand, not a gate.** A change is "done" when its tests + CI + review pass.
+   CI and the smoke test do not click the actual feature, so the **QA role** can drive a
+   user-visible change in a real browser when you want that extra check (risky/visual changes,
+   or on request), but it is **not required** for a change to ship. See
+   [docs/workflow.md](docs/workflow.md).
 
 Do not push or merge directly to `main` outside this flow.
 

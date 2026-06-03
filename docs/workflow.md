@@ -58,22 +58,24 @@ Run **`/release [version]`**. It performs, in order:
 7. **Prod smoke test** runs against the live `*.pages.dev` URL (`/smoke-test`). Any failure
    is a release-blocker; fix forward immediately so `main` stays green.
 
-## Post-merge live QA gate (mandatory)
+## Live QA (on demand, not a gate)
 
 CI proves typecheck/build/unit tests; the prod smoke test only proves the app loads and
 plays. Neither one exercises the actual feature, so a change can be fully green and still be
-visibly broken. To close that gap, **every user-visible change gets a live QA pass on
-`main` after merge**, owned by the **QA** role:
+visibly broken. The **QA** role exists to close that gap by driving the real feature in a
+browser, but this is **run on demand, not a mandatory gate**: a change is "done" when its
+tests, CI, and review pass. Reach for a live QA pass when a change is risky, visual, or
+user-facing enough to warrant eyes on the real behavior, or whenever it is requested.
+
+When you do run one:
 
 1. Sync the preview-capable worktree to the just-merged `main`.
 2. Drive the app in a real browser: load a representative score, then actually click,
    toggle, seek, and play the specific feature the change shipped.
 3. Capture evidence (screenshot of the relevant state + a clean browser console) and check
    the standing checklist in [docs/context/qa.md](context/qa.md) for regressions.
-4. PASS or FAIL. On FAIL, file or reopen a bug immediately and fix forward; `main` stays
-   green. Never record a visual/interactive pass that was not actually observed.
-
-A change is only "done" once it has cleared this gate, not when CI goes green.
+4. PASS or FAIL. On FAIL, file or reopen a bug and fix forward; `main` stays green. Never
+   record a visual/interactive pass that was not actually observed.
 
 ## Post-release backlog reconciliation (mandatory)
 
