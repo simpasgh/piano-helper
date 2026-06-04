@@ -318,12 +318,19 @@
           </div>
         </div>
       </header>
-      <div id="sheet">
+      <!-- #sheet-pane wraps #sheet and the docked #edit-toolbar so the toolbar lives OUTSIDE the
+           OSMD-owned #sheet. OSMD's load/render clears #sheet's children (it detaches anything
+           inside, which is why #verovio-host is re-appended on each render), so a static toolbar
+           nested in #sheet would be silently removed on a large score's autoResize re-render and
+           never reappear when un-hidden. Keeping it as a flex sibling of #sheet makes show/hide a
+           reliable [hidden] toggle on a node OSMD can never touch. -->
+      <div id="sheet-pane">
         <!-- Docked edit toolbar (Smart Edit Mode): shown only in edit mode, anchored to the
-             top of the sheet pane. Undo/redo sit at the LEADING edge (a fixed history spot); the
-             per-selection cluster (readout + pitch down/up + delete) shows when a note is selected
-             on EITHER surface and acts on the one shared selection. Delete is model-level, dual-
-             surface, undoable, and fixed-bar (the note becomes a rest; the measure still adds up). -->
+             top of the sheet pane (the staff scrolls beneath it). Undo/redo sit at the LEADING edge
+             (a fixed history spot); the per-selection cluster (readout + pitch down/up + delete)
+             shows when a note is selected on EITHER surface and acts on the one shared selection.
+             Delete is model-level, dual-surface, undoable, and fixed-bar (the note becomes a rest;
+             the measure still adds up). -->
         <div id="edit-toolbar" class="edit-toolbar" role="toolbar" aria-label="Edit tools" hidden>
           <div class="edit-tool-group">
             <button id="undo-btn" class="edit-tool-btn" type="button" title="Undo (Ctrl+Z)" aria-label="Undo" disabled aria-disabled="true">
@@ -379,6 +386,7 @@
             </button>
           </div>
         </div>
+        <div id="sheet"></div>
       </div>
       <!-- Verovio attribution (LGPL-3.0 obligation): shown only while the Verovio edit view
            is active. Hidden by default so the normal OSMD player is unchanged. -->

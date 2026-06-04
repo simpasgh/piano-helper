@@ -7,6 +7,8 @@
 // sync), and the handle <-> VisNote mapping that keeps the two surfaces consistent.
 
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   parseScoreModel,
   midiFromPitch,
@@ -19,6 +21,7 @@ import {
   buildHandleToVisIndex,
   spellingFromPitch,
   restDurationName,
+  noteTypeForDuration,
   type ModelPitch,
 } from "./edit-model";
 import { FIRST_MIDI, LAST_MIDI } from "./piano";
@@ -761,5 +764,175 @@ describe("restDurationName", () => {
   it("falls back to a generic 'rest' for an unknown/missing type", () => {
     expect(restDurationName("")).toBe("rest");
     expect(restDurationName("weird")).toBe("rest");
+  });
+});
+
+// ===== <type> inference from <duration> (the no-<type> OMR bug) =====
+//
+// Real OMR (e.g. the user's `reverie`) emits notes with a <duration> but NO <type>. Verovio then
+// draws every such note at a uniform default value (wrong rhythm) AND computes a wrong timemap, so
+// the (midi, onset) click map diverges and click-to-select fails; OSMD (the read-only view) infers
+// from <duration> and renders correctly, which is why only EDIT mode was broken. The model now
+// infers + inserts a <type> (and any <dot>) during the parse so Verovio receives a valid value.
+
+const NOTE_VALUE_TOKENS = ["breve", "whole", "half", "quarter", "eighth", "16th", "32nd", "64th"];
+
+describe("noteTypeForDuration (duration -> note value, key-sig-independent)", () => {
+  it("maps the standard plain values at divisions=4 (the reverie divisions)", () => {
+    // q = durDivs / divisions. The reverie durations: 2->eighth, 4->quarter, 8->half, 16->whole.
+    expect(noteTypeForDuration(2, 4)).toEqual({ type: "eighth", dots: 0 });
+    expect(noteTypeForDuration(4, 4)).toEqual({ type: "quarter", dots: 0 });
+    expect(noteTypeForDuration(8, 4)).toEqual({ type: "half", dots: 0 });
+    expect(noteTypeForDuration(16, 4)).toEqual({ type: "whole", dots: 0 });
+  });
+
+  it("maps every standard value at divisions=1 (1 div = a quarter)", () => {
+    expect(noteTypeForDuration(8, 1)).toEqual({ type: "breve", dots: 0 }); // double whole = 8q
+    expect(noteTypeForDuration(4, 1)).toEqual({ type: "whole", dots: 0 });
+    expect(noteTypeForDuration(2, 1)).toEqual({ type: "half", dots: 0 });
+    expect(noteTypeForDuration(1, 1)).toEqual({ type: "quarter", dots: 0 });
+    expect(noteTypeForDuration(0.5, 1)).toEqual({ type: "eighth", dots: 0 });
+    expect(noteTypeForDuration(0.25, 1)).toEqual({ type: "16th", dots: 0 });
+    expect(noteTypeForDuration(0.125, 1)).toEqual({ type: "32nd", dots: 0 });
+    expect(noteTypeForDuration(0.0625, 1)).toEqual({ type: "64th", dots: 0 });
+  });
+
+  it("maps dotted values (1.5x base = one dot, 1.75x base = two dots)", () => {
+    // divisions=4: a dotted half is 3 quarters = 12 divs; the reverie's duration-12 rests are these.
+    expect(noteTypeForDuration(12, 4)).toEqual({ type: "half", dots: 1 }); // 3q
+    expect(noteTypeForDuration(6, 4)).toEqual({ type: "quarter", dots: 1 }); // 1.5q dotted quarter
+    expect(noteTypeForDuration(3, 4)).toEqual({ type: "eighth", dots: 1 }); // 0.75q dotted eighth
+    // double dotted: a double-dotted half = 2 + 1 + 0.5 = 3.5q = 14 divs at divisions=4.
+    expect(noteTypeForDuration(14, 4)).toEqual({ type: "half", dots: 2 });
+    // dotted whole = 6q = 6 divs at divisions=1.
+    expect(noteTypeForDuration(6, 1)).toEqual({ type: "whole", dots: 1 });
+  });
+
+  it("prefers the longest base + fewest dots for an ambiguous length", () => {
+    // 3 quarters could be a dotted half (half + 1 dot) - the conventional spelling - never a
+    // "quarter + ..."; the longest base that yields an integral dot count wins.
+    expect(noteTypeForDuration(3, 1)).toEqual({ type: "half", dots: 1 });
+    // A plain 2 quarters is a half (0 dots), not a dotted-something.
+    expect(noteTypeForDuration(2, 1)).toEqual({ type: "half", dots: 0 });
+  });
+
+  it("falls back to the NEAREST base (no dots) for a non-standard duration, never crashing", () => {
+    // A triplet eighth at divisions=12 is 4 divs = 1/3 quarter (~0.333q), between an eighth (0.5q,
+    // delta 0.167) and a 16th (0.25q, delta 0.083): the 16th is NEAREST. No exception, valid, 0 dots.
+    expect(noteTypeForDuration(4, 12)).toEqual({ type: "16th", dots: 0 });
+    // A triplet quarter (8 divs at divisions=12 = 2/3 quarter, ~0.667q) is nearest an eighth (0.5q,
+    // delta 0.167) over a quarter (1q, delta 0.333).
+    expect(noteTypeForDuration(8, 12)).toEqual({ type: "eighth", dots: 0 });
+    // A zero / negative / divisions-0 duration does not throw and yields a valid token.
+    expect(() => noteTypeForDuration(0, 4)).not.toThrow();
+    expect(() => noteTypeForDuration(2, 0)).not.toThrow();
+    expect(NOTE_VALUE_TOKENS).toContain(noteTypeForDuration(0, 4).type);
+    expect(NOTE_VALUE_TOKENS).toContain(noteTypeForDuration(2, 0).type);
+  });
+});
+
+// The synthetic no-<type> grand-staff fixture: a HALF + QUARTERS + WHOLE + a DOTTED-HALF note + a
+// QUARTER REST, two measures, none carrying a <type> (only <duration>). This is the committed
+// regression for the real-world reverie case at unit scale; the real reverie file is exercised
+// through Verovio in edit-model-integration.test.ts.
+const NO_TYPE_XML = readFileSync(
+  join(process.cwd(), "src", "test-fixtures", "no-type-grand-staff.musicxml"),
+  "utf8",
+);
+
+describe("parseScoreModel infers <type> for no-<type> notes/rests (OMR shape)", () => {
+  it("inserts the correct <type> (and <dot>) into each note + rest, computed from <duration>", () => {
+    const model = parseScoreModel(NO_TYPE_XML);
+    const xml = model.serialize();
+    const doc = new DOMParser().parseFromString(xml, "application/xml");
+
+    const typeOf = (step: string, octave: string) => {
+      const note = Array.from(doc.getElementsByTagName("note")).find(
+        (n) =>
+          n.getElementsByTagName("step").item(0)?.textContent === step &&
+          n.getElementsByTagName("octave").item(0)?.textContent === octave,
+      );
+      return {
+        type: note?.getElementsByTagName("type").item(0)?.textContent ?? null,
+        dots: note?.getElementsByTagName("dot").length ?? 0,
+      };
+    };
+
+    // divisions=2: C5 half (dur 4), D5/E5 quarters (dur 2), C3/E3 wholes (dur 8), G5 dotted-half
+    // (dur 6 = 3 quarters = half + one dot).
+    expect(typeOf("C", "5")).toEqual({ type: "half", dots: 0 });
+    expect(typeOf("D", "5")).toEqual({ type: "quarter", dots: 0 });
+    expect(typeOf("E", "5")).toEqual({ type: "quarter", dots: 0 });
+    expect(typeOf("C", "3")).toEqual({ type: "whole", dots: 0 });
+    expect(typeOf("E", "3")).toEqual({ type: "whole", dots: 0 });
+    expect(typeOf("G", "5")).toEqual({ type: "half", dots: 1 }); // dotted half
+
+    // The quarter REST (dur 2) is typed too, so its announce names it and a fill copies the type.
+    const restNote = Array.from(doc.getElementsByTagName("rest")).map((r) => r.parentElement!)[0];
+    expect(restNote.getElementsByTagName("type").item(0)?.textContent).toBe("quarter");
+    expect(model.restHandles[0].type).toBe("quarter");
+  });
+
+  it("emits a valid MusicXML child order: <type> after <duration>/<staff-less prefix>, <dot> after <type>", () => {
+    const model = parseScoreModel(NO_TYPE_XML);
+    const doc = new DOMParser().parseFromString(model.serialize(), "application/xml");
+    const g5 = Array.from(doc.getElementsByTagName("note")).find(
+      (n) => n.getElementsByTagName("step").item(0)?.textContent === "G",
+    )!;
+    const order = Array.from(g5.children).map((c) => c.tagName.toLowerCase());
+    // The fixture note is <pitch><duration><staff>; the inserted <type> must sit BEFORE <staff> and
+    // each <dot> immediately AFTER <type> (valid DTD order: ... duration, type, dot*, ... staff).
+    const di = order.indexOf("duration");
+    const ti = order.indexOf("type");
+    const doti = order.indexOf("dot");
+    const si = order.indexOf("staff");
+    expect(di).toBeGreaterThanOrEqual(0);
+    expect(ti).toBeGreaterThan(di); // type after duration
+    expect(doti).toBe(ti + 1); // the dot immediately follows the type
+    expect(si).toBeGreaterThan(doti); // staff after the dot (it sits late in the content model)
+  });
+
+  it("the inferred onsets reflect the TRUE durations (so the falling notes + click map line up)", () => {
+    // The model onsets come from <duration>, so they were already right; this pins the values the
+    // Verovio timemap must now also produce (proven in the integration test). 4/4 at 120bpm.
+    const model = parseScoreModel(NO_TYPE_XML);
+    // C5 half @0, D5 quarter @1.0, E5 quarter @1.5 (m1 RH); C3 whole @0, E3 whole @2.0 (LH);
+    // G5 dotted-half @2.0 (m2 RH); quarter rest @3.5 (m2 RH, after the 3-quarter dotted half).
+    const at = (midi: number) => model.handles.filter((h) => h.midi === midi).map((h) => h.onsetSec);
+    expect(at(72)).toEqual([0]); // C5
+    expect(at(74)).toEqual([1.0]); // D5
+    expect(at(76)).toEqual([1.5]); // E5
+    expect(at(79)).toEqual([2.0]); // G5 dotted half, measure 2
+    expect(model.restHandles[0].onsetSec).toBeCloseTo(3.5, 6); // quarter rest after the dotted half
+  });
+
+  it("does NOT modify a note that already HAS a <type> (typed scores are untouched)", () => {
+    // GRAND_STAFF_XML carries an explicit <type> on every note. Inference must be a strict no-op:
+    // no extra <type>/<dot> added, and the existing tokens preserved verbatim.
+    const before = new DOMParser().parseFromString(GRAND_STAFF_XML, "application/xml");
+    const beforeTypes = Array.from(before.getElementsByTagName("type")).map((t) => t.textContent);
+    const beforeDots = before.getElementsByTagName("dot").length;
+    const model = parseScoreModel(GRAND_STAFF_XML);
+    const after = new DOMParser().parseFromString(model.serialize(), "application/xml");
+    const afterTypes = Array.from(after.getElementsByTagName("type")).map((t) => t.textContent);
+    expect(afterTypes).toEqual(beforeTypes); // same count, same tokens, same order
+    expect(after.getElementsByTagName("dot").length).toBe(beforeDots);
+  });
+
+  it("is idempotent across a structural edit (re-indexing does not double-insert a <type>)", () => {
+    // reindexHandles() runs again after a delete; addTypeIfMissing must be a no-op the 2nd time
+    // (the note now has a <type>), so a delete + restore leaves exactly ONE <type> per note.
+    const model = parseScoreModel(NO_TYPE_XML);
+    const typesAfterParse = new DOMParser()
+      .parseFromString(model.serialize(), "application/xml")
+      .getElementsByTagName("type").length;
+    const rec = model.deleteNote(0); // triggers a reindex
+    model.restoreNote(rec!); // and another
+    const typesAfterEdit = new DOMParser()
+      .parseFromString(model.serialize(), "application/xml")
+      .getElementsByTagName("type").length;
+    // The delete turns C5 (a standalone note) into a rest, then restore brings it back, so the
+    // pitched-note + rest TOTAL is unchanged: the <type> count is identical, never doubled.
+    expect(typesAfterEdit).toBe(typesAfterParse);
   });
 });

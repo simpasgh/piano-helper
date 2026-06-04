@@ -324,6 +324,107 @@ export function restDurationName(type: string): string {
   return name ? `${name} rest` : "rest";
 }
 
+// The standard MusicXML note-value tokens, each with its length in QUARTER-NOTE units. A whole is
+// 4 quarters, an eighth half a quarter, etc. `breve` (double whole = 8q) is included because the
+// model's REST_TYPE_NAMES recognises it; nothing shorter than a 64th is emitted by our OMR.
+const NOTE_VALUE_QUARTERS: ReadonlyArray<{ type: string; quarters: number }> = [
+  { type: "breve", quarters: 8 },
+  { type: "whole", quarters: 4 },
+  { type: "half", quarters: 2 },
+  { type: "quarter", quarters: 1 },
+  { type: "eighth", quarters: 0.5 },
+  { type: "16th", quarters: 0.25 },
+  { type: "32nd", quarters: 0.125 },
+  { type: "64th", quarters: 0.0625 },
+];
+
+// The inferred note-value (base <type> + dot count) for a duration expressed in divisions. Real OMR
+// (and some publishers) emit a bare `<note>` with a `<duration>` but NO `<type>`; Verovio then draws
+// EVERY such note at a uniform default value (wrong rhythm) and computes a wrong timemap, while OSMD
+// infers the value from <duration> and renders correctly. So when a note/rest lacks a <type> we
+// compute one here from `durDivs / divisions` (quarter-note units) and insert it (see addTypeIfMissing).
+//
+// Mapping: a quarter value q matches a base whose length is q exactly (0 dots), or base*1.5 (one dot),
+// or base*1.75 (two dots) - the only durations a single notehead can spell. A dot adds half the base,
+// a second dot a quarter, so a dotted half = 2 + 1 = 3q, a double-dotted half = 2 + 1 + 0.5 = 3.5q. We
+// scan bases longest-first and take the first that yields a non-negative integral dot count (preferring
+// FEWER dots and the LONGEST base, the conventional spelling). A duration that matches no standard base
+// (a tuplet remainder, or a duration of 0) falls back to the base whose plain length is NEAREST q, with
+// 0 dots, so the function NEVER throws and Verovio always receives a valid <type>.
+export function noteTypeForDuration(
+  durDivs: number,
+  divisions: number,
+): { type: string; dots: number } {
+  const q = divisions > 0 ? durDivs / divisions : 0;
+  const EPS = 1e-6;
+  if (q > EPS) {
+    // Try 0, 1, then 2 dots so the fewest dots win for a given base; bases are longest-first.
+    for (let dots = 0; dots <= 2; dots++) {
+      // A base with `dots` dots spans base * (2 - 2^-dots) quarters: 1x, 1.5x, 1.75x.
+      const factor = 2 - Math.pow(2, -dots);
+      for (const { type, quarters } of NOTE_VALUE_QUARTERS) {
+        if (Math.abs(quarters * factor - q) < EPS) return { type, dots };
+      }
+    }
+  }
+  // No standard (possibly dotted) value matched: pick the base whose plain length is nearest q. This
+  // keeps a tuplet/odd duration renderable (approximate value, no dots) instead of crashing or leaving
+  // Verovio to guess. For q <= 0 this yields the shortest base, a harmless default.
+  let nearest = NOTE_VALUE_QUARTERS[NOTE_VALUE_QUARTERS.length - 1];
+  let bestDelta = Infinity;
+  for (const cand of NOTE_VALUE_QUARTERS) {
+    const delta = Math.abs(cand.quarters - q);
+    if (delta < bestDelta) {
+      bestDelta = delta;
+      nearest = cand;
+    }
+  }
+  return { type: nearest.type, dots: 0 };
+}
+
+// Insert an inferred `<type>` (and any `<dot>` elements) into a `<note>` that LACKS a `<type>`, so
+// Verovio engraves the right rhythm and computes a correct timemap. A no-op when the note ALREADY has
+// a `<type>` (so `<type>`-carrying scores - the demo, every prior fixture, publisher exports - are
+// untouched, byte for byte). Children are placed in valid MusicXML content order: `<type>` follows
+// `<duration>`/`<tie>`/`<voice>` and precedes `<dot>`*/`<accidental>`/`<notations>`/`<staff>`; each
+// `<dot>` follows the `<type>`. Verovio is lenient about order, but we emit a valid document. Pure
+// aside from mutating the passed element. Applies to pitched notes AND rests (both can omit a type).
+function addTypeIfMissing(noteEl: Element, durDivs: number, divisions: number): void {
+  if (child(noteEl, "type")) return; // already typed: leave the note exactly as it is
+  const { type, dots } = noteTypeForDuration(durDivs, divisions);
+  const doc = noteEl.ownerDocument;
+  const typeEl = doc.createElement("type");
+  typeEl.textContent = type;
+  // <type> goes after <voice> (or <tie>/<duration>/<rest>/<pitch> if no <voice>): insert before the
+  // first child that must follow <type> (<dot>, <accidental>, <notations>, <staff>, <beam>, <stem>,
+  // <lyric>); else append. This keeps the DTD child order valid without depending on what is present.
+  const AFTER_TYPE = new Set([
+    "dot",
+    "accidental",
+    "notations",
+    "staff",
+    "beam",
+    "stem",
+    "lyric",
+    "time-modification",
+  ]);
+  let anchor: Node | null = null;
+  for (const c of Array.from(noteEl.children)) {
+    if (AFTER_TYPE.has(c.tagName.toLowerCase())) {
+      anchor = c;
+      break;
+    }
+  }
+  noteEl.insertBefore(typeEl, anchor);
+  // <dot> elements immediately follow <type>.
+  let after: Node | null = typeEl;
+  for (let i = 0; i < dots; i++) {
+    const dotEl = doc.createElement("dot");
+    noteEl.insertBefore(dotEl, after.nextSibling);
+    after = dotEl;
+  }
+}
+
 // Parse MusicXML into the editable model. Walks each part tracking divisions and a time cursor
 // (in divisions) so every pitched <note> gets an absolute onset; chords reuse the previous
 // onset; <backup>/<forward> move the cursor; rests advance it but emit no handle. Pure aside
@@ -415,6 +516,12 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
           const isChord = child(node, "chord") !== null;
           const isRest = child(node, "rest") !== null;
           const durDivs = num(child(node, "duration"), 0);
+          // Real OMR omits <type>; without it Verovio draws a uniform default value (wrong rhythm)
+          // and a wrong timemap, breaking the (midi, onset) click map. Infer + insert a <type> here
+          // from <duration>, in the SAME walk that already knows divisions. Idempotent (a no-op once
+          // the note has a <type>), so a <type>-carrying score is untouched and re-indexing after a
+          // structural edit does not double-insert. Chord members carry their own <type> too.
+          if (durDivs > 0) addTypeIfMissing(node, durDivs, divisions);
           const onsetDivs = isChord ? prevOnset : cursor;
           // ABSOLUTE onset in seconds: the score-start clock at this measure's start, plus the
           // within-measure offset. `beat` stays measure-relative (1-based within the bar).

@@ -815,15 +815,19 @@ button:focus-visible,
     height: 24px;
   }
 
-  #sheet {
+  /* Pane height lives on #sheet-pane (the flex slot); the horizontal scroller is still #sheet. */
+  #sheet-pane {
     height: 34%;
+  }
+
+  #sheet {
     overflow-x: auto;
   }
 }
 
 /* Narrow phone: give the keyboard/visualizer a touch more vertical room. */
 @media (max-width: 380px) {
-  #sheet {
+  #sheet-pane {
     height: 30%;
   }
 }
@@ -954,9 +958,27 @@ button:focus-visible,
   display: none;
 }
 
-#sheet {
+/* #sheet-pane is the flex slot in #app's column that #sheet used to occupy: it carries the pane
+   HEIGHT (so the responsive heights below target it, not #sheet) and is the position:relative
+   stacking/containing context. It stacks #edit-toolbar (a docked strip at the top, in flow) above
+   #sheet (which fills the rest and scrolls). Putting the toolbar OUTSIDE #sheet means an OSMD
+   load/render (which clears #sheet's children) can never detach it. */
+#sheet-pane {
   position: relative;
   height: 42%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+#sheet {
+  /* position: relative keeps #sheet the offset parent for #sheet-labels and #verovio-host (both
+     position children of #sheet that must scroll with its content). */
+  position: relative;
+  /* Fills the remaining pane height under the docked toolbar and scrolls on its own. min-height:0
+     lets a flex child shrink below its content so overflow-y:auto actually scrolls. */
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   /* "Real paper" cream sheet pane: the reading-app analogue, scoped to where a light
      surface belongs (the engraved score), while the stage stays dark ebony. */
@@ -990,7 +1012,14 @@ button:focus-visible,
   text-shadow: 0 0 2px #f6f1e6, 0 0 2px #f6f1e6, 0 0 3px #f6f1e6;
 }
 
-#sheet:empty::before {
+/* Empty-pane hint. NOTE: this has been INERT since Smart Edit put a (hidden) #edit-toolbar inside
+   #sheet, which made #sheet never match :empty, so the hint has not shown on first load for a long
+   time. Moving the toolbar OUT of #sheet would resurrect it (an unrequested visible change to the
+   no-score state), so it is scoped to the wrapper to keep the empty pane blank exactly as it is
+   today: #sheet-pane always has the (hidden) #edit-toolbar + #sheet children, so :empty never
+   matches and the hint stays suppressed. Reviving the hint is a deliberate Designer call, not a
+   side effect of this toolbar fix. */
+#sheet-pane:empty::before {
   content: "Load a MusicXML file to see the score here.";
   display: block;
   color: #6f6043; /* warm brown on cream, meets AA (~4.8:1) */
@@ -1003,8 +1032,9 @@ button:focus-visible,
    wraps its SVG in an inner `div#osmdCanvasPageN` (confirmed against the installed package), and
    the note-name overlay is `#sheet-labels`; both are direct children of #sheet. So we hide every
    direct child EXCEPT the Verovio host (not destroyed, just hidden), and exiting edit mode shows
-   them again. #sheet stays non-empty, so the :empty placeholder never appears. */
-#sheet.editing > *:not(#verovio-host):not(#edit-toolbar) {
+   them again. #sheet stays non-empty, so the :empty placeholder never appears. (#edit-toolbar is
+   no longer inside #sheet, so it is unaffected by this rule.) */
+#sheet.editing > *:not(#verovio-host) {
   display: none !important;
 }
 
@@ -1079,12 +1109,13 @@ button:focus-visible,
 }
 
 /* Docked edit toolbar (Smart Edit Mode P1): a thin brass-bordered strip on the cream paper at
-   the top of the sheet pane, shown only in edit mode (main.ts un-hides it). It sticks to the
-   top of the scrolled #sheet so it stays reachable while the staff scrolls. Brass-brown ink on
-   cream matches the staff annotation world (NOT the dark-stage tokens). */
+   the top of the sheet pane, shown only in edit mode (main.ts un-hides it). It is the first flex
+   child of #sheet-pane, so it stays docked at the top while the staff scrolls beneath it in
+   #sheet (it lives OUTSIDE #sheet so an OSMD re-render can never detach it). flex-shrink:0 keeps
+   it at its natural height. Brass-brown ink on cream matches the staff annotation world (NOT the
+   dark-stage tokens). */
 .edit-toolbar {
-  position: sticky;
-  top: 0;
+  flex: 0 0 auto;
   z-index: 3; /* above the Verovio SVG, below the topbar */
   display: flex;
   align-items: center;
