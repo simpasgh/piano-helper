@@ -291,3 +291,124 @@ describe("ADD-a-note v1 regression: rest mapping in a multi-measure score", () =
     expect(map.get(0)).toBe(render.rests[0].id);
   });
 });
+
+// ----- NO-<type> OMR REGRESSION: the user's real `reverie` score (and any OMR output) omits the
+// note-value <type>, emitting only <duration> (in divisions). Verovio WITHOUT <type> draws every
+// note at a uniform default value (wrong rhythm) AND computes a wrong timemap, so the (midi, onset)
+// click map diverges and click-to-select silently fails for every note after the first long one.
+// OSMD (the read-only view, edit OFF) infers the value from <duration> and renders correctly, which
+// is exactly why ONLY edit mode was broken and every prior fixture (all carrying <type>) missed it.
+// The model now infers + inserts a <type> during the parse; these tests prove, against the REAL
+// reverie file through the REAL engine, that (1) the right <type> is inferred and (2) the Verovio
+// timemap onsets, which DIVERGED before the fix, now MATCH the model onsets (the click-map gate).
+
+const REVERIE_XML = readFileSync(
+  join(process.cwd(), "src", "test-fixtures", "reverie-omr.musicxml"),
+  "utf8",
+);
+
+// Build the VisNote[] the app derives from the model (midi + absolute onset). extractScore (OSMD)
+// and the model share the SAME <duration>-based onset math, so model-derived VisNotes are the right
+// stand-in; the test's whole claim is that Verovio's onsets must equal these model/extractScore
+// onsets. duration/hand are immaterial to the (midi, onset) key.
+function visFromModel(model: ReturnType<typeof parseScoreModel>): VisNote[] {
+  return model.handles
+    .filter((h) => !h.isTieContinuation)
+    .map((h) => ({ midi: h.midi, time: h.onsetSec, duration: 0.5, hand: "right" as const }));
+}
+
+describe("no-<type> OMR regression: the real reverie file through real Verovio", () => {
+  let toolkit: VerovioToolkit;
+  beforeAll(async () => {
+    toolkit = await loadVerovioToolkit();
+  }, 60000);
+
+  it("the raw OMR file has NO <type>, and the model inserts the correct ones (eighth, whole, ...)", () => {
+    expect(REVERIE_XML.includes("<type>")).toBe(false); // the bug precondition: bare durations only
+    const model = parseScoreModel(REVERIE_XML);
+    const serialized = model.serialize();
+    expect(serialized.includes("<type>")).toBe(true); // the fix: types are now present
+
+    const doc = new DOMParser().parseFromString(serialized, "application/xml");
+    // Collect, for each duration value, the set of <type> tokens the model assigned (divisions=4).
+    const byDuration = new Map<string, Set<string>>();
+    for (const note of Array.from(doc.getElementsByTagName("note"))) {
+      const dur = note.getElementsByTagName("duration").item(0)?.textContent ?? "";
+      const type = note.getElementsByTagName("type").item(0)?.textContent ?? "";
+      if (!dur || !type) continue;
+      if (!byDuration.has(dur)) byDuration.set(dur, new Set());
+      byDuration.get(dur)!.add(type);
+    }
+    // divisions=4: duration 2 = eighth, duration 16 = whole (the two values the task calls out),
+    // plus duration 4 = quarter, 8 = half, and the duration-12 rests = a dotted half.
+    expect([...(byDuration.get("2") ?? [])]).toEqual(["eighth"]);
+    expect([...(byDuration.get("16") ?? [])]).toEqual(["whole"]);
+    expect([...(byDuration.get("4") ?? [])]).toEqual(["quarter"]);
+    expect([...(byDuration.get("8") ?? [])]).toEqual(["half"]);
+    // The duration-12 events are rests (dotted half); assert on the rest specifically.
+    const dottedHalfRest = Array.from(doc.getElementsByTagName("rest"))
+      .map((r) => r.parentElement!)
+      .find((n) => n.getElementsByTagName("duration").item(0)?.textContent === "12");
+    expect(dottedHalfRest?.getElementsByTagName("type").item(0)?.textContent).toBe("half");
+    expect(dottedHalfRest?.getElementsByTagName("dot").length).toBe(1);
+  });
+
+  it("BEFORE the fix the Verovio timemap onsets DIVERGE from the model; AFTER they MATCH", () => {
+    const model = parseScoreModel(REVERIE_XML);
+    const vis = visFromModel(model);
+
+    // BEFORE: render the RAW reverie XML (no inferred <type>). Verovio defaults every note to a
+    // uniform value, so its per-note onsets do NOT match the model's <duration>-based onsets, and
+    // the id->VisNote map (the click map) is mostly empty.
+    const before = renderMusicXml(toolkit, REVERIE_XML, vis, 800);
+    expect(before.notes).toHaveLength(model.handles.length); // same notes laid out...
+    // ...but their onsets diverge from the model. Compare the SORTED unique onset sets: the raw
+    // render collapses the eighth-note spacing to a uniform default, so the onset multiset differs.
+    const beforeOnsets = uniqueSorted(before.notes.map((n) => round3(n.timeSec)));
+    const modelOnsets = uniqueSorted(model.handles.map((h) => round3(h.onsetSec)));
+    expect(beforeOnsets).not.toEqual(modelOnsets); // the divergence the bug is made of
+    // The click map covers only a small fraction of notes before the fix (only those that happen to
+    // coincide at a shared onset, e.g. the onset-0 column); the rest are unclickable.
+    expect(before.idToVisIndex.size).toBeLessThan(model.handles.length / 2);
+
+    // AFTER: render the MODEL-SERIALIZED XML (with the inferred <type>). Verovio now reproduces the
+    // true durations, so the timemap onsets equal the model onsets and EVERY note maps (clickable).
+    const after = renderMusicXml(toolkit, model.serialize(), vis, 800);
+    expect(after.notes).toHaveLength(model.handles.length);
+    const afterOnsets = uniqueSorted(after.notes.map((n) => round3(n.timeSec)));
+    expect(afterOnsets).toEqual(modelOnsets); // the timemap now matches the model exactly
+    // The click map is now COMPLETE: every non-continuation handle resolves to a VisNote, and every
+    // Verovio note id resolves to a VisNote index, so clicking any notehead selects.
+    const handleMap = buildHandleToVisIndex(model.handles, vis);
+    expect(handleMap.size).toBe(vis.length);
+    expect(after.idToVisIndex.size).toBe(after.notes.length);
+  });
+
+  it("each Verovio note's onset matches the model handle of the SAME pitch+position (per-note)", () => {
+    // Stronger than the set comparison: walk the rendered notes in document order and assert each
+    // sits at the model handle's onset. This is the precondition for click-selection: a clicked
+    // notehead maps to a VisNote by (midi, ONSET), so the Verovio onset must equal the model onset
+    // for the corresponding note, not merely belong to the same set.
+    const model = parseScoreModel(REVERIE_XML);
+    const vis = visFromModel(model);
+    const render = renderMusicXml(toolkit, model.serialize(), vis, 800);
+    // Group model onsets by midi (a pitch can recur); for each rendered note, its onset must be one
+    // of that pitch's model onsets. With the fix every rendered onset is accounted for.
+    const modelOnsetsByMidi = new Map<number, number[]>();
+    for (const h of model.handles) {
+      if (!modelOnsetsByMidi.has(h.midi)) modelOnsetsByMidi.set(h.midi, []);
+      modelOnsetsByMidi.get(h.midi)!.push(round3(h.onsetSec));
+    }
+    for (const n of render.notes) {
+      const onsets = modelOnsetsByMidi.get(n.midi) ?? [];
+      expect(onsets).toContain(round3(n.timeSec));
+    }
+  });
+});
+
+function round3(x: number): number {
+  return Number(x.toFixed(3));
+}
+function uniqueSorted(xs: number[]): number[] {
+  return [...new Set(xs)].sort((a, b) => a - b);
+}

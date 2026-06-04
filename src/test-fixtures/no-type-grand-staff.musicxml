@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A grand-staff score with NO <type> on any note or rest, only <duration> (in divisions), the
+     shape real OMR emits. divisions=2 so a quarter = 2 divs. Varied values exercise the
+     duration-to-type inference: a HALF (dur 4), QUARTERS (dur 2), a WHOLE (dur 8), a DOTTED HALF
+     note (dur 6 = 3 quarters), and a QUARTER REST (dur 2). Two measures so the absolute-onset path
+     is exercised too. Edit mode (Verovio) must infer the correct <type>/<dot> from <duration> so
+     the rhythm and the timemap (the click map precondition) are right; the read-only OSMD view
+     already infers from <duration>, which is why only edit mode was broken. -->
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>2</divisions>
+        <key><fifths>0</fifths></key>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <staves>2</staves>
+        <clef number="1"><sign>G</sign><line>2</line></clef>
+        <clef number="2"><sign>F</sign><line>4</line></clef>
+      </attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><staff>1</staff></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>2</duration><staff>1</staff></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>2</duration><staff>1</staff></note>
+      <backup><duration>8</duration></backup>
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>8</duration><staff>2</staff></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>G</step><octave>5</octave></pitch><duration>6</duration><staff>1</staff></note>
+      <note><rest/><duration>2</duration><staff>1</staff></note>
+      <backup><duration>8</duration></backup>
+      <note><pitch><step>E</step><octave>3</octave></pitch><duration>8</duration><staff>2</staff></note>
+    </measure>
+  </part>
+</score-partwise>
