@@ -279,6 +279,231 @@ relevant section, dated.
     barline when it overflows and there is downstream room, else clamps; no separate tie tool; v1
     crosses at most one barline. (3) Shortening removes the tie (no direct tie deletion). (4) The
     continuation must merge into one held VisNote (one attack) via the existing `mergeTiedNotes`.
+## Smart Edit Mode COMMIT v1: explicit Save / Discard when leaving edit mode (toolbar UX + a11y spec)
+
+- **2026-06-04 - Today edits apply LIVE to the player but exiting edit mode drops the in-memory
+  edit model without writing back to the retained source MusicXML, so re-entering edit silently
+  rebuilds from the ORIGINAL and prior edits vanish. We are adding explicit Save (commit the edit
+  model back to the retained source) and Discard (revert to that source) controls. I RATIFIED the
+  proposed UX with two refinements: (a) a glyph and color choice that keeps Save from colliding
+  with the existing filled-brass "Add a note" primary, and (b) Discard stays ENABLED only when
+  dirty (NOT always-on), because the Edit toggle is already the always-available way out. This
+  entry is the toolbar UX + a11y; the Tech Lead owns the dirty-flag plumbing, the write-back to
+  the retained source, and the confirm-on-exit wiring. The substrate is the docked `#edit-toolbar`
+  (index.html ~334), the `.edit-tool-btn` / `.edit-tool-btn-primary` idioms + the dimmed-disabled
+  rule (src/style.css ~1429), and the shared polite announcer `#edit-live` (which sits OUTSIDE the
+  toolbar, so it still announces AFTER the toolbar hides on exit, the load-bearing reason Save/
+  Discard announcements survive the toggle-off).**
+
+  ### Decision COMMIT-1 (PLACEMENT) - a TRAILING commit group, so the strip reads history | selection | commit.
+
+  RATIFIED. Add Save + Discard as a new TRAILING `.edit-tool-group` placed AFTER the per-selection
+  clusters, so the docked strip reads left to right: **history (undo/redo) | selection (pitch/dur/
+  delete OR add) | commit (save/discard)**. This is the right reading order: undo/redo is the
+  fine-grained "step back one edit" that lives at the leading fixed spot; the per-selection cluster
+  is the middle working area that swaps on what is selected; Save/Discard is the coarse "I am done,
+  keep or throw away EVERYTHING" that belongs at the trailing edge, the natural "exit" end of a
+  left-to-right toolbar (the same place a dialog puts OK/Cancel). It also never moves: unlike the
+  middle cluster (which shows/hides with selection), the commit group is ALWAYS present in edit
+  mode, so its position is a stable muscle-memory target.
+
+  - **Markup:** a sibling group after `#add-note`, e.g.
+    `<div class="edit-tool-group edit-commit-group"> <save> <discard> </div>`. Save FIRST, Discard
+    second (keep > throw away reads in that priority order, and Save is the affirmative default eye
+    lands on). Both are ALWAYS in the DOM in edit mode (the group is not `hidden`); only their
+    enabled state changes (COMMIT-2). Give the group its own class `edit-commit-group` so the
+    trailing divider can target it WITHOUT depending on the selection clusters being present (see
+    the divider gotcha below).
+  - **DIVIDER (important gotcha):** the existing divider rule is
+    `.edit-tool-group + .note-edit:not([hidden])`, which only fires when a `.note-edit` cluster
+    directly follows the leading group. The trailing commit group needs its OWN divider rule, and
+    it must NOT rely on adjacency to the selection clusters, because those clusters are `hidden`
+    when nothing is selected (so a sibling-adjacency selector would collapse and the divider would
+    vanish exactly when the strip is at its emptiest). Add a standalone rule keyed on the new class:
+    ```css
+    .edit-commit-group {
+      border-left: 1px solid rgba(107, 79, 31, 0.3);
+      padding-left: 0.5rem;
+      margin-left: 0.25rem;
+    }
+    ```
+    This matches the existing divider treatment (same brass-brown 0.3-alpha hairline, same 0.5rem
+    pad + 0.25rem margin) and renders the leading divider of the commit group whether or not a
+    selection cluster sits between it and history.
+
+  ### Decision COMMIT-2 (IDS + ROLES + GLYPHS) - Save is a CHECKMARK (NOT filled brass), Discard is a back-arrow. Refined to dodge the Add-a-note primary collision.
+
+  IDS (ratified the proposal): `#edit-save-btn`, `#edit-discard-btn`. Both keep the icon-only,
+  18px stroke SVG, `aria-hidden`/`focusable="false"` glyph convention the rest of the strip uses
+  (meaning lives in `title` + `aria-label`); do NOT add visible text labels, that would break the
+  uniform 32px-square (44px on phone) grid and is unnecessary once the tooltips/labels carry the
+  words. The one thing icon-only costs is glyph legibility, so the glyphs below are chosen to be
+  unambiguous at 18px.
+
+  - **COLOR refinement (the real decision):** the proposal made Save a filled `.edit-tool-btn-primary`.
+    REJECTED as-is, because the rest cluster's "Add a note" is ALSO a filled-brass
+    `.edit-tool-btn-primary`, so when a rest is selected the strip would show TWO filled-brass
+    buttons (`[Add a note]` | `[Save]`) separated only by the thin divider, reading as two
+    competing primaries with no clear hierarchy. There is only ever one "main action" the eye
+    should land on, and in a correction tool that is the contextual selection action (add/delete/
+    pitch), not the housekeeping commit. SO: **Save and Discard are BOTH ghost `.edit-tool-btn`**
+    (the brass-brown-on-cream ghost), distinguished from each other and from the rest of the strip
+    by GLYPH, not by fill. This keeps "filled brass = the single contextual primary" as a clean,
+    learnable rule (it currently means "Add a note", and would mean any future single dominant
+    action), and avoids the two-primaries clash. Save still reads as affirmative via its checkmark
+    glyph + leftmost-of-the-pair position; it does not need a fill to be found. (If usage ever shows
+    users miss Save, the lighter-weight fix is a subtle brass-brown text-underline-on-hover or a
+    1px-heavier border on Save, NOT promoting it to the filled primary that collides with Add.)
+  - **`#edit-save-btn`** - GLYPH: a **checkmark** (it reads as "commit / confirm / done" far more
+    universally than a floppy disk, which is dated and at 18px is a fiddly little square; a check is
+    instantly legible at this size and matches the affirmative meaning). Path (Heroicons-style check,
+    on the same 24x24 viewBox, `fill="none" stroke="currentColor" stroke-width="1.8"
+    stroke-linecap="round" stroke-linejoin="round"` to match the existing stroke glyphs):
+    `<path d="M5 13l4 4L19 7" />`. title = `"Save your edits (keep the changes)"`; aria-label =
+    `"Save edits"`.
+  - **`#edit-discard-btn`** - GLYPH: a **curved revert / back-arrow** (an undo-style arrow), NOT a
+    trash can and NOT a bare X. Why: a trash can already means the per-note Delete on the strip
+    (`#delete-note-btn` is the canonical trash glyph), so reusing it for Discard would be a genuine
+    icon collision a user could misread as "delete the selected note"; a bare X reads as "close /
+    dismiss this toolbar" (a chrome action) rather than "revert my edits to the original". A curved
+    revert arrow says "go back to how it was", which is exactly the semantics (Discard = revert to
+    the retained source). It is visually distinct from the straight undo/redo history arrows
+    (`#undo-btn`/`#redo-btn` use angular hook arrows) by being a rounded U-turn arrow, so it does not
+    read as "undo one step". Path (a counter-clockwise revert arrow on the 24x24 viewBox, same stroke
+    attrs): `<path d="M4 9a8 8 0 1 1-1.5 6" /><path d="M4 4v5h5" />` (an arc that loops back with a
+    small arrowhead notch at the top-left). The Tech Lead may swap in any equivalent single-stroke
+    "curved arrow returning to start" path; the load-bearing requirement is rounded-U-turn revert,
+    visibly different from both the trash glyph and the straight history arrows. title =
+    `"Discard your edits (go back to the original)"`; aria-label = `"Discard edits"`.
+
+  ### Decision COMMIT-3 (DIRTY-ENABLE) - Save AND Discard are enabled ONLY when dirty; both dim-disabled when clean. (Chose this over always-on Discard, justified.)
+
+  RATIFIED the proposal over the alternative. **"Dirty" = at least one edit command has been applied
+  since entering edit mode (or since the last successful Save).** When dirty, BOTH Save and Discard
+  are enabled. When clean, BOTH are dim-disabled using the EXACT existing idiom (`disabled` +
+  `aria-disabled="true"`, which the `.edit-tool-btn:disabled, .edit-tool-btn[aria-disabled="true"]`
+  rule renders at `opacity:.35; cursor:default`), the same way undo/redo dim when there is no
+  history. A `reflectCommitButtons(isDirty)` helper mirrors the existing `reflectUndoRedoButtons`
+  shape (set both attributes together); in fact dirty and "undo stack non-empty" move together for
+  this v1 (an edit both makes the model dirty AND pushes an undo entry; a full Discard/Save resets
+  both), so the same signal can drive all four buttons.
+
+  - **Why NOT keep Discard always-enabled as an always-available "exit editing":** the Edit toggle
+    `#edit-btn` in the header is ALREADY the always-available, always-present way to leave edit mode,
+    and when there are no unsaved changes it exits silently (COMMIT-4). So an always-on Discard would
+    be a SECOND exit affordance that is a no-op when clean, which is redundant and slightly
+    misleading (a lit "Discard" button when there is nothing to discard invites the question "discard
+    what?"). Tying Discard's enabled state to dirty keeps a tight, honest rule that matches undo/redo:
+    **these buttons light up exactly when they have something to act on.** The "always offer a way
+    out" need is genuinely met by the Edit toggle, which never disables. So when clean: leave via the
+    Edit toggle (silent); when dirty: Save or Discard (or hit the Edit toggle and get the confirm,
+    COMMIT-4). One way out always exists; the commit buttons stay meaningful.
+
+  ### Decision COMMIT-4 (TOGGLE-OFF WHILE DIRTY) - native `confirm()` is ACCEPTED for v1; clean toggle-off is silent.
+
+  RATIFIED. When the user clicks `#edit-btn` to LEAVE edit mode WITH unsaved changes, intercept and
+  prompt with a native `confirm()` before exiting; when there are NO unsaved changes, toggle-off
+  exits silently (no prompt). A native `confirm()` is acceptable for v1 and is the right call here:
+  it is the one moment in the flow where DATA LOSS is on the line, and the native dialog is modal,
+  unmissable, keyboard-accessible, screen-reader-announced, and free (zero new markup/CSS/tests, no
+  focus-trap to get right), which is exactly what a "you are about to lose work" guard should be. A
+  themed inline modal is a nice-to-have, NOT a v1 requirement, and it carries real cost (a focus-trap
+  small modal + its own tests + reduced-motion handling); defer it. (If we DO theme it later, the
+  minimal spec: a small centered card over a dimmed stage, reusing the `.scan-overlay` backdrop
+  tokens, with the exact COMMIT-4 copy, a ghost "Keep editing" button and a filled-brass "Discard
+  changes" button, focus moved to "Keep editing" on open and returned to `#edit-btn` on close, Esc =
+  Keep editing. Not now.)
+
+  - **Confirm copy (EXACT, em-dash-free):** message =
+    **"You have unsaved edits. Discard them and leave editing?"**. The native OK button = discard the
+    edits + exit edit mode; the native Cancel button = stay in edit mode (so the user can click Save).
+    Phrasing note: it names WHAT is at stake ("unsaved edits") and what OK does ("discard them"), so a
+    user who hits OK is not surprised; "leave editing" makes clear this is about exiting the mode. We
+    cannot relabel the native OK/Cancel buttons, so the message itself must make OK = discard
+    unambiguous, which this phrasing does.
+  - **Note the asymmetry:** clicking Save then the Edit toggle never prompts (Save cleared the dirty
+    flag, so the toggle-off is silent). The prompt ONLY guards the lose-your-work path.
+
+  ### Decision COMMIT-5 (ANNOUNCEMENTS) - exact `#edit-live` polite strings, em-dash-free.
+
+  All via the shared `#edit-live` polite region (it lives OUTSIDE the toolbar, so it still announces
+  after the toolbar hides on exit, which is essential for the Save/Discard-then-exit paths). Exact
+  strings:
+  - **Save success:** **"Edits saved."** (short, affirmative, done. The retained source now holds
+    the edits, so re-entering edit will rebuild from the saved version.)
+  - **Discard success (via the Discard button, staying in edit mode):** **"Edits discarded. Back to
+    the original."** (states the action AND the resulting state, so a non-sighted user knows the
+    model reverted; mirrors the "Back to the original" framing of the Discard glyph's revert
+    semantics.)
+  - **Toggle-off after confirming Discard (OK on the native dialog, which both discards AND exits):**
+    **"Edits discarded. Editing closed."** (distinct from the in-edit Discard because edit mode also
+    ended; tells the user both halves of what happened. This fires AFTER the toolbar hides, which the
+    outside-the-toolbar announcer makes reliable.)
+  - **No announcement for:** a silent clean toggle-off (nothing changed, nothing to say), or hitting
+    Cancel on the confirm (the user stays put; the absence of change is self-evident). Individual edit
+    commands keep their existing P1/P2/P3/ADD announcements unchanged; COMMIT only adds the three save/
+    discard strings above.
+
+  ### Decision COMMIT-6 (A11Y + FOCUS) - confirm disabled attrs, define focus after Save/Discard, reduced-motion is a non-issue.
+
+  - **Disabled attrs:** dim-disabled Save/Discard carry BOTH `disabled` AND `aria-disabled="true"`
+    (the same pair `reflectUndoRedoButtons` sets), so a pointer user sees the 0.35-opacity dim and an
+    AT user is told the control is unavailable. Set them together in `reflectCommitButtons`.
+  - **Focus after SAVE (button path):** the user stays IN edit mode (Save commits but does not exit),
+    Save and Discard become disabled (now clean), so KEEP focus on `#edit-save-btn` if it is still
+    focusable; but because it just went disabled, a disabled element loses focus, so MOVE focus to the
+    next sensible still-enabled control. RECOMMENDATION: move focus to `#edit-btn` (the Edit toggle in
+    the header) after a button-Save, since the natural next intent after "save" is often "leave", and
+    `#edit-btn` is always enabled. (Acceptable alternative: move to `#undo-btn` if it is still enabled,
+    keeping focus inside the toolbar; but `#undo-btn` may also be disabled if Save cleared history in
+    a future variant, whereas `#edit-btn` is unconditionally focusable, so `#edit-btn` is the safer
+    target.) The "Edits saved." announcement covers the context change for AT.
+  - **Focus after DISCARD (button path):** the user stays in edit mode but the model reverted and both
+    commit buttons go disabled. Same rule: move focus to `#edit-btn` (always enabled). The "Edits
+    discarded. Back to the original." announcement covers the context change.
+  - **Focus after the TOGGLE-OFF confirm (either branch):** OK (discard + exit) returns focus to
+    `#edit-btn` (it stays in the header after edit mode closes and is the element the user just
+    activated, so focus naturally lives there); Cancel (stay) returns focus to `#edit-btn` as well
+    (the user is still in edit mode, and `#edit-btn` was the activation point). Native `confirm()`
+    already restores focus to the triggering element on its own in browsers, so in practice this is
+    the default behavior and needs no extra code; just do not steal focus elsewhere after the dialog.
+  - **Reduced motion:** COMMIT introduces NO animation (no flash, no transition beyond the existing
+    button hover), so `prefers-reduced-motion` has no impact here. Confirmed, nothing to gate.
+
+  ### COMMIT - tight implementation summary for the Tech Lead (all em-dash-free)
+  - Trailing group `<div class="edit-tool-group edit-commit-group">` after `#add-note`, ALWAYS present
+    in edit mode (not `hidden`), holding Save then Discard.
+  - `#edit-save-btn` ghost `.edit-tool-btn`, checkmark glyph `<path d="M5 13l4 4L19 7" />`, title
+    "Save your edits (keep the changes)", aria-label "Save edits".
+  - `#edit-discard-btn` ghost `.edit-tool-btn`, curved revert arrow (rounded U-turn, distinct from
+    trash + straight history arrows), title "Discard your edits (go back to the original)", aria-label
+    "Discard edits".
+  - Both are filled-brass-FREE (ghost), so they do not collide with the filled-brass "Add a note".
+  - New CSS rule `.edit-commit-group { border-left:1px solid rgba(107,79,31,.3); padding-left:.5rem;
+    margin-left:.25rem; }` for the trailing divider (do NOT rely on the existing
+    `.edit-tool-group + .note-edit` adjacency rule, the selection clusters are hidden when empty).
+  - `reflectCommitButtons(isDirty)` sets `disabled` + `aria-disabled` on both, mirroring
+    `reflectUndoRedoButtons`; dirty = an edit applied since enter/last-Save; clean = disabled.
+  - Toggle-off while dirty: native `confirm("You have unsaved edits. Discard them and leave editing?")`,
+    OK = discard + exit, Cancel = stay. Clean toggle-off = silent exit.
+  - Announcements via `#edit-live`: Save "Edits saved." / Discard button "Edits discarded. Back to the
+    original." / confirm-OK exit "Edits discarded. Editing closed."
+  - Focus to `#edit-btn` after a button Save or Discard (the just-clicked control goes disabled); the
+    native confirm handles its own focus return.
+
+  ### Decisions to confirm with the main agent / product owner
+  1. **Save + Discard are BOTH ghost (not filled), distinguished by glyph.** Confirm dropping the
+     proposed filled-brass Save; I changed it because a filled Save next to the filled "Add a note"
+     would be two competing primaries. "Filled brass = the one contextual primary" stays a clean rule.
+  2. **Discard is enabled ONLY when dirty (not always-on).** Confirm; the Edit toggle is already the
+     always-available exit, so an always-lit Discard would be a redundant, slightly confusing second
+     exit.
+  3. **Native `confirm()` guards the dirty toggle-off for v1 (themed modal deferred).** Confirm we
+     accept the OS dialog for the data-loss guard; it is modal, accessible, and free. Themed modal is
+     a costed v2.
+  4. **Glyphs: Save = checkmark, Discard = curved revert arrow** (not floppy/trash/X). Confirm; the
+     trash + straight-arrow glyphs are already spent on Delete and undo/redo, so Discard must look
+     different to avoid a misread.
 
 ## Smart Edit Mode P3 CHANGE-DURATION v1: shorten/lengthen a selected note along a note-value ladder (interaction + visual spec)
 
