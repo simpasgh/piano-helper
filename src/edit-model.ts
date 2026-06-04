@@ -403,6 +403,11 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
           }
           if (tag === "forward") {
             cursor += num(child(node, "duration"), 0);
+            // A <forward> advances musical time, so it can extend the measure's furthest cursor
+            // past any note (e.g. a voice that rests out the end of the bar as a forward instead
+            // of an explicit <rest>). Capture it in the max so the next measure's absolute clock is
+            // not under-counted (Verovio times the bar by its full length, including the forward).
+            if (cursor > measureMaxCursor) measureMaxCursor = cursor;
             continue;
           }
           if (tag !== "note") continue;

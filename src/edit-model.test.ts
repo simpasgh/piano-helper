@@ -197,6 +197,56 @@ describe("parseScoreModel", () => {
     expect(model.restHandles[0].beat).toBe(4); // beat stays 1-based WITHIN the bar
   });
 
+  it("advances the measure clock by a trailing <forward>, not just the last note", () => {
+    // A measure whose LAST event is a <forward> filling the rest of the bar (a voice that rests out
+    // the bar end as a forward instead of an explicit <rest>). The next measure must start at the
+    // FULL bar length (the furthest cursor incl. the forward), not at the last note's end. Without
+    // counting the forward, m2 would land at 0.5s and silently break the maps for every later bar
+    // (the same class as the measure-relative bug). 4/4 at 120bpm => m2 at 2.0s.
+    const TRAILING_FORWARD = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>
+      <forward><duration>3</duration></forward>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const model = parseScoreModel(TRAILING_FORWARD);
+    const m2 = model.handles.find((h) => h.midi === 62);
+    expect(m2?.onsetSec).toBeCloseTo(2.0, 6);
+  });
+
+  it("advances the measure clock by the furthest voice when a later voice ends short", () => {
+    // A grand-staff bar where voice 1 fills the whole bar but voice 2 (the LAST events in document
+    // order) plays only a half note and stops. The next measure must start at the MAX forward cursor
+    // (4 quarters), not the last event's end (2 quarters). 4/4 at 120bpm => m2 at 2.0s.
+    const SHORT_TRAILING_VOICE = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><staves>2</staves>
+        <clef number="1"><sign>G</sign><line>2</line></clef><clef number="2"><sign>F</sign><line>4</line></clef></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>whole</type><staff>1</staff></note>
+      <backup><duration>4</duration></backup>
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>2</duration><voice>2</voice><type>half</type><staff>2</staff></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>whole</type><staff>1</staff></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const model = parseScoreModel(SHORT_TRAILING_VOICE);
+    const m2 = model.handles.find((h) => h.midi === 74);
+    expect(m2?.onsetSec).toBeCloseTo(2.0, 6);
+  });
+
   it("setPitch rewrites the <pitch> and round-trips through serialize", () => {
     const model = parseScoreModel(GRAND_STAFF_XML);
     // Raise the first RH note C5 -> D5 (diatonic).
