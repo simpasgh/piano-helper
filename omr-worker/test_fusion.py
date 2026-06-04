@@ -121,6 +121,38 @@ def test_fuse_unmatched_chord_floors_to_a_sixteenth_when_bar_already_full():
     assert _durs(fused) == [1, 16]      # unmatched E5 floors to a sixteenth (was a quarter), C5 whole
 
 
+def test_fuse_lone_unmatched_chord_fills_the_bar_as_a_held_note():
+    # ROOT-CAUSE FIX (reverie bass m4/m6/m8). geom reads a held whole-note bass triad as the SOLE
+    # onset of its (measure, staff) voice; it fails pitch-class alignment to any Clarity chord (here
+    # Clarity read nothing in that hand), so it is UNMATCHED. The OLD fallback capped it at a quarter
+    # and rhythm_repair then padded a dotted-half rest -> the user's "1/4 note + 3/4 pause" symptom.
+    # A lone unmatched onset is a HELD note (geom detects no rests), so it must FILL the 4/4 bar.
+    geom = _xml([{"staff1": [], "staff2": [
+        {"duration": 1, "pitches": [{"step": "G", "octave": 2},
+                                    {"step": "B", "octave": 2},
+                                    {"step": "D", "octave": 3}]}]}])
+    clarity = _xml([{"staff1": [{"duration": 4, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []}])
+    fused = fusion.fuse(geom, clarity)
+    assert _midis(fused) == [43, 47, 50]   # geom's bass triad preserved (G2, B2, D3)
+    assert _durs(fused) == [16, 16, 16]    # the lone unmatched chord FILLS the 4/4 bar (whole), not a quarter
+    # and the bar is metrically whole, so rhythm_repair leaves it alone (no padded dotted-half rest).
+    assert sum(_durs(fused)) == 48         # three whole notes, one per voice-note, each the full 16-cap bar
+
+
+def test_fuse_lone_unmatched_chord_fills_non_4_4_bar_to_capacity():
+    # The fill is the bar's CAPACITY, not a hardcoded whole note: in 2/4 (capacity 8) a lone unmatched
+    # held chord fills to a HALF note (8), so it stays inside the meter (liminality m8 staff2). This is
+    # what makes the held-note fill safe on a non-4/4 piece.
+    geom = _xml([{"staff1": [], "staff2": [{"duration": 1, "pitches": [{"step": "G", "octave": 2}]}]}],
+                time={"beats": 2, "beat_type": 4})
+    clarity = _xml([{"staff1": [{"duration": 4, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []}],
+                   time={"beats": 2, "beat_type": 4})
+    fused = fusion.fuse(geom, clarity)
+    assert _time(fused) == ("2", "4")
+    assert _midis(fused) == [43]           # geom's bass note preserved (G2)
+    assert _durs(fused) == [8]             # fills the 2/4 bar to a half note (capacity 8), not a whole
+
+
 def test_fuse_clamp_respects_non_4_4_capacity():
     # The clamp reads the resolved meter's capacity, so it sizes the fallback to a NON-4/4 bar too.
     # 2/4 (capacity 8 sixteenths): a matched quarter (4) leaves 4 of room, and the unmatched chord
@@ -137,12 +169,18 @@ def test_fuse_clamp_respects_non_4_4_capacity():
 
 
 def test_bar_fallback_durs_unit():
-    # Direct unit on the pure sizer: matched ints pass through; a None (unmatched) takes clamp(room,
-    # 1, quarter). Two unmatched chords split the remaining room greedily, capped at a quarter each.
+    # Direct unit on the pure sizer. A LONE unmatched chord (the bar's ONLY onset) FILLS the bar (a
+    # held note = the capacity). With >= 2 onsets, each unmatched chord instead takes clamp(room, 1,
+    # quarter), splitting the leftover room greedily and capped at a quarter each. Matched ints always
+    # pass through. The two cases provably coexist: one onset fills, two onsets clamp.
     f = fusion._bar_fallback_durs
-    assert f([8, 2, 2, 2, None], 16, 4) == [8, 2, 2, 2, 2]   # reverie shape: last note -> eighth
-    assert f([None], 16, 4) == [4]                            # lone note, full bar of room -> quarter
-    assert f([16, None], 16, 4) == [16, 1]                    # bar already full -> sixteenth floor
+    assert f([None], 16, 4) == [16]                           # LONE unmatched -> fills the 4/4 bar (whole note)
+    assert f([None], 8, 4) == [8]                             # LONE unmatched in 2/4 -> fills to a half (capacity)
+    assert f([None], 12, 4) == [12]                           # LONE unmatched in 3/4 -> fills to a dotted half
+    assert f([None], None, 4) == [4]                          # LONE unmatched, unknown capacity -> blind quarter
+    assert f([None, None], 16, 4) == [4, 4]                   # TWO unmatched onsets (NOT lone) -> clamp, never fill
+    assert f([8, 2, 2, 2, None], 16, 4) == [8, 2, 2, 2, 2]   # reverie TREBLE shape: last note -> eighth (#201 clamp)
+    assert f([16, None], 16, 4) == [16, 1]                    # >=2 onsets, bar already full -> sixteenth floor
     assert f([14, None, None], 16, 4) == [14, 2, 1]           # 2 room split: 2 then floored to 1
     assert f([None, None], None, 4) == [4, 4]                 # unknown capacity -> blind quarters
     assert f([2, None, 2], 16, 4) == [2, 4, 2]                # room 12 -> a full quarter (no clamp)
