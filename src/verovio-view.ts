@@ -24,6 +24,17 @@ export interface VerovioNote {
   midi: number;
 }
 
+// A Verovio REST distilled to what the rest-handle mapping needs (ADD-a-note v1): its stable MEI
+// id (also its `<g class="rest">` SVG id), its onset in score SECONDS (from the timemap's
+// `restsOn`), and its 1-based staff ordinal (from the SVG `<g class="staff">` it nests under).
+// (onset, staff) uniquely identifies a rest for the model->glyph map in the common case; a same
+// (onset, staff) pair with two voices falls back to document order (first wins), like the note map.
+export interface VerovioRest {
+  id: string;
+  timeSec: number;
+  staff: number;
+}
+
 // Tolerance (seconds) for matching a Verovio onset to a VisNote onset. Both derive from the
 // same MusicXML at the same tempo, so they agree to well under a millisecond; rounding to 3
 // decimals (1ms) absorbs floating-point drift without merging genuinely distinct onsets
@@ -96,6 +107,94 @@ export function buildVisIndexToId(idToVisIndex: ReadonlyMap<string, number>): Ma
   return indexToId;
 }
 
+// Map each rest id to its onset SECONDS from the timemap (ADD-a-note v1). The timemap lists rests
+// under `restsOn` (verified against the installed toolkit) at the same tstamp the cursor stops at;
+// we read each entry's tstamp (ms -> seconds) for every rest it turns on. A rest is timed by its
+// onset, so this is the rest analogue of the note onset query. Pure (plain timemap data).
+export function restOnsetsFromTimemap(timemap: readonly TimemapEntry[]): Map<string, number> {
+  const onsets = new Map<string, number>();
+  for (const entry of timemap) {
+    if (typeof entry.tstamp !== "number") continue;
+    const restsOn = (entry as { restsOn?: string[] }).restsOn;
+    if (!restsOn) continue;
+    const sec = Number((entry.tstamp / 1000).toFixed(ONSET_EPSILON_DECIMALS));
+    for (const id of restsOn) if (!onsets.has(id)) onsets.set(id, sec);
+  }
+  return onsets;
+}
+
+// The 1-based MUSICAL staff number each rest `<g>` nests under. Verovio lays a score out as
+// `<g class="system"> ( <g class="measure"> <g class="staff"> ... )*`, so a `<g class="staff">`
+// group repeats once PER MEASURE (and once per staff). The staff's musical number is therefore its
+// ordinal WITHIN ITS ENCLOSING MEASURE (staff 1 first), NOT its ordinal across the whole document:
+// counting staff groups document-wide gives the system/measure index (e.g. a rest in the 4th
+// measure of a single-staff score would read "staff 4"), which never matches the model's staff and
+// silently breaks the rest map for any multi-measure score. We reset the staff count at each
+// `<g class="measure">` boundary. The MEI <staff n> would be authoritative too, but its xml:ids do
+// not always equal the SVG `<g>` ids, so we derive the number from the SVG structure here. Pure
+// string scan (attribute order is not guaranteed, so we match class-bearing `<g>` open tags). A
+// rest with no enclosing staff group (degenerate) maps to staff 1.
+export function restStavesFromSvg(svg: string): Map<string, number> {
+  // One pass over measure-open + staff-open tags, in document order, recording for each staff group
+  // its offset and its 1-based ordinal within the measure that contains it.
+  const boundaryOpen =
+    /<g\b[^>]*class\s*=\s*"(?:[^"]*\s)?(measure|staff)(?:\s[^"]*)?"[^>]*>/g;
+  const staffSpans: { offset: number; staffNo: number }[] = [];
+  let staffInMeasure = 0;
+  let bm: RegExpExecArray | null;
+  while ((bm = boundaryOpen.exec(svg)) !== null) {
+    if (bm[1] === "measure") {
+      staffInMeasure = 0; // a new measure restarts the staff count
+    } else {
+      staffInMeasure += 1; // staff group: its within-measure ordinal is the musical staff number
+      staffSpans.push({ offset: bm.index, staffNo: staffInMeasure });
+    }
+  }
+  const restOpen = /<g\b[^>]*class\s*=\s*"(?:[^"]*\s)?rest(?:\s[^"]*)?"[^>]*>/g;
+  const staves = new Map<string, number>();
+  let rm: RegExpExecArray | null;
+  while ((rm = restOpen.exec(svg)) !== null) {
+    const idMatch = /\bid\s*=\s*"([^"]+)"/.exec(rm[0]);
+    if (!idMatch) continue;
+    // The enclosing staff is the last staff group that opened before this rest.
+    let staffNo = 1;
+    for (const span of staffSpans) {
+      if (span.offset < rm.index) staffNo = span.staffNo;
+      else break;
+    }
+    staves.set(idMatch[1], staffNo);
+  }
+  return staves;
+}
+
+// A rest's identity key for matching a rendered rest glyph to a model rest handle: (onset seconds,
+// staff). Both sides compute the SAME key, so the model -> glyph map can never disagree. The 1ms
+// onset rounding matches the note keying.
+export function restKey(timeSec: number, staff: number): string {
+  return `${staff}@${timeSec.toFixed(ONSET_EPSILON_DECIMALS)}`;
+}
+
+// Map each model rest (by its index in restHandles) to the Verovio rest `<g>` id sharing its
+// (onset, staff). Built once per render so a rest selection (model side) can find its glyph, and a
+// glyph click (render side) can find its rest handle (via the inverse). First-wins on a key
+// collision (two voices at one onset+staff), mirroring the note map's tie-break.
+export function buildRestIndexToId(
+  verovioRests: readonly VerovioRest[],
+  modelRests: readonly { onsetSec: number; staff: number }[],
+): Map<number, string> {
+  const byKey = new Map<string, string>();
+  for (const r of verovioRests) {
+    const key = restKey(r.timeSec, r.staff);
+    if (!byKey.has(key)) byKey.set(key, r.id);
+  }
+  const map = new Map<number, string>();
+  for (let i = 0; i < modelRests.length; i++) {
+    const id = byKey.get(restKey(modelRests[i].onsetSec, modelRests[i].staff));
+    if (id !== undefined) map.set(i, id);
+  }
+  return map;
+}
+
 // The set of note ids sounding at `scoreTimeSec`, derived purely from the timemap so the rAF
 // playback indicator needs no per-frame WASM call. A note is sounding from its onset until the
 // next onset that ends it (the timemap `off` list). We resolve the latest onset at or before the
@@ -136,6 +235,9 @@ export interface VerovioRender {
   // The inverse of idToVisIndex (VisNote index -> notehead id), for the dual-surface bridge:
   // a canvas selection (by VisNote index) highlights the matching staff notehead.
   visIndexToId: Map<number, string>;
+  // Rendered rests (id, onset seconds, staff) for the ADD-a-note rest mapping. The model side maps
+  // its rest handles to these glyph ids by (onset, staff) via buildRestIndexToId.
+  rests: VerovioRest[];
 }
 
 // Lazy-load the Verovio toolkit + WASM (~7MB) and construct a toolkit instance. The dynamic
@@ -177,14 +279,24 @@ export function buildToolkitOptions(containerWidthPx: number): Record<string, un
 // Pure-ish (only toolkit reads), kept here so it stays next to the render flow. `parseSvgNoteIds`
 // is split out and exported for unit testing without the toolkit.
 export function parseSvgNoteIds(svg: string): string[] {
+  return parseSvgGIdsWithClass(svg, "note");
+}
+
+// The same scan for rest glyphs (ADD-a-note v1): every rest is a `<g class="rest" id="...">`.
+export function parseSvgRestIds(svg: string): string[] {
+  return parseSvgGIdsWithClass(svg, "rest");
+}
+
+// Pull the id of every `<g>` carrying `className` (attribute order is not guaranteed, so we scan
+// open tags and test the class). Shared by the note + rest id scans.
+function parseSvgGIdsWithClass(svg: string, className: string): string[] {
   const ids: string[] = [];
-  // Match <g ... class="note" ... id="..."> and <g ... id="..." ... class="note"> (attribute
-  // order is not guaranteed). We scan every <g> that carries class "note" and pull its id.
   const gTag = /<g\b[^>]*>/g;
+  const classRe = new RegExp(`class\\s*=\\s*"(?:[^"]*\\s)?${className}(?:\\s[^"]*)?"`);
   let m: RegExpExecArray | null;
   while ((m = gTag.exec(svg)) !== null) {
     const tag = m[0];
-    if (!/class\s*=\s*"(?:[^"]*\s)?note(?:\s[^"]*)?"/.test(tag)) continue;
+    if (!classRe.test(tag)) continue;
     const idMatch = /\bid\s*=\s*"([^"]+)"/.exec(tag);
     if (idMatch) ids.push(idMatch[1]);
   }
@@ -218,7 +330,11 @@ export function renderMusicXml(
   const svg = toolkit.renderToSVG(1);
   // renderToMIDI must run before the timemap/time queries are valid.
   toolkit.renderToMIDI();
+  // The cursor/stepTimes timemap EXCLUDES rests (a rest is not a cursor stop), preserving the
+  // playhead behavior. A SEPARATE rest-inclusive timemap feeds only the rest-onset map (ADD-a-note),
+  // so including rests can never alter the cursor stops the sync invariant depends on.
   const timemap = toolkit.renderToTimemap({ includeMeasures: true, includeRests: false });
+  const restTimemap = toolkit.renderToTimemap({ includeMeasures: true, includeRests: true });
 
   const ids = parseSvgNoteIds(svg);
   const notes: VerovioNote[] = [];
@@ -229,8 +345,18 @@ export function renderMusicXml(
     notes.push({ id, timeSec: ms / 1000, midi });
   }
 
+  // Rests: onset (seconds) from the rest-inclusive timemap's `restsOn`, staff from the SVG nesting.
+  const restOnsets = restOnsetsFromTimemap(restTimemap);
+  const restStaves = restStavesFromSvg(svg);
+  const rests: VerovioRest[] = [];
+  for (const id of parseSvgRestIds(svg)) {
+    const timeSec = restOnsets.get(id);
+    if (timeSec === undefined) continue; // a rest the timemap did not time; skip rather than guess
+    rests.push({ id, timeSec, staff: restStaves.get(id) ?? 1 });
+  }
+
   const stepTimes = timemapStepTimes(timemap);
   const idToVisIndex = buildIdToVisNoteIndex(notes, visNotes);
   const visIndexToId = buildVisIndexToId(idToVisIndex);
-  return { toolkit, svg, pageCount, notes, timemap, stepTimes, idToVisIndex, visIndexToId };
+  return { toolkit, svg, pageCount, notes, timemap, stepTimes, idToVisIndex, visIndexToId, rests };
 }

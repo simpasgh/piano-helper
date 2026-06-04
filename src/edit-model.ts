@@ -28,6 +28,10 @@
 
 import { FIRST_MIDI, LAST_MIDI, type NoteLetter, type NoteSpelling } from "./piano";
 
+// Re-export the 88-key clamp bounds so callers that key on the model's range (e.g. the edit
+// orchestrator's boundary announce) have one import site alongside pitchInRange / the stepping.
+export { FIRST_MIDI, LAST_MIDI };
+
 // A diatonic pitch as written on the staff: letter + octave (scientific) + accidental shift.
 // This is what an edit sets and what serialize() writes back into <pitch>.
 export interface ModelPitch {
@@ -50,6 +54,25 @@ export interface NoteHandle {
   pitch: ModelPitch;
   isChordMember: boolean;
   isTieContinuation: boolean;
+}
+
+// A handle on one <rest> in the model (ADD-a-note v1). A rest is SELECTABLE and CONVERTIBLE to a
+// note, but it is NOT a NoteHandle, so nothing iterating pitched notes (staff nav, the handle <->
+// VisNote map, the note count, delete / pitch / undo keying) ever sees it. Rests live in a
+// separate `restHandles[]` registry, rebuilt in the same walk that builds the note handles.
+// `id` is the rest's index in the document-order rest list (stable until a structural edit, like a
+// note handle's id). `staff`/`voice`/`durationDivs` + `onsetSec` let the render side map a rest to
+// the Verovio rest glyph by (onset, staff); `beat` is the 1-based beat for the selection announce.
+export interface RestHandle {
+  id: number;
+  el: Element; // the <note> element carrying the <rest/> (replaced in place by addNote)
+  onsetSec: number;
+  durationSec: number;
+  durationDivs: number; // <duration> in this measure's divisions (for the render-side match)
+  type: string; // the <type> token (e.g. "quarter"); "" when the rest has none
+  staff: number; // 1-based <staff>; 1 when absent
+  voice: number; // 1-based <voice>; 1 when absent
+  beat: number; // 1-based beat within the measure (onset / quarter-divisions + 1), for announce
 }
 
 // Semitone offset of each diatonic letter from C within an octave.
@@ -233,6 +256,18 @@ export interface DeleteRecord {
   promoted: { el: Element; chordChild: Element } | null;
 }
 
+// What an ADD captured, so it can be inverted (the note turned straight back into the rest it came
+// from). ADD is the exact mirror of a STANDALONE-note delete: a `<rest>` becomes a `<note>` of the
+// SAME `<duration>`/`<type>`/dots/`<voice>`/`<staff>` IN PLACE (fixed-bar, no timing math), at the
+// given pitch. invert() swaps the original rest clone back in for the added note. Holds live DOM
+// references, so it is model-internal.
+export interface AddRecord {
+  // The added <note> element now in the DOM (so invert can find + replace it), and the original
+  // <rest>-bearing <note> (cloned at add time) to swap back on undo.
+  addedNote: Element;
+  restClone: Element;
+}
+
 // The editable score model. Holds the parsed DOM and the ordered pitched-note handles. Edits
 // mutate the DOM through handles; serialize() re-emits MusicXML for Verovio.
 //
@@ -243,6 +278,10 @@ export interface DeleteRecord {
 // this document position", and the delete command keys on that position for undo/redo.
 export interface ScoreModel {
   handles: NoteHandle[];
+  // The document-order rest registry (ADD-a-note v1). Parallel to `handles`, rebuilt by the same
+  // walk; a rest is selectable + convertible but never a NoteHandle, so the pitched-note machinery
+  // is unchanged. Empty for a score with no rests.
+  restHandles: RestHandle[];
   setPitch(id: number, pitch: ModelPitch): void;
   // Delete the note as a FIXED-BAR rest (see DeleteRecord) and re-index. Returns the record needed
   // to invert, or null for an invalid id. The VisNote count drops by one (the rest / removal emits
@@ -251,8 +290,38 @@ export interface ScoreModel {
   // Invert a delete: re-insert the original note at its prior position (reversing any promotion)
   // and re-index, so the restored note reclaims its original handle id.
   restoreNote(record: DeleteRecord): void;
+  // ADD-a-note v1: turn the rest with `restId` into a `<note>` of the SAME duration at `pitch`
+  // (fixed-bar, the inverse of a standalone-note delete) and re-index. Returns the record needed to
+  // invert, or null for an invalid id. The VisNote count GROWS by one (a new pitched handle), so the
+  // caller must splice the falling note in + rebuild the maps. The new note takes the key
+  // signature's accidental for its letter unless `pitch.alter` departs from it (synced like setPitch).
+  addNote(restId: number, pitch: ModelPitch): AddRecord | null;
+  // Invert an add: swap the original rest back in for the added note and re-index, so the rest
+  // reclaims its original rest-handle id (literally the standalone delete path).
+  removeNote(record: AddRecord): void;
   fifthsForHandle(id: number): number;
+  // The key signature (fifths) in effect at a REST handle, so the add can spell its accidental
+  // diatonically (parallel to fifthsForHandle for note handles).
+  fifthsForRest(restId: number): number;
   serialize(): string;
+}
+
+// A human duration name for a rest's <type> token (e.g. "quarter rest"), for the selection
+// announce ("Selected a quarter rest, beat 3"). Falls back to a generic "rest" when the type is
+// missing or unrecognised; the duration is the load-bearing token, so a known type is preferred.
+const REST_TYPE_NAMES: Record<string, string> = {
+  whole: "whole",
+  half: "half",
+  quarter: "quarter",
+  eighth: "eighth",
+  "16th": "sixteenth",
+  "32nd": "thirty-second",
+  "64th": "sixty-fourth",
+  breve: "double whole",
+};
+export function restDurationName(type: string): string {
+  const name = REST_TYPE_NAMES[type];
+  return name ? `${name} rest` : "rest";
 }
 
 // Parse MusicXML into the editable model. Walks each part tracking divisions and a time cursor
@@ -270,6 +339,8 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
   // The handle list is the live array `model.handles` aliases; reindexHandles() mutates it IN
   // PLACE (clear + refill) so a structural edit (delete/restore) keeps that reference valid.
   const handles: NoteHandle[] = [];
+  // The rest registry `model.restHandles` aliases; same in-place rebuild discipline as `handles`.
+  const restHandles: RestHandle[] = [];
 
   const soundTempo = doc.querySelector("sound[tempo]")?.getAttribute("tempo");
   const bpm =
@@ -283,22 +354,39 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
   // Per-handle key signature (fifths) so diatonic stepping is key-aware. Captured at walk time
   // from the attributes in effect at the handle's measure. Indexed in lockstep with `handles`.
   const handleFifths: number[] = [];
+  // Per-REST key signature, indexed in lockstep with `restHandles`, so an ADD spells diatonically.
+  const restFifths: number[] = [];
 
-  // Walk the live DOM and (re)build the pitched-note handles + their key signatures in document
-  // order. Called once at parse and again after every STRUCTURAL edit (delete / restore), so a
-  // handle's id is always its current document position. Onsets are computed exactly as before
-  // (divisions, <backup>/<forward>, chords share the prior onset, rests advance but emit no handle).
+  // Walk the live DOM and (re)build the pitched-note handles + the rest handles + their key
+  // signatures in document order. Called once at parse and again after every STRUCTURAL edit
+  // (delete / restore / add / its undo), so a handle's id is always its current document position.
+  // Onsets are computed exactly as before (divisions, <backup>/<forward>, chords share the prior
+  // onset, rests advance the cursor and now ALSO emit a rest handle for selection + conversion).
   function reindexHandles(): void {
     handles.length = 0;
     handleFifths.length = 0;
+    restHandles.length = 0;
+    restFifths.length = 0;
     const parts = Array.from(doc.getElementsByTagName("part"));
     for (const part of parts) {
       let divisions = 1; // <divisions> per quarter note; updated by <attributes>
       let fifths = 0; // current key signature
+      // ABSOLUTE onset clock: quarter-notes elapsed from the SCORE start up to the current measure's
+      // start. Onsets must be absolute (from the score start), because both the VisNote[] (score.ts)
+      // and the Verovio timemap time everything from the score start; a measure-relative onset only
+      // agrees in a single-measure score and silently breaks the (midi, onset) and (onset, staff)
+      // maps in measures 2+ (the rest-mapping bug). Accumulated in quarters (divisions-independent)
+      // so a mid-piece <divisions> change stays correct.
+      let measureStartQuarters = 0;
       const measures = Array.from(part.getElementsByTagName("measure"));
       for (const measure of measures) {
-        let cursor = 0; // divisions from the measure start
+        let cursor = 0; // divisions from THIS measure's start
         let prevOnset = 0; // onset of the last non-chord note, for chord members
+        // The furthest the cursor reaches in this measure (in this measure's divisions). With
+        // <backup>/<forward> the cursor moves back and forth between voices, so the measure's
+        // musical length is the MAX forward position, not the final cursor. This is how far to
+        // advance the absolute clock for the next measure.
+        let measureMaxCursor = 0;
         // Walk the measure's direct children in document order.
         for (const node of Array.from(measure.children)) {
           const tag = node.tagName.toLowerCase();
@@ -315,6 +403,11 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
           }
           if (tag === "forward") {
             cursor += num(child(node, "duration"), 0);
+            // A <forward> advances musical time, so it can extend the measure's furthest cursor
+            // past any note (e.g. a voice that rests out the end of the bar as a forward instead
+            // of an explicit <rest>). Capture it in the max so the next measure's absolute clock is
+            // not under-counted (Verovio times the bar by its full length, including the forward).
+            if (cursor > measureMaxCursor) measureMaxCursor = cursor;
             continue;
           }
           if (tag !== "note") continue;
@@ -323,6 +416,9 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
           const isRest = child(node, "rest") !== null;
           const durDivs = num(child(node, "duration"), 0);
           const onsetDivs = isChord ? prevOnset : cursor;
+          // ABSOLUTE onset in seconds: the score-start clock at this measure's start, plus the
+          // within-measure offset. `beat` stays measure-relative (1-based within the bar).
+          const onsetSec = (measureStartQuarters + onsetDivs / divisions) * secPerQuarter;
 
           if (!isRest) {
             const pitchEl = child(node, "pitch");
@@ -339,7 +435,7 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
                 id,
                 el: node,
                 pitchEl,
-                onsetSec: (onsetDivs / divisions) * secPerQuarter,
+                onsetSec,
                 midi: midiFromPitch(pitch),
                 pitch,
                 isChordMember: isChord,
@@ -347,14 +443,39 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
               });
               handleFifths.push(fifths);
             }
+          } else {
+            // A REST: push a rest handle so it is selectable + convertible (ADD-a-note v1). A rest
+            // is never a chord member, so it always sits at the cursor. `beat` is 1-based within
+            // the measure (onset in quarters + 1), rounded to the nearest sensible value for the
+            // announce; staff/voice default to 1 when absent (single-staff scores).
+            const restType = child(node, "type")?.textContent?.trim() ?? "";
+            const staff = num(child(node, "staff"), 1);
+            const voice = num(child(node, "voice"), 1);
+            const beat = onsetDivs / divisions + 1;
+            restHandles.push({
+              id: restHandles.length,
+              el: node,
+              onsetSec,
+              durationSec: (durDivs / divisions) * secPerQuarter,
+              durationDivs: durDivs,
+              type: restType,
+              staff,
+              voice,
+              beat: Math.round(beat * 1000) / 1000,
+            });
+            restFifths.push(fifths);
           }
 
           // Advance the cursor for non-chord notes (and rests); chord members share the onset.
           if (!isChord) {
             prevOnset = onsetDivs;
             cursor = onsetDivs + durDivs;
+            if (cursor > measureMaxCursor) measureMaxCursor = cursor;
           }
         }
+        // Advance the absolute clock by THIS measure's musical length (its furthest cursor, in
+        // quarters), so the next measure's onsets continue from the right score time.
+        measureStartQuarters += measureMaxCursor / divisions;
       }
     }
   }
@@ -365,8 +486,12 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
 
   const model: ScoreModel = {
     handles,
+    restHandles,
     fifthsForHandle(id: number): number {
       return handleFifths[id] ?? 0;
+    },
+    fifthsForRest(restId: number): number {
+      return restFifths[restId] ?? 0;
     },
     setPitch(id: number, next: ModelPitch): void {
       const handle = handles[id];
@@ -485,6 +610,28 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
       }
       reindexHandles();
     },
+    addNote(restId: number, pitch: ModelPitch): AddRecord | null {
+      const rest = restHandles[restId];
+      if (!rest) return null;
+      const restEl = rest.el;
+      const parent = restEl.parentNode as Element | null;
+      if (!parent) return null;
+      // Clone the rest BEFORE replacing it so an undo swaps it back in exactly (duration, type,
+      // dots, voice, staff all intact). This is the literal inverse of a standalone-note delete.
+      const restClone = restEl.cloneNode(true) as Element;
+      const fifths = restFifths[restId] ?? 0;
+      const addedNote = makeNoteFrom(restEl, pitch, fifths);
+      parent.replaceChild(addedNote, restEl);
+      reindexHandles();
+      return { addedNote, restClone };
+    },
+    removeNote(record: AddRecord): void {
+      // Swap the original rest back in for the added note (literally the standalone delete path).
+      if (record.addedNote.parentNode) {
+        record.addedNote.parentNode.replaceChild(record.restClone, record.addedNote);
+      }
+      reindexHandles();
+    },
     serialize(): string {
       return serializer.serializeToString(doc);
     },
@@ -527,6 +674,53 @@ function makeRestFrom(noteEl: Element): Element {
   const staff = child(noteEl, "staff");
   if (staff) rest.appendChild(staff.cloneNode(true));
   return rest;
+}
+
+// Build a pitched <note> from a <rest>-bearing <note> at `pitch`, preserving the time-structural
+// children so the new note occupies the SAME slot (fixed-bar) and stays in the right voice/staff,
+// and dropping the <rest>. This is the exact inverse of makeRestFrom (rest -> note). The
+// <accidental> glyph is synced to the key signature like setPitch: an explicit accidental prints
+// only when the pitch departs from the key's default for its letter. Children are emitted in
+// MusicXML note order: <pitch>, <duration>, <voice>, <type>, <dot>*, <accidental>, then <staff>.
+function makeNoteFrom(restEl: Element, pitch: ModelPitch, fifths: number): Element {
+  const doc = restEl.ownerDocument;
+  const note = doc.createElement("note");
+
+  const pitchEl = doc.createElement("pitch");
+  const stepEl = doc.createElement("step");
+  stepEl.textContent = pitch.step;
+  pitchEl.appendChild(stepEl);
+  if (pitch.alter !== 0) {
+    const alterEl = doc.createElement("alter");
+    alterEl.textContent = String(pitch.alter);
+    pitchEl.appendChild(alterEl);
+  }
+  const octEl = doc.createElement("octave");
+  octEl.textContent = String(pitch.octave);
+  pitchEl.appendChild(octEl);
+  note.appendChild(pitchEl);
+
+  for (const tag of ["duration", "voice", "type"]) {
+    const src = child(restEl, tag);
+    if (src) note.appendChild(src.cloneNode(true));
+  }
+  for (const dot of Array.from(restEl.getElementsByTagName("dot"))) {
+    note.appendChild(dot.cloneNode(true));
+  }
+  // Print an accidental only when the pitch leaves the key's default for its letter (same rule as
+  // setPitch); a diatonic pitch prints none, so a fill in C major lands clean.
+  const keyAlter = keyAlterForLetter(pitch.step, fifths);
+  if (pitch.alter !== keyAlter) {
+    const token = accidentalToken(pitch.alter);
+    if (token) {
+      const accEl = doc.createElement("accidental");
+      accEl.textContent = token;
+      note.appendChild(accEl);
+    }
+  }
+  const staff = child(restEl, "staff");
+  if (staff) note.appendChild(staff.cloneNode(true));
+  return note;
 }
 
 // Map each pitched, NON-continuation handle to the index of the VisNote sharing its (midi,

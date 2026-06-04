@@ -18,6 +18,7 @@ import {
   pitchFromMidi,
   buildHandleToVisIndex,
   spellingFromPitch,
+  restDurationName,
   type ModelPitch,
 } from "./edit-model";
 import { FIRST_MIDI, LAST_MIDI } from "./piano";
@@ -160,6 +161,90 @@ describe("parseScoreModel", () => {
   it("captures the key signature per handle", () => {
     const model = parseScoreModel(GRAND_STAFF_XML);
     expect(model.fifthsForHandle(0)).toBe(0);
+  });
+
+  it("computes ABSOLUTE onsets across measures (not measure-relative)", () => {
+    // Regression for the rest-mapping bug: onsets must be from the SCORE start so they match the
+    // VisNote[] / Verovio timemap. A measure-relative walk (cursor reset per bar) put every
+    // measure's first note back at 0 and broke the maps for measures 2+. Two 4/4 bars at 120bpm:
+    // bar 1 onsets 0/0.5/1/1.5, bar 2 continues at 2.0/2.5/3.0/3.5 (NOT 0/0.5/1/1.5 again).
+    const TWO_BARS = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><rest/><duration>1</duration><type>quarter</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const model = parseScoreModel(TWO_BARS);
+    expect(model.handles.map((h) => Number(h.onsetSec.toFixed(3)))).toEqual([
+      0, 0.5, 1, 1.5, 2, 2.5, 3,
+    ]);
+    // The rest is on beat 4 of bar 2 => absolute onset 3.5s (NOT the measure-relative 1.5s).
+    expect(model.restHandles).toHaveLength(1);
+    expect(model.restHandles[0].onsetSec).toBeCloseTo(3.5, 6);
+    expect(model.restHandles[0].beat).toBe(4); // beat stays 1-based WITHIN the bar
+  });
+
+  it("advances the measure clock by a trailing <forward>, not just the last note", () => {
+    // A measure whose LAST event is a <forward> filling the rest of the bar (a voice that rests out
+    // the bar end as a forward instead of an explicit <rest>). The next measure must start at the
+    // FULL bar length (the furthest cursor incl. the forward), not at the last note's end. Without
+    // counting the forward, m2 would land at 0.5s and silently break the maps for every later bar
+    // (the same class as the measure-relative bug). 4/4 at 120bpm => m2 at 2.0s.
+    const TRAILING_FORWARD = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>
+      <forward><duration>3</duration></forward>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const model = parseScoreModel(TRAILING_FORWARD);
+    const m2 = model.handles.find((h) => h.midi === 62);
+    expect(m2?.onsetSec).toBeCloseTo(2.0, 6);
+  });
+
+  it("advances the measure clock by the furthest voice when a later voice ends short", () => {
+    // A grand-staff bar where voice 1 fills the whole bar but voice 2 (the LAST events in document
+    // order) plays only a half note and stops. The next measure must start at the MAX forward cursor
+    // (4 quarters), not the last event's end (2 quarters). 4/4 at 120bpm => m2 at 2.0s.
+    const SHORT_TRAILING_VOICE = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><staves>2</staves>
+        <clef number="1"><sign>G</sign><line>2</line></clef><clef number="2"><sign>F</sign><line>4</line></clef></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>whole</type><staff>1</staff></note>
+      <backup><duration>4</duration></backup>
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>2</duration><voice>2</voice><type>half</type><staff>2</staff></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>whole</type><staff>1</staff></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const model = parseScoreModel(SHORT_TRAILING_VOICE);
+    const m2 = model.handles.find((h) => h.midi === 74);
+    expect(m2?.onsetSec).toBeCloseTo(2.0, 6);
   });
 
   it("setPitch rewrites the <pitch> and round-trips through serialize", () => {
@@ -509,5 +594,172 @@ describe("ScoreModel.deleteNote / restoreNote", () => {
     const model = parseScoreModel(GRAND_STAFF_XML);
     expect(model.deleteNote(99)).toBeNull();
     expect(model.handles).toHaveLength(7);
+  });
+});
+
+// ----- ADD-a-note v1: rest registry + makeNoteFrom + addNote/removeNote -----
+
+// A 1-part / 2-staff measure with a clear gap: RH C5, D5, a QUARTER REST on beat 3, F5; LH a whole
+// C3. divisions=2 so a quarter = 2 divs = 0.5s at 120bpm; the rest's onset is beat 3 (= 1.0s).
+const REST_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>2</divisions>
+        <key><fifths>0</fifths></key>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <staves>2</staves>
+        <clef number="1"><sign>G</sign><line>2</line></clef>
+        <clef number="2"><sign>F</sign><line>4</line></clef>
+      </attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>2</duration><voice>1</voice><type>quarter</type><staff>1</staff></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>2</duration><voice>1</voice><type>quarter</type><staff>1</staff></note>
+      <note><rest/><duration>2</duration><voice>1</voice><type>quarter</type><staff>1</staff></note>
+      <note><pitch><step>F</step><octave>5</octave></pitch><duration>2</duration><voice>1</voice><type>quarter</type><staff>1</staff></note>
+      <backup><duration>8</duration></backup>
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>8</duration><voice>2</voice><type>whole</type><staff>2</staff></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+// Same shape but in D major (2 sharps), so a fill on the F line is diatonically F# and a fill on
+// the C line is C#: lets us prove the accidental is synced to the key signature like setPitch.
+const REST_XML_DMAJOR = REST_XML.replace("<fifths>0</fifths>", "<fifths>2</fifths>");
+
+describe("parseScoreModel rest registry (ADD-a-note v1)", () => {
+  it("indexes rests in a SEPARATE registry without polluting the pitched-note handles", () => {
+    const model = parseScoreModel(REST_XML);
+    // Four pitched notes (C5, D5, F5, C3); the rest is NOT a NoteHandle.
+    expect(model.handles.map((h) => h.midi)).toEqual([72, 74, 77, 48]);
+    // Exactly one rest handle, with the rest's onset/duration/type/staff/beat captured.
+    expect(model.restHandles).toHaveLength(1);
+    const r = model.restHandles[0];
+    expect(r.onsetSec).toBeCloseTo(1.0, 6); // beat 3 at 120bpm
+    expect(r.durationSec).toBeCloseTo(0.5, 6); // a quarter
+    expect(r.type).toBe("quarter");
+    expect(r.staff).toBe(1);
+    expect(r.voice).toBe(1);
+    expect(r.beat).toBe(3);
+  });
+
+  it("a score with no rests has an empty rest registry", () => {
+    const model = parseScoreModel(GRAND_STAFF_XML);
+    expect(model.restHandles).toHaveLength(0);
+  });
+});
+
+describe("ScoreModel.addNote / removeNote (makeNoteFrom, fixed-bar, round-trip)", () => {
+  it("turns a rest into a NOTE of the same duration at the given pitch (fixed-bar)", () => {
+    const model = parseScoreModel(REST_XML);
+    const before = measureFilledDivs(model.serialize()); // RH 4 quarters = 8 divs
+    expect(before).toBe(8);
+    const rec = model.addNote(0, { step: "E", octave: 5, alter: 0 }); // fill the rest with E5
+    expect(rec).not.toBeNull();
+    // The bar still adds up (the new note has the rest's duration), and the rest is gone.
+    expect(measureFilledDivs(model.serialize())).toBe(before);
+    expect(model.restHandles).toHaveLength(0);
+    // A 5th pitched note now exists: E5 (MIDI 76) at the rest's onset (1.0s).
+    expect(model.handles.map((h) => h.midi)).toEqual([72, 74, 76, 77, 48]);
+    const added = model.handles.find((h) => h.midi === 76)!;
+    expect(added.onsetSec).toBeCloseTo(1.0, 6);
+    // The added <note> carries the same <duration>/<type>/<staff> as the rest, and no <rest/>.
+    const doc = new DOMParser().parseFromString(model.serialize(), "application/xml");
+    const noteEls = Array.from(doc.getElementsByTagName("note"));
+    const e5 = noteEls.find(
+      (n) => n.getElementsByTagName("step").item(0)?.textContent === "E" &&
+             n.getElementsByTagName("octave").item(0)?.textContent === "5",
+    )!;
+    expect(e5.getElementsByTagName("rest").length).toBe(0);
+    expect(e5.getElementsByTagName("duration").item(0)?.textContent).toBe("2");
+    expect(e5.getElementsByTagName("type").item(0)?.textContent).toBe("quarter");
+    expect(e5.getElementsByTagName("staff").item(0)?.textContent).toBe("1");
+  });
+
+  it("add + remove round-trips exactly (rest -> note -> undo -> rest)", () => {
+    const model = parseScoreModel(REST_XML);
+    const originalMidis = model.handles.map((h) => h.midi);
+    const rec = model.addNote(0, { step: "G", octave: 5, alter: 0 });
+    expect(rec).not.toBeNull();
+    expect(model.handles).toHaveLength(originalMidis.length + 1);
+    expect(model.restHandles).toHaveLength(0);
+    model.removeNote(rec!);
+    // The note is gone, the rest is back at its slot, the pitched handles match the original.
+    expect(model.handles.map((h) => h.midi)).toEqual(originalMidis);
+    expect(model.restHandles).toHaveLength(1);
+    expect(model.restHandles[0].onsetSec).toBeCloseTo(1.0, 6);
+    expect(model.restHandles[0].type).toBe("quarter");
+  });
+
+  it("syncs the accidental to the key signature (diatonic fill prints none; departing prints one)", () => {
+    // In D major, a fill on the F line is F# (diatonic) and prints NO explicit accidental.
+    const dmodel = parseScoreModel(REST_XML_DMAJOR);
+    dmodel.addNote(0, { step: "F", octave: 5, alter: 1 }); // F#5, the key's default for F
+    const ddoc = new DOMParser().parseFromString(dmodel.serialize(), "application/xml");
+    const fSharp = Array.from(ddoc.getElementsByTagName("note")).find(
+      (n) => n.getElementsByTagName("step").item(0)?.textContent === "F" &&
+             n.getElementsByTagName("octave").item(0)?.textContent === "5",
+    )!;
+    expect(fSharp.getElementsByTagName("alter").item(0)?.textContent).toBe("1"); // pitch is F#
+    expect(fSharp.getElementsByTagName("accidental").length).toBe(0); // but no printed accidental
+
+    // A fill that DEPARTS from the key (F natural in D major) prints an explicit natural.
+    const dmodel2 = parseScoreModel(REST_XML_DMAJOR);
+    dmodel2.addNote(0, { step: "F", octave: 5, alter: 0 }); // F natural, NOT the key's default
+    const ddoc2 = new DOMParser().parseFromString(dmodel2.serialize(), "application/xml");
+    const fNat = Array.from(ddoc2.getElementsByTagName("note")).find(
+      (n) => n.getElementsByTagName("step").item(0)?.textContent === "F" &&
+             n.getElementsByTagName("octave").item(0)?.textContent === "5",
+    )!;
+    expect(fNat.getElementsByTagName("accidental").item(0)?.textContent).toBe("natural");
+  });
+
+  it("a fill with a sharp in C major prints the explicit sharp accidental", () => {
+    const model = parseScoreModel(REST_XML); // C major
+    model.addNote(0, { step: "F", octave: 5, alter: 1 }); // F#5 departs from C major's F natural
+    const doc = new DOMParser().parseFromString(model.serialize(), "application/xml");
+    const fSharp = Array.from(doc.getElementsByTagName("note")).find(
+      (n) => n.getElementsByTagName("step").item(0)?.textContent === "F" &&
+             n.getElementsByTagName("alter").item(0)?.textContent === "1",
+    )!;
+    expect(fSharp.getElementsByTagName("accidental").item(0)?.textContent).toBe("sharp");
+  });
+
+  it("addNote on an out-of-range rest id is a no-op returning null", () => {
+    const model = parseScoreModel(REST_XML);
+    expect(model.addNote(99, { step: "C", octave: 4, alter: 0 })).toBeNull();
+    expect(model.handles).toHaveLength(4);
+    expect(model.restHandles).toHaveLength(1);
+  });
+
+  it("the added note maps to its VisNote by (midi, onset), so selection can follow it", () => {
+    const model = parseScoreModel(REST_XML);
+    model.addNote(0, { step: "E", octave: 5, alter: 0 }); // E5 at onset 1.0
+    // The app re-derives the falling notes WITH the new E5 at time 1.0.
+    const visNotes = [
+      { midi: 72, time: 0 },
+      { midi: 74, time: 0.5 },
+      { midi: 76, time: 1.0 }, // the added note
+      { midi: 77, time: 1.5 },
+      { midi: 48, time: 0 },
+    ];
+    const map = buildHandleToVisIndex(model.handles, visNotes);
+    const addedHandle = model.handles.find((h) => h.midi === 76)!;
+    expect(map.get(addedHandle.id)).toBe(2); // the new note maps to its VisNote
+  });
+});
+
+describe("restDurationName", () => {
+  it("names known rest types", () => {
+    expect(restDurationName("quarter")).toBe("quarter rest");
+    expect(restDurationName("half")).toBe("half rest");
+    expect(restDurationName("eighth")).toBe("eighth rest");
+    expect(restDurationName("16th")).toBe("sixteenth rest");
+    expect(restDurationName("whole")).toBe("whole rest");
+  });
+  it("falls back to a generic 'rest' for an unknown/missing type", () => {
+    expect(restDurationName("")).toBe("rest");
+    expect(restDurationName("weird")).toBe("rest");
   });
 });
