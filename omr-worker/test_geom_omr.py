@@ -484,3 +484,108 @@ def test_detect_barlines_ignores_stems():
     bl = geom_omr.detect_barlines(gray, staves)
     assert any(abs(x - 50) <= 3 for x in bl[0])       # the barline IS found
     assert not any(abs(x - 200) <= 3 for x in bl[0])  # the stem is NOT
+
+
+# --- Illumination normalization (phone-photo staff-detection robustness) ------------------
+#
+# A photo darkens the "white" paper unevenly; the fixed gray<0.5 ink threshold in
+# detect_systems/detect_barlines/detect_ottavas then reads shadowed paper as full-width ink and
+# the staff geometry collapses. normalize_illumination flat-fields the lighting so the threshold
+# holds, and is a NO-OP on an evenly-lit (clean) page so the clean path is byte-identical.
+
+
+@requires_geom
+def test_normalize_illumination_noop_on_even_lighting():
+    # an evenly-lit page (white paper + some ink) is returned UNCHANGED (the never-worse guard).
+    import numpy as np
+    gray, _ = _draw_staff([(200, 40 + 2 * 16)])
+    out = geom_omr.normalize_illumination(gray)
+    assert np.array_equal(out, gray)
+
+
+@requires_geom
+def test_normalize_illumination_lifts_shadowed_background():
+    # a smooth shadow pushes the white background below 0.5 (where it reads as ink); normalization
+    # must lift the shadowed PAPER back above 0.5 while keeping the INK well below it.
+    import numpy as np
+    h, w = 300, 300
+    gray = np.ones((h, w), dtype=np.float32)
+    gray[40, :] = 0.0                       # one full-width ink line (a staff line)
+    shade = np.ones(h, dtype=np.float32)
+    shade[:] = np.linspace(1.0, 0.42, h)    # smooth vertical shadow to 0.42 at the bottom
+    shadowed = gray * shade[:, None]
+    # precondition: the lower background really did fall below 0.5 (raw threshold would mis-read it)
+    assert shadowed[290, 150] < 0.5
+    out = geom_omr.normalize_illumination(shadowed)
+    assert out[290, 150] > 0.5              # shadowed paper recovered to "white"
+    assert out[40, 150] < 0.5              # the ink line stays ink
+
+
+@requires_geom
+def test_detect_systems_recovers_shadowed_staff():
+    # the integration: a staff sitting under a cast shadow (its background driven below 0.5) is
+    # STILL detected, because detect_systems flat-fields first. Without normalization the shadow
+    # band reads as full-width ink and the staff is lost (the measured strength-1.5 photo cliff).
+    import numpy as np
+    gray, lines = _draw_staff([(200, 40 + 2 * 16)], width=400, interline=16, top=40)
+    h, w = gray.shape
+    band = np.ones(h, dtype=np.float32)
+    y0 = int(lines[0] - 24); y1 = int(lines[-1] + 24)
+    band[y0:y1] = 0.45                       # uniform cast shadow over the whole staff
+    shadowed = np.clip(gray * band[:, None], 0.0, 1.0)
+    # precondition: in the shadow band the (non-line) paper is below the ink threshold
+    assert shadowed[int(lines[0]) + 8, 350] < 0.5
+    staves = geom_omr.detect_systems(shadowed)
+    assert len(staves) == 1
+    got = np.array(sorted(staves[0]))
+    assert np.allclose(got, np.array(sorted(lines)), atol=2.0)
+
+
+def test_normalize_illumination_never_raises():
+    # robustness contract: degenerate inputs return safely (the input or a guarded default), no raise.
+    assert geom_omr.normalize_illumination(None) is None
+    if geom_omr.GEOM_AVAILABLE:
+        import numpy as np
+        tiny = np.ones((1, 1), dtype=np.float32)
+        out = geom_omr.normalize_illumination(tiny)
+        assert out is not None and out.shape == (1, 1)
+
+
+@requires_geom
+def test_normalize_illumination_noop_on_dense_clean_page():
+    # A CLEAN (uniformly white bg) but DENSE page -- many fully-inked grid cells (beams / chord
+    # clusters) -- must still be a no-op. The cell-brightness guard is max-dilated so an isolated
+    # inked cell borrows its lit neighbours; without that, >5% fully-inked cells would trip the
+    # guard and normalization would alter a clean page (the never-worse-on-clean regression).
+    import numpy as np
+    g = np.ones((480, 480), dtype=np.float32)        # grid=48 -> 10x10 px cells
+    for r in range(0, 48, 4):                         # ink ~6% of cells, isolated (4 cells apart)
+        for c in range(0, 48, 4):
+            g[r * 10:(r + 1) * 10, c * 10:(c + 1) * 10] = 0.0
+    assert (g < 0.5).mean() > 0.05                    # genuinely dense (would trip a density guard)
+    out = geom_omr.normalize_illumination(g)
+    assert np.array_equal(out, g)                     # no-op: clean dense page is unchanged
+
+
+@requires_geom
+def test_detect_barlines_recovers_under_shadow():
+    # the other shadow call site: a barline spanning a grand staff under a cast shadow (background
+    # driven below 0.5) is STILL found, because detect_barlines flat-fields first.
+    import numpy as np
+    from PIL import Image, ImageDraw
+    interline, top, gap = 16, 40, 64
+    treble = [top + i * interline for i in range(5)]
+    bass = [treble[-1] + gap + i * interline for i in range(5)]
+    im = Image.new("L", (400, int(bass[-1] + 60)), 255)
+    d = ImageDraw.Draw(im)
+    for ly in treble + bass:
+        d.line([(0, ly), (400, ly)], fill=0, width=2)
+    d.line([(50, treble[0]), (50, bass[-1])], fill=0, width=2)   # barline spans both staves
+    gray = np.asarray(im, dtype=np.float32) / 255.0
+    band = np.ones(gray.shape[0], dtype=np.float32)
+    band[int(treble[0] - 20):int(bass[-1] + 20)] = 0.45         # broad cast shadow over the system
+    shadowed = np.clip(gray * band[:, None], 0.0, 1.0)
+    assert shadowed[int(treble[2]), 300] < 0.5                   # precondition: paper reads as ink
+    staves = geom_omr.detect_systems(shadowed)
+    bl = geom_omr.detect_barlines(shadowed, staves)
+    assert any(abs(x - 50) <= 3 for row in bl for x in row)      # the barline survives the shadow

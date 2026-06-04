@@ -4,6 +4,47 @@ Self-contained plan so any session (esp. the one on the GPU PC) can pick up and 
 without the prior machine's local memory. Newest status at the top. NO em dashes in generated
 text (project rule). Ship every code change through the gated flow (see "Constraints" below).
 
+## STATUS: PHONE-PHOTO robustness -- the cliff is STAFF DETECTION (not the notehead detector); illumination flat-fielding recovers it, clean byte-identical (2026-06-04)
+
+Investigated phone-photo robustness (the product goal: read photos of physical scores, not just clean
+PDFs). The result OVERTURNS the assumed plan ("retrain the notehead detector for photos"): the trained
+notehead detector is ALREADY photo-robust, and the photo cliff is the classical staff detection.
+
+DIAGNOSIS (local GPU; rasterize -> synth_augment photo proxy -> count). The notehead detector finds
+~all heads from clean through strength 2.0 (liminality 190->187, tctab 481->477, icarus 150->149,
+reverie 185->185), so a detector RETRAIN is the wrong lever -- confirmed by gating the prior
+`notehead_photo` 5-epoch photo-augment retrain: clean never-worse but photo note_f1 only +0.003
+(noise), zero recovery at strength 1.5. The cliff is `detect_systems` / `detect_barlines` /
+`detect_ottavas`, which threshold a FIXED `gray < 0.5` (assumes near-white paper). A synth_augment
+shadow at strength ~1.5 multiplies the background by ~0.475, pushing shadowed paper below 0.5, so whole
+rows read as full-width ink, the interline estimate is polluted, and the staves COLLAPSE (~halve:
+liminality 6->3, tctab 22->6, icarus 6->2, reverie 8->4). Every head whose staff is lost is dropped ->
+note_f1 crashes ~0.95 -> ~0.69 at strength 1.5 (strength 1.0 barely dents it; the baseline is already
+robust to mild photometric noise, so the detector + YOLO online aug suffice there).
+
+FIX SHIPPED (classical CV, no model, no new weights): `geom_omr.normalize_illumination(gray)`
+flat-fields the lighting -- estimate the smooth paper-brightness field by BLOCK-MAX downsample (paper
+is the bright majority in any block, so the max ignores ink), upsample, divide it out so the background
+renormalizes to ~1.0 while ink stays < 0.5 -- wired into the 3 geometry detectors. A never-worse guard
+returns the input UNCHANGED when evenly lit (5th-percentile block paper > 0.7), so a clean render is
+BYTE-IDENTICAL. geom runs as a SUBPROCESS, so deploy = git update /opt/piano-helper on the box; NO
+weights change, NO restart.
+
+MEASURED (box real_eval / real_eval_photo, oracle key, deployed notehead.pt, pdftoppm rasterizer;
+photo = synth_augment proxy, mean over strengths 1.0 + 1.5, seeds 0/1/2):
+- CLEAN note_f1 BYTE-IDENTICAL: liminality 0.946, tctab 0.995, icarus 0.990, reverie 0.881 (delta 0).
+- PHOTO note_f1: liminality 0.821->0.945, tctab 0.818->0.856, icarus 0.842->0.977, reverie 0.739->0.854
+  (mean 0.805 -> 0.908, +0.103). The strength-1.5 cliff is recovered: mean s1.5 ~0.67 -> ~0.88 (+0.21;
+  liminality 0.693->0.941, icarus 0.699->0.969).
+Tests: test_geom_omr.py +4 (no-op on clean, shadow background lift, shadowed-staff recovery,
+never-raise); full omr-worker suite green. See memory [[photo-cliff-is-staff-detection]].
+
+RESIDUAL / NEXT photo levers (classical CV, NOT the detector): tctab recovers least (densest, 2-page
+stitch). A REAL phone photo also adds PERSPECTIVE / rotation / low-res that synth_augment
+(photometric-only) does NOT model -- deskew + perspective-rectify of the page is the next rung, and
+capturing one real phone photo of a printed score (+ scoring it) would replace the synth_augment proxy
+as the benchmark.
+
 ## STATUS: OTTAVA bass over-extension FIXED -- a far stray dash no longer chains the 8va span across unbracketed measures (reverie pitch up, never-worse) (2026-06-04)
 
 Tightened `detect_ottavas`: `_scan_dashed_rule` now keeps only the LARGEST CONTIGUOUS dash cluster
