@@ -2857,3 +2857,311 @@ describe("SET-KEY edit-OFF no-op: parsing without a key edit never mutates the d
     expect(count(out)).toBe(count(KEY_C_MAJOR_SCALE));
   });
 });
+
+// ===== SET-TIME (Smart Edit SIGNATURE EDITING, SIG-3): the declaration-only time-signature edit =====
+//
+// A time edit rewrites the INITIAL <time>'s <beats>/<beat-type> and re-engraves; it NEVER moves a
+// barline, splits a note, or touches a duration (declaration-only). Bars that no longer fill the new
+// meter are REPORTED (not auto-fixed), and the duration editor's bar capacity reads the LIVE <time>, so
+// a duration edit AFTER a time change clamps/ties at the new barline. These tests pin: the rewrite, the
+// no-op cases, initialTime seeding, the mismatched-bar count, the live-meter capacity, undo/redo byte-
+// exactness, the falling notes holding, and edit-OFF byte-identity.
+
+// Read the initial <beats>/<beat-type> from a serialized score (the meter the pill seeds from).
+function serializedMeter(xml: string): { beats: number; beatType: number } {
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  const time = doc.getElementsByTagName("time").item(0);
+  return {
+    beats: Number(time?.getElementsByTagName("beats").item(0)?.textContent ?? "0"),
+    beatType: Number(time?.getElementsByTagName("beat-type").item(0)?.textContent ?? "0"),
+  };
+}
+
+// Two FULL 4/4 bars (divisions=4, capacity 16 each): bar 1 = four quarters, bar 2 = a whole note. Both
+// sum to 16, so at 4/4 nothing is over/under-full; relabeled to 3/4 (capacity 12) BOTH are over-full.
+const TIME_4_4_TWO_FULL_BARS = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>F</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>G</step><octave>5</octave></pitch><duration>16</duration><voice>1</voice><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+// One bar (divisions=4) declared 4/4 but whose CONTENT sums to 12 divisions (a half note + a quarter
+// rest): UNDER-full at 4/4 (12 != 16), and a perfect FIT at 3/4 (capacity 12). This is the common OMR
+// misread: the bar is really 3/4, the scan mislabeled it 4/4. Used for the live-meter capacity test (a
+// lengthen after relabel must clamp at the 3/4 barline, not the old 4/4 one) + the fits-the-new-meter
+// (0 mismatched) case.
+const TIME_BAR_FITS_3_4 = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>8</duration><voice>1</voice><type>half</type></note>
+      <note><rest/><duration>4</duration><voice>1</voice><type>quarter</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+const REVERIE_TIME_XML = readFileSync(
+  join(process.cwd(), "src", "test-fixtures", "reverie-omr.musicxml"),
+  "utf8",
+);
+
+describe("ScoreModel.initialTime seeds the pill from the initial <time>", () => {
+  it("reads the piece-level beats/beat-type", () => {
+    const model = parseScoreModel(TIME_4_4_TWO_FULL_BARS);
+    expect(model.initialTime()).toEqual({ beats: 4, beatType: 4 });
+  });
+
+  it("falls back to 4/4 when the score declares no <time>", () => {
+    const noTime = TIME_4_4_TWO_FULL_BARS.replace(
+      "<time><beats>4</beats><beat-type>4</beat-type></time>",
+      "",
+    );
+    const model = parseScoreModel(noTime);
+    expect(model.initialTime()).toEqual({ beats: 4, beatType: 4 });
+  });
+
+  it("reads a non-4/4 meter (3/4) as declared", () => {
+    const threeFour = TIME_4_4_TWO_FULL_BARS.replace(
+      "<beats>4</beats><beat-type>4</beat-type>",
+      "<beats>3</beats><beat-type>4</beat-type>",
+    );
+    const model = parseScoreModel(threeFour);
+    expect(model.initialTime()).toEqual({ beats: 3, beatType: 4 });
+  });
+});
+
+describe("ScoreModel.setTimeSignature rewrites the initial <time> (declaration-only)", () => {
+  it("rewrites <beats> + <beat-type> to the new meter", () => {
+    const model = parseScoreModel(TIME_4_4_TWO_FULL_BARS);
+    const rec = model.setTimeSignature(3, 4); // 4/4 -> 3/4
+    expect(rec).not.toBeNull();
+    expect(rec?.oldBeats).toBe(4);
+    expect(rec?.oldBeatType).toBe(4);
+    expect(rec?.newBeats).toBe(3);
+    expect(rec?.newBeatType).toBe(4);
+    expect(serializedMeter(model.serialize())).toEqual({ beats: 3, beatType: 4 });
+    expect(model.initialTime()).toEqual({ beats: 3, beatType: 4 });
+  });
+
+  it("rewrites only the INITIAL <time>, never a barline / note / duration (declaration-only)", () => {
+    const model = parseScoreModel(TIME_4_4_TWO_FULL_BARS);
+    const notesBefore = model.handles.map((h) => ({
+      midi: h.midi,
+      onset: h.onsetSec,
+      dur: h.durationDivs,
+    }));
+    model.setTimeSignature(6, 8);
+    const notesAfter = model.handles.map((h) => ({
+      midi: h.midi,
+      onset: h.onsetSec,
+      dur: h.durationDivs,
+    }));
+    // No note moved, retimed, or changed length: the only DOM change is the <time> numerals.
+    expect(notesAfter).toEqual(notesBefore);
+    // Each bar's musical length is unchanged (no barline moved).
+    expect(measureFilledDivsAt(model.serialize(), 0)).toBe(16);
+    expect(measureFilledDivsAt(model.serialize(), 1)).toBe(16);
+  });
+
+  it("supports every preset meter (2/2, 6/8, 12/8, ...) as a plain numeral rewrite", () => {
+    for (const [beats, beatType] of [
+      [3, 4],
+      [2, 4],
+      [2, 2],
+      [6, 8],
+      [3, 8],
+      [12, 8],
+    ] as const) {
+      const model = parseScoreModel(TIME_4_4_TWO_FULL_BARS);
+      model.setTimeSignature(beats, beatType);
+      expect(serializedMeter(model.serialize())).toEqual({ beats, beatType });
+    }
+  });
+
+  it("is a no-op (returns null) when the meter is unchanged", () => {
+    const model = parseScoreModel(TIME_4_4_TWO_FULL_BARS);
+    const before = model.serialize();
+    expect(model.setTimeSignature(4, 4)).toBeNull(); // already 4/4
+    expect(model.serialize()).toBe(before); // untouched
+  });
+
+  it("is a no-op (returns null) for a score with NO initial <time>", () => {
+    const noTime = TIME_4_4_TWO_FULL_BARS.replace(
+      "<time><beats>4</beats><beat-type>4</beat-type></time>",
+      "",
+    );
+    const model = parseScoreModel(noTime);
+    const before = model.serialize();
+    expect(model.setTimeSignature(3, 4)).toBeNull();
+    expect(model.serialize()).toBe(before);
+  });
+});
+
+describe("ScoreModel.barsNotMatchingMeter + the SetTimeRecord mismatched-bar count (SIG-3 guardrail)", () => {
+  it("reports 0 when every bar already fills the meter (4/4, both bars full)", () => {
+    const model = parseScoreModel(TIME_4_4_TWO_FULL_BARS);
+    expect(model.barsNotMatchingMeter()).toBe(0);
+  });
+
+  it("reports N when bars no longer fit after a relabel (two full 4/4 bars -> 3/4 = 2 over-full)", () => {
+    const model = parseScoreModel(TIME_4_4_TWO_FULL_BARS);
+    const rec = model.setTimeSignature(3, 4)!; // capacity now 12; both 16-div bars are over-full
+    expect(rec.mismatchedBars).toBe(2);
+    expect(model.barsNotMatchingMeter()).toBe(2);
+  });
+
+  it("a 4/4-FULL bar relabeled 3/4 reports as over-full (the over/under case)", () => {
+    // A single full 4/4 bar (the first bar of the two-bar fixture, isolated): 16 divs, relabel to 3/4.
+    const oneFullBar = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>16</duration><voice>1</voice><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const model = parseScoreModel(oneFullBar);
+    expect(model.barsNotMatchingMeter()).toBe(0); // fits 4/4
+    const rec = model.setTimeSignature(3, 4)!;
+    expect(rec.mismatchedBars).toBe(1); // 16 divs over-fills the 12-div 3/4 bar
+  });
+
+  it("reports 0 when a mislabeled bar FITS the corrected meter (4/4-labeled 3/4 content -> 3/4)", () => {
+    const model = parseScoreModel(TIME_BAR_FITS_3_4);
+    expect(model.barsNotMatchingMeter()).toBe(1); // 12-div content is UNDER-full at the declared 4/4
+    const rec = model.setTimeSignature(3, 4)!; // correct the label
+    expect(rec.mismatchedBars).toBe(0); // now it fits exactly: nothing to fix
+    expect(model.barsNotMatchingMeter()).toBe(0);
+  });
+});
+
+describe("CRITICAL: a duration edit AFTER a time change uses the NEW meter's bar capacity (live <time>)", () => {
+  it("a lengthen after relabel to 3/4 clamps at the NEW 3-beat barline, not the old 4/4 one", () => {
+    const model = parseScoreModel(TIME_BAR_FITS_3_4); // half C5 (8) + quarter rest (4) = 12 divs
+    // First confirm the live-meter contrast: at the (wrong) declared 4/4, the half lengthened to whole
+    // would FIT (16 <= 16). We do not mutate here; the next model proves the OLD-meter outcome.
+    const atFourFour = parseScoreModel(TIME_BAR_FITS_3_4);
+    atFourFour.changeDuration(atFourFour.handles[0].id, "longer"); // half -> ... at 4/4
+    expect(noteInfo(atFourFour.serialize(), "C").dur).toBe(16); // whole: the old 4/4 capacity allowed it
+
+    // Now correct the meter to 3/4 (capacity 12), THEN lengthen the same half. The duration editor must
+    // read the LIVE 3/4 and CLAMP the note to fill the 12-div bar (a dotted half), never the 16-div whole.
+    const rec = model.setTimeSignature(3, 4)!;
+    expect(rec.mismatchedBars).toBe(0); // the bar fits 3/4 exactly before the duration edit
+    model.changeDuration(model.handles[0].id, "longer"); // half -> clamps at the 3/4 barline
+    const c = noteInfo(model.serialize(), "C");
+    expect(c.dur).toBe(12); // filled the 3/4 bar (dotted half), NOT the 4/4 whole (16)
+    expect(measureFilledDivsAt(model.serialize(), 0)).toBe(12); // bar exactly full at the new capacity
+  });
+
+  it("an over-full bar after relabel can be SHORTENED back under the new capacity (leaves a rest)", () => {
+    // A full 4/4 bar (whole, 16) relabeled to 3/4 is over-full. The user shortens the note; the duration
+    // editor leaves a rest, and the new note + rest fit the bar's structure (declaration-only fixed-bar).
+    const oneFullBar = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>16</duration><voice>1</voice><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const model = parseScoreModel(oneFullBar);
+    model.setTimeSignature(3, 4);
+    model.changeDuration(model.handles[0].id, "shorter"); // whole (16) -> half (8), freed 8 -> rest
+    const c = noteInfo(model.serialize(), "C");
+    expect(c.dur).toBe(8); // a step shorter on the plain ladder
+    // The bar's total musical length is unchanged by a shorten (fixed-bar: the freed time becomes a rest).
+    expect(measureFilledDivsAt(model.serialize(), 0)).toBe(16);
+  });
+});
+
+describe("ScoreModel.setTimeSignature undo/redo via restoreTime is byte-exact", () => {
+  it("undo restores the exact prior <time> (serialize byte-identical)", () => {
+    const model = parseScoreModel(TIME_4_4_TWO_FULL_BARS);
+    const before = model.serialize();
+    const rec = model.setTimeSignature(3, 4)!;
+    expect(model.serialize()).not.toBe(before); // the edit changed the document
+    model.restoreTime(rec);
+    expect(model.serialize()).toBe(before); // restored byte-for-byte
+  });
+
+  it("redo (re-running setTimeSignature) re-applies the same change", () => {
+    const model = parseScoreModel(TIME_4_4_TWO_FULL_BARS);
+    const rec = model.setTimeSignature(6, 8)!;
+    const afterEdit = model.serialize();
+    model.restoreTime(rec);
+    model.setTimeSignature(6, 8); // re-apply (what applyCommand does on redo): deterministic, same result
+    expect(model.serialize()).toBe(afterEdit);
+  });
+
+  it("a chain undo restores each prior meter exactly (4/4 -> 3/4 -> 6/8, undo twice)", () => {
+    const model = parseScoreModel(TIME_4_4_TWO_FULL_BARS);
+    const at44 = model.serialize();
+    const rec34 = model.setTimeSignature(3, 4)!; // 4/4 -> 3/4
+    const at34 = model.serialize();
+    const rec68 = model.setTimeSignature(6, 8)!; // 3/4 -> 6/8
+    model.restoreTime(rec68); // back to 3/4 (its record restores 3/4)
+    expect(model.serialize()).toBe(at34);
+    model.restoreTime(rec34); // back to 4/4 (its record restores the original)
+    expect(model.serialize()).toBe(at44);
+  });
+});
+
+describe("ScoreModel.setTimeSignature is FALLING-NOTES-INVARIANT (no MIDI/time/duration moves)", () => {
+  it("the derived falling notes are unchanged by a time edit (declaration-only)", () => {
+    const model = parseScoreModel(TIME_4_4_TWO_FULL_BARS);
+    const elementToHand = new Map<Element, Hand | undefined>();
+    const before = deriveVisNotesFromModel(model.handles, elementToHand);
+    model.setTimeSignature(3, 4);
+    const after = deriveVisNotesFromModel(model.handles, elementToHand);
+    expect(after.map((n) => ({ midi: n.midi, time: n.time, duration: n.duration }))).toEqual(
+      before.map((n) => ({ midi: n.midi, time: n.time, duration: n.duration })),
+    );
+  });
+});
+
+describe("ScoreModel.setTimeSignature on the REAL reverie file (4/4, 185 notes)", () => {
+  it("rewrites reverie's meter, keeps all 185 handles + their geometry, undo byte-exact", () => {
+    const model = parseScoreModel(REVERIE_TIME_XML);
+    expect(model.handles.length).toBe(185);
+    expect(model.initialTime()).toEqual({ beats: 4, beatType: 4 });
+    const beforeXml = model.serialize();
+    const beforeGeom = model.handles.map((h) => ({ midi: h.midi, onset: h.onsetSec }));
+
+    const rec = model.setTimeSignature(2, 2)!; // relabel to cut time
+    expect(serializedMeter(model.serialize())).toEqual({ beats: 2, beatType: 2 });
+    expect(model.handles.length).toBe(185); // declaration-only: no handle added/removed
+    expect(model.handles.map((h) => ({ midi: h.midi, onset: h.onsetSec }))).toEqual(beforeGeom);
+
+    model.restoreTime(rec);
+    expect(model.serialize()).toBe(beforeXml); // undo byte-exact
+  });
+});
+
+describe("SET-TIME edit-OFF no-op: parsing without a time edit never mutates the <time>", () => {
+  it("serialize() of a parsed-but-UNEDITED score round-trips the meter unchanged", () => {
+    const model = parseScoreModel(TIME_4_4_TWO_FULL_BARS);
+    expect(serializedMeter(model.serialize())).toEqual({ beats: 4, beatType: 4 });
+    // The element count is unchanged (no stray child from the parse), like the key edit-OFF test.
+    const count = (x: string) =>
+      new DOMParser().parseFromString(x, "application/xml").getElementsByTagName("*").length;
+    expect(count(model.serialize())).toBe(count(TIME_4_4_TWO_FULL_BARS));
+  });
+});

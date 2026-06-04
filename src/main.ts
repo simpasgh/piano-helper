@@ -33,12 +33,19 @@ import {
   type AddNoteCommand,
   type ChangeDurationCommand,
   type SetKeyCommand,
+  type SetTimeCommand,
 } from "./edit-commands";
 import {
   CIRCLE_OF_FIFTHS,
   keyMajorName,
   buildKeyOptionButton,
 } from "./key-names";
+import {
+  PRESET_METERS,
+  buildTimeOptionButton,
+  meterSlashLabel,
+  meterSpokenLabel,
+} from "./time-names";
 import { shouldStartPitchDrag } from "./edit-pointer";
 import {
   staffNavOrder,
@@ -183,6 +190,12 @@ const keySigBtn = document.getElementById("key-sig-btn") as HTMLButtonElement;
 const keySigMenu = document.getElementById("key-sig-menu") as HTMLDivElement;
 const keySigLabel = document.getElementById("key-sig-label") as HTMLSpanElement;
 const keySigWrap = keySigBtn.closest(".edit-sig-wrap") as HTMLDivElement;
+// SIGNATURE EDITING (SIG-3): the time-signature pill + its popover picker (the 7 preset meters). The
+// pill shows the current meter as slashed text + opens the grid popover, built once from PRESET_METERS.
+const timeSigBtn = document.getElementById("time-sig-btn") as HTMLButtonElement;
+const timeSigMenu = document.getElementById("time-sig-menu") as HTMLDivElement;
+const timeSigLabel = document.getElementById("time-sig-label") as HTMLSpanElement;
+const timeSigWrap = timeSigBtn.closest(".edit-sig-wrap") as HTMLDivElement;
 const editLive = document.getElementById("edit-live") as HTMLSpanElement;
 const tempoSlider = document.getElementById("tempo-slider") as HTMLInputElement;
 const tempoReadout = document.getElementById("tempo-readout") as HTMLButtonElement;
@@ -625,9 +638,12 @@ async function enterEditMode(): Promise<void> {
     );
     reflectUndoRedoButtons();
     reflectSharedSelection();
-    // SIGNATURE EDITING (SIG-2/SIG-5): seed the key pill + the popover's checked row from the model's
-    // initial <key>, so the pill reads the declared key the OMR gave (the passive readout half).
+    // SIGNATURE EDITING (SIG-2/SIG-5): seed the key + time pills + each popover's selected cell from the
+    // model's initial <key>/<time>, so the pills read the declared signatures the OMR gave (the passive
+    // readout half). The time pill seeds from the initial meter (SIG-3).
     reflectKeySig(scoreModel.initialFifths());
+    const t0 = scoreModel.initialTime();
+    reflectTimeSig(t0.beats, t0.beatType);
     editLive.textContent =
       "Edit mode on. Click a note on the staff or the falling notes to select it, then edit its pitch.";
   } catch (err) {
@@ -649,9 +665,10 @@ function exitEditMode(): void {
   editBtn.title =
     "Edit mode off. Click to fix wrong notes on the staff or the falling notes.";
   verovioCredit.hidden = true;
-  // SIGNATURE EDITING: close the key popover if it was open (the toolbar is about to hide; leaving the
+  // SIGNATURE EDITING: close the key + time popovers if open (the toolbar is about to hide; leaving a
   // popover open would orphan its outside-pointer listener).
   closeKeySigMenu();
+  closeTimeSigMenu();
   editToolbar.hidden = true;
   sheetContainer.classList.remove("editing");
   scoreModel = null;
@@ -807,7 +824,7 @@ function renderVerovio(): void {
   verovioHost.setAttribute("role", "application");
   verovioHost.setAttribute(
     "aria-label",
-    "Staff editor. Left and right select a note or a rest; up and down change a note's pitch by a step; Control with up or down changes by a semitone; Shift with up or down by an octave; comma makes a note shorter and period makes it longer, crossing into the next bar with a tie when it must; semicolon dots the note; on a rest, press Enter to add a note of the same duration; Delete removes a note; Control Z undoes; use the key button on the toolbar to fix the key signature for the whole piece.",
+    "Staff editor. Left and right select a note or a rest; up and down change a note's pitch by a step; Control with up or down changes by a semitone; Shift with up or down by an octave; comma makes a note shorter and period makes it longer, crossing into the next bar with a tie when it must; semicolon dots the note; on a rest, press Enter to add a note of the same duration; Delete removes a note; Control Z undoes; use the key and time buttons on the toolbar to fix the key or time signature for the whole piece.",
   );
   // Always (re)attach the host to #sheet. OSMD owns #sheet and an osmd.load/render between edit
   // sessions can detach our node, so re-appending here keeps the render going into the live DOM
@@ -1227,6 +1244,17 @@ function doUndo(): void {
     finishEdit(`Undid key change. Back to ${keyMajorName(cmd.before)}.`, score ? score.notes.slice() : undefined);
     return;
   }
+  if (cmd.kind === "setTime") {
+    // Undo of a time edit: the model restored the prior <beats>/<beat-type> (restoreTime). Declaration-
+    // only, so the falling notes do not move; refresh the pill to the prior meter, re-engrave the staff
+    // (the <time> re-engraves back), and announce the reversal (SIG-5).
+    reflectTimeSig(cmd.before.beats, cmd.before.beatType);
+    finishEdit(
+      `Undid time change. Back to ${meterSlashLabel(cmd.before.beats, cmd.before.beatType)}.`,
+      score ? score.notes.slice() : undefined,
+    );
+    return;
+  }
   // Re-select the affected note (it now shows its prior pitch) and announce what reversed. Do
   // NOT rebuild the maps here: finishEdit projects the reverted model pitch onto the falling
   // notes using the existing (index-stable) map, THEN reloadNotes + rederiveMaps rebuild it
@@ -1273,6 +1301,14 @@ function doRedo(): void {
     // re-engrave the staff and announce like the forward edit.
     reflectKeySig(cmd.after);
     finishEdit(`Key signature set to ${keyMajorName(cmd.after)}.`, score ? score.notes.slice() : undefined);
+    return;
+  }
+  if (cmd.kind === "setTime") {
+    // Redo of a time edit: applyCommand re-ran model.setTimeSignature(after) (deterministic), so the
+    // meter is re-applied + the mismatched-bar count re-derived. Declaration-only, so the falling notes
+    // hold; refresh the pill + re-engrave the staff and announce like the forward edit (same string).
+    reflectTimeSig(cmd.after.beats, cmd.after.beatType);
+    finishEdit(timeSetAnnounce(cmd.after.beats, cmd.after.beatType, cmd.record), score ? score.notes.slice() : undefined);
     return;
   }
   // Same map ordering as doUndo: project with the existing map, then rebuild in finishEdit.
@@ -2671,9 +2707,10 @@ exportMusicxmlBtn.addEventListener("click", () => {
 // roving, focus returns to the opener), themed to match. Built once: the option rows never change.
 
 // One option button per key, in circle-of-fifths order. Each row: a brass check (shown on the current
-// key) + the spoken name (accidental count, major or relative minor). aria-checked marks the current
-// key; the click applies that fifths. Stored in document order so roving nav matches the visual list.
-// Built via the shared buildKeyOptionButton (also unit-tested), then wired to the edit on click.
+// key) + the spoken name (accidental count, major or relative minor). aria-selected marks the current
+// key (the listbox single-select pattern, consistent with the time picker); the click applies that
+// fifths. Stored in document order so roving nav matches the visual list. Built via the shared
+// buildKeyOptionButton (also unit-tested), then wired to the edit on click.
 const keySigItems: HTMLButtonElement[] = CIRCLE_OF_FIFTHS.map((k) => {
   const btn = buildKeyOptionButton(document, k.fifths, false);
   btn.addEventListener("click", () => {
@@ -2684,21 +2721,21 @@ const keySigItems: HTMLButtonElement[] = CIRCLE_OF_FIFTHS.map((k) => {
 });
 keySigMenu.append(...keySigItems);
 
-// Mark the option matching `fifths` as checked (and clear the rest), so the popover shows the current
+// Mark the option matching `fifths` as selected (and clear the rest), so the popover shows the current
 // key. Called on entering edit mode + after every key edit / undo / redo.
-function reflectKeySigChecked(fifths: number): void {
+function reflectKeySigSelected(fifths: number): void {
   for (const btn of keySigItems) {
-    btn.setAttribute("aria-checked", String(Number(btn.dataset.fifths) === fifths));
+    btn.setAttribute("aria-selected", String(Number(btn.dataset.fifths) === fifths));
   }
 }
 
-// Seed/refresh the pill label + its aria-label + the popover's checked row from a fifths value. The
+// Seed/refresh the pill label + its aria-label + the popover's selected row from a fifths value. The
 // pill IS the persistent readout (SIG-5), so this runs on entering edit mode and after every key edit.
 function reflectKeySig(fifths: number): void {
   const name = keyMajorName(fifths);
   keySigLabel.textContent = name;
   keySigBtn.setAttribute("aria-label", `Key signature: ${name}. Change the key.`);
-  reflectKeySigChecked(fifths);
+  reflectKeySigSelected(fifths);
 }
 
 function openKeySigMenu(): void {
@@ -2706,8 +2743,8 @@ function openKeySigMenu(): void {
   keySigMenu.hidden = false;
   keySigBtn.setAttribute("aria-expanded", "true");
   // Focus the CURRENT key row on open (SIG-2), else the first row.
-  const checked = keySigItems.find((b) => b.getAttribute("aria-checked") === "true");
-  (checked ?? keySigItems[0])?.focus();
+  const selected = keySigItems.find((b) => b.getAttribute("aria-selected") === "true");
+  (selected ?? keySigItems[0])?.focus();
   document.addEventListener("pointerdown", onKeySigOutsidePointer, true);
 }
 
@@ -2792,6 +2829,164 @@ function setKeyEdit(fifths: number): void {
   // Pitch-preserving: pass the CURRENT falling notes so they do not move/recolor/re-time; finishEdit
   // re-renders the staff (Verovio re-engraves the new signature + accidentals) and refreshes the maps.
   finishEdit(`Key signature set to ${keyMajorName(fifths)}.`, score ? score.notes.slice() : undefined);
+}
+
+// ===== Time-signature picker (Smart Edit Mode SIGNATURE EDITING, SIG-2 / SIG-3) =====
+//
+// The #time-sig-btn pill shows the current meter (slashed "4/4") + opens a popover GRID of the 7 preset
+// meters. Picking one runs the declaration-only model edit (setTimeSignature) through the command stack.
+// The popover mirrors the key picker (absolute panel, click-outside + Esc close, arrow-key roving, focus
+// returns to the opener), themed to match; built once, the cells never change.
+
+// One option cell per preset meter, in grid order. Each cell draws the meter stacked + carries
+// aria-selected (the current meter). The click applies that meter. Built via the shared
+// buildTimeOptionButton (also unit-tested), then wired to the edit on click.
+const timeSigItems: HTMLButtonElement[] = PRESET_METERS.map((m) => {
+  const btn = buildTimeOptionButton(document, m.beats, m.beatType, false);
+  btn.addEventListener("click", () => {
+    closeTimeSigMenu({ restoreFocus: true });
+    setTimeEdit(m.beats, m.beatType);
+  });
+  return btn;
+});
+timeSigMenu.append(...timeSigItems);
+
+// The forward (and redo) announce for a time edit (SIG-5): the all-bars-fit string, else the guardrail
+// string with the count of bars that no longer fill the new meter. Shared by setTimeEdit + the redo path
+// so the two stay identical. `record` carries the just-computed mismatched-bar count.
+function timeSetAnnounce(
+  beats: number,
+  beatType: number,
+  record: { mismatchedBars: number } | null,
+): string {
+  const meter = meterSlashLabel(beats, beatType);
+  const n = record?.mismatchedBars ?? 0;
+  if (n <= 0) return `Time signature set to ${meter}.`;
+  const bars = n === 1 ? "1 bar no longer fills" : `${n} bars no longer fill`;
+  return `Time signature set to ${meter}. ${bars} the bar; adjust their note lengths.`;
+}
+
+// Mark the cell matching (beats, beatType) as selected (and clear the rest), so the grid shows the
+// current meter. Called on entering edit mode + after every time edit / undo / redo.
+function reflectTimeSigSelected(beats: number, beatType: number): void {
+  for (const btn of timeSigItems) {
+    const selected = Number(btn.dataset.beats) === beats && Number(btn.dataset.beatType) === beatType;
+    btn.setAttribute("aria-selected", String(selected));
+  }
+}
+
+// Seed/refresh the pill label + its aria-label + the popover's selected cell from a meter. The pill IS
+// the persistent readout (SIG-5), so this runs on entering edit mode and after every time edit. aria
+// reads the meter as words ("4 4") so a screen reader does not speak "4/4" as a date/fraction.
+function reflectTimeSig(beats: number, beatType: number): void {
+  timeSigLabel.textContent = meterSlashLabel(beats, beatType);
+  timeSigBtn.setAttribute(
+    "aria-label",
+    `Time signature: ${meterSpokenLabel(beats, beatType)}. Change the time signature.`,
+  );
+  reflectTimeSigSelected(beats, beatType);
+}
+
+function openTimeSigMenu(): void {
+  if (timeSigBtn.disabled || !timeSigMenu.hidden) return;
+  timeSigMenu.hidden = false;
+  timeSigBtn.setAttribute("aria-expanded", "true");
+  // Focus the CURRENT meter cell on open (SIG-2), else the first cell.
+  const selected = timeSigItems.find((b) => b.getAttribute("aria-selected") === "true");
+  (selected ?? timeSigItems[0])?.focus();
+  document.addEventListener("pointerdown", onTimeSigOutsidePointer, true);
+}
+
+function closeTimeSigMenu(opts: { restoreFocus?: boolean } = {}): void {
+  if (timeSigMenu.hidden) return;
+  timeSigMenu.hidden = true;
+  timeSigBtn.setAttribute("aria-expanded", "false");
+  document.removeEventListener("pointerdown", onTimeSigOutsidePointer, true);
+  if (opts.restoreFocus) timeSigBtn.focus();
+}
+
+function onTimeSigOutsidePointer(e: PointerEvent): void {
+  if (!timeSigWrap.contains(e.target as Node)) closeTimeSigMenu();
+}
+
+// Roving focus among the meter cells (wrapping), for Up/Down + Home/End inside the open popover. The
+// grid is a single roving ring (Up/Down step one cell), matching the key list's linear roving so the
+// two pickers behave the same for a keyboard user.
+function moveTimeSigFocus(to: 1 | -1 | "first" | "last"): void {
+  if (timeSigItems.length === 0) return;
+  if (to === "first") {
+    timeSigItems[0].focus();
+    return;
+  }
+  if (to === "last") {
+    timeSigItems[timeSigItems.length - 1].focus();
+    return;
+  }
+  const idx = timeSigItems.indexOf(document.activeElement as HTMLButtonElement);
+  const next = idx === -1 ? (to === 1 ? 0 : timeSigItems.length - 1) : idx + to;
+  timeSigItems[(next + timeSigItems.length) % timeSigItems.length].focus();
+}
+
+timeSigBtn.addEventListener("click", () => {
+  if (timeSigMenu.hidden) openTimeSigMenu();
+  else closeTimeSigMenu({ restoreFocus: true });
+});
+
+timeSigBtn.addEventListener("keydown", (e) => {
+  if ((e.key === "ArrowDown" || e.key === "ArrowUp") && timeSigMenu.hidden && !timeSigBtn.disabled) {
+    e.preventDefault();
+    openTimeSigMenu();
+  }
+});
+
+timeSigMenu.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    closeTimeSigMenu({ restoreFocus: true });
+  } else if (e.key === "ArrowDown" || e.key === "ArrowRight") {
+    e.preventDefault();
+    moveTimeSigFocus(1);
+  } else if (e.key === "ArrowUp" || e.key === "ArrowLeft") {
+    e.preventDefault();
+    moveTimeSigFocus(-1);
+  } else if (e.key === "Home") {
+    e.preventDefault();
+    moveTimeSigFocus("first");
+  } else if (e.key === "End") {
+    e.preventDefault();
+    moveTimeSigFocus("last");
+  }
+});
+
+// Apply a time-signature edit (SIG-3): rewrite the initial <time>'s <beats>/<beat-type> to the new meter,
+// DECLARATION-ONLY, as ONE undoable command. No barline moves and no note is retimed, so the falling notes
+// are unchanged (we pass the current notes to finishEdit, which re-engraves only the staff meter via
+// Verovio). Bars that no longer fill the new meter are reported in the announce (non-blocking), never auto-
+// fixed; the duration editor now reads the live meter for its bar capacity. A no-op (same meter, or no
+// initial <time>) just reseats the pill. Routed through the command stack so Save/Discard + undo/redo see it.
+function setTimeEdit(beats: number, beatType: number): void {
+  if (!scoreModel || !commandStack) return;
+  const before = scoreModel.initialTime();
+  const cmd: SetTimeCommand = {
+    kind: "setTime",
+    before,
+    after: { beats, beatType },
+    record: null,
+  };
+  // Apply directly (not via push) so a no-op (null record) never pushes a command or wipes the redo
+  // branch, mirroring the key/duration edits' probe-then-pushApplied discipline.
+  applyCommand(scoreModel, cmd);
+  if (!cmd.record) {
+    // No change (already this meter, or the score has no <time>): just reseat the pill, no announce.
+    reflectTimeSig(before.beats, before.beatType);
+    return;
+  }
+  commandStack.pushApplied(cmd);
+  reflectTimeSig(beats, beatType);
+  // Declaration-only: pass the CURRENT falling notes so they do not move/re-time; finishEdit re-renders
+  // the staff (Verovio re-engraves the new meter) and refreshes the maps. The announce names the new meter
+  // and, when bars no longer fill it, how many (the SIG-3 guardrail readout).
+  finishEdit(timeSetAnnounce(beats, beatType, cmd.record), score ? score.notes.slice() : undefined);
 }
 
 // The MusicXML to export: the LIVE edited model in edit mode, else the retained source (null for an

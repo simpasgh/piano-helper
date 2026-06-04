@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it, expect, beforeAll } from "vitest";
 import { CIRCLE_OF_FIFTHS, buildKeyOptionButton, keyRowLabel } from "./key-names";
+import { PRESET_METERS, buildTimeOptionButton, meterCellLabel } from "./time-names";
 
 // Regression for the LARGE-score edit-toolbar disappearance (root-caused in a browser on the
 // user's 185-note reverie): #edit-toolbar used to be nested INSIDE #sheet. OSMD owns #sheet and an
@@ -227,9 +228,11 @@ describe("Key-signature pill (Smart Edit SIGNATURE EDITING, SIG-2) lives in the 
     expect(kids.indexOf(sigGroup)).toBeLessThan(kids.indexOf(commit));
   });
 
-  it("is a labeled PILL that opens a dialog popover (aria-haspopup, aria-expanded, aria-controls)", () => {
+  it("is a labeled PILL that opens a listbox popover (aria-haspopup, aria-expanded, aria-controls)", () => {
     const pill = doc.getElementById("key-sig-btn") as HTMLButtonElement;
-    expect(pill.getAttribute("aria-haspopup")).toBe("dialog");
+    // SINGLE-SELECT listbox (the idiomatic select pattern, consistent with the time picker + correct,
+    // unlike the prior dialog+menuitemradio nit): the pill declares aria-haspopup="listbox".
+    expect(pill.getAttribute("aria-haspopup")).toBe("listbox");
     expect(pill.getAttribute("aria-expanded")).toBe("false"); // starts closed
     expect(pill.getAttribute("aria-controls")).toBe("key-sig-menu");
     // The pill carries the brass text variant class + the current key as readable text.
@@ -244,10 +247,12 @@ describe("Key-signature pill (Smart Edit SIGNATURE EDITING, SIG-2) lives in the 
     expect(pill.getAttribute("title") ?? "").not.toContain("—");
   });
 
-  it("has an empty popover container (role=dialog, hidden) anchored in the signatures wrap", () => {
+  it("has an empty popover container (role=listbox, hidden) anchored in the signatures wrap", () => {
     const menu = doc.getElementById("key-sig-menu") as HTMLElement;
     expect(menu, "#key-sig-menu should exist").not.toBeNull();
-    expect(menu.getAttribute("role")).toBe("dialog");
+    // Realigned to the idiomatic single-select listbox (was role=dialog, which mismatched its
+    // menuitemradio rows). The time popover uses the SAME role, so the two pickers are consistent.
+    expect(menu.getAttribute("role")).toBe("listbox");
     expect(menu.hasAttribute("hidden")).toBe(true);
     expect(menu.children.length).toBe(0); // rows are built at runtime in main.ts
     expect(sheet.contains(menu)).toBe(false);
@@ -267,24 +272,132 @@ describe("Key-signature popover OPTIONS (built via the shared builder, SIG-4)", 
     }
   });
 
-  it("each option carries aria-checked (true only for the current key) + the spoken row label", () => {
+  it("each option carries aria-selected (true only for the current key) + the spoken row label", () => {
     const d = new DOMParser().parseFromString("<!doctype html><html><body></body></html>", "text/html");
-    // The current key is C major (fifths 0); build the row for it CHECKED and a neighbour UNCHECKED.
+    // The current key is C major (fifths 0); build the row for it SELECTED and a neighbour UNSELECTED.
     const current = buildKeyOptionButton(d, 0, true);
     const other = buildKeyOptionButton(d, 2, false);
-    expect(current.getAttribute("aria-checked")).toBe("true");
-    expect(other.getAttribute("aria-checked")).toBe("false");
+    expect(current.getAttribute("aria-selected")).toBe("true");
+    expect(other.getAttribute("aria-selected")).toBe("false");
     // The spoken label leads with the accidental count + both names (SIG-4).
     expect(current.getAttribute("aria-label")).toBe("no sharps or flats, C major or A minor");
     expect(other.getAttribute("aria-label")).toBe("2 sharps, D major or B minor");
-    // data-fifths stores the value the click applies; the row is a radio option.
+    // data-fifths stores the value the click applies; the row is a listbox option (consistent w/ time).
     expect(current.dataset.fifths).toBe("0");
-    expect(other.getAttribute("role")).toBe("menuitemradio");
+    expect(other.getAttribute("role")).toBe("option");
   });
 
   it("every key row's spoken label is em-dash-free (project style rule)", () => {
     for (const k of CIRCLE_OF_FIFTHS) {
       const label = keyRowLabel(k.fifths);
+      expect(label).not.toContain("—");
+      expect(label).not.toContain("–");
+    }
+  });
+});
+
+describe("Time-signature pill (Smart Edit SIGNATURE EDITING, SIG-3) lives in the edit toolbar", () => {
+  it("has #time-sig-btn inside #edit-toolbar (not in OSMD's #sheet)", () => {
+    const pill = doc.getElementById("time-sig-btn");
+    expect(pill, "#time-sig-btn should exist").not.toBeNull();
+    expect(editToolbar.contains(pill!)).toBe(true);
+    // Same OSMD-cannot-detach invariant as the rest of the toolbar (it is a #sheet sibling).
+    expect(sheet.contains(pill)).toBe(false);
+  });
+
+  it("sits in the SAME signatures group as the key pill, right AFTER it (key, then time)", () => {
+    const keyPill = doc.getElementById("key-sig-btn") as HTMLElement;
+    const timePill = doc.getElementById("time-sig-btn") as HTMLElement;
+    const keyGroup = keyPill.closest(".edit-sig-group") as HTMLElement;
+    const timeGroup = timePill.closest(".edit-sig-group") as HTMLElement;
+    expect(keyGroup, ".edit-sig-group should wrap the key pill").not.toBeNull();
+    expect(timeGroup).toBe(keyGroup); // both pills share the one signatures group
+    // The time pill comes after the key pill in document order within that group.
+    const buttons = Array.from(keyGroup.querySelectorAll("button")).map((b) => b.id);
+    expect(buttons.indexOf("key-sig-btn")).toBeLessThan(buttons.indexOf("time-sig-btn"));
+  });
+
+  it("the signatures group still sits BETWEEN #add-note and the commit group", () => {
+    const sigGroup = (doc.getElementById("time-sig-btn") as HTMLElement).closest(
+      ".edit-sig-group",
+    ) as HTMLElement;
+    const kids = Array.from(editToolbar.children);
+    const addNote = doc.getElementById("add-note") as HTMLElement;
+    const commit = editToolbar.querySelector(".edit-commit-group") as HTMLElement;
+    expect(kids.indexOf(sigGroup)).toBeGreaterThan(kids.indexOf(addNote));
+    expect(kids.indexOf(sigGroup)).toBeLessThan(kids.indexOf(commit));
+  });
+
+  it("is a labeled PILL that opens a listbox popover (aria-haspopup, aria-expanded, aria-controls)", () => {
+    const pill = doc.getElementById("time-sig-btn") as HTMLButtonElement;
+    expect(pill.getAttribute("aria-haspopup")).toBe("listbox"); // same single-select pattern as key
+    expect(pill.getAttribute("aria-expanded")).toBe("false"); // starts closed
+    expect(pill.getAttribute("aria-controls")).toBe("time-sig-menu");
+    expect(pill.classList.contains("edit-sig-btn")).toBe(true);
+    expect(doc.getElementById("time-sig-label")?.textContent).toBe("4/4"); // seeded slashed label
+  });
+
+  it("seeds the aria-label as the current meter read as WORDS, with no em dash (SIG-5 spoken name)", () => {
+    const pill = doc.getElementById("time-sig-btn") as HTMLButtonElement;
+    // The meter is spoken as words ("4 4") so a screen reader does not say a date/fraction.
+    expect(pill.getAttribute("aria-label")).toBe("Time signature: 4 4. Change the time signature.");
+    expect(pill.getAttribute("aria-label") ?? "").not.toContain("—");
+    expect(pill.getAttribute("title") ?? "").not.toContain("—");
+  });
+
+  it("has an empty popover container (role=listbox, hidden) anchored in the signatures wrap", () => {
+    const menu = doc.getElementById("time-sig-menu") as HTMLElement;
+    expect(menu, "#time-sig-menu should exist").not.toBeNull();
+    expect(menu.getAttribute("role")).toBe("listbox"); // consistent with #key-sig-menu
+    expect(menu.hasAttribute("hidden")).toBe(true);
+    expect(menu.children.length).toBe(0); // cells are built at runtime in main.ts
+    expect(sheet.contains(menu)).toBe(false);
+  });
+});
+
+describe("Time-signature popover OPTIONS (built via the shared builder, SIG-3)", () => {
+  // The cells are built at runtime in main.ts from buildTimeOptionButton; test the builder directly so
+  // the cell structure (incl. aria-selected on the current meter) is pinned without main.ts side effects.
+  it("offers exactly the 7 preset meters in order (4/4, 3/4, 2/4, 2/2, 6/8, 3/8, 12/8)", () => {
+    expect(PRESET_METERS).toHaveLength(7);
+    expect(PRESET_METERS.map((m) => `${m.beats}/${m.beatType}`)).toEqual([
+      "4/4",
+      "3/4",
+      "2/4",
+      "2/2",
+      "6/8",
+      "3/8",
+      "12/8",
+    ]);
+  });
+
+  it("each cell carries role=option + aria-selected (true only for the current meter) + the spoken label", () => {
+    const d = new DOMParser().parseFromString("<!doctype html><html><body></body></html>", "text/html");
+    const current = buildTimeOptionButton(d, 4, 4, true); // the current 4/4 meter, SELECTED
+    const other = buildTimeOptionButton(d, 3, 4, false); // a 3/4 cell, UNSELECTED
+    expect(current.getAttribute("role")).toBe("option"); // SAME pattern as the key options
+    expect(current.getAttribute("aria-selected")).toBe("true");
+    expect(other.getAttribute("aria-selected")).toBe("false");
+    // The spoken label reads the meter as words + "time" (SIG-5), so no date/fraction is announced.
+    expect(current.getAttribute("aria-label")).toBe("4 4 time");
+    expect(other.getAttribute("aria-label")).toBe("3 4 time");
+    // data-beats / data-beat-type store the meter the click applies.
+    expect(current.dataset.beats).toBe("4");
+    expect(current.dataset.beatType).toBe("4");
+  });
+
+  it("draws the meter STACKED (numerator over denominator) inside the cell", () => {
+    const d = new DOMParser().parseFromString("<!doctype html><html><body></body></html>", "text/html");
+    const cell = buildTimeOptionButton(d, 6, 8, false);
+    const num = cell.querySelector(".edit-sig-meter-num");
+    const den = cell.querySelector(".edit-sig-meter-den");
+    expect(num?.textContent).toBe("6");
+    expect(den?.textContent).toBe("8");
+  });
+
+  it("every meter cell's spoken label is em-dash-free (project style rule)", () => {
+    for (const m of PRESET_METERS) {
+      const label = meterCellLabel(m.beats, m.beatType);
       expect(label).not.toContain("—");
       expect(label).not.toContain("–");
     }

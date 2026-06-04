@@ -12,6 +12,7 @@ import {
   type AddNoteCommand,
   type ChangeDurationCommand,
   type SetKeyCommand,
+  type SetTimeCommand,
 } from "./edit-commands";
 import type {
   AddRecord,
@@ -20,6 +21,7 @@ import type {
   ModelPitch,
   ScoreModel,
   SetKeyRecord,
+  SetTimeRecord,
 } from "./edit-model";
 
 const p = (step: ModelPitch["step"], octave: number, alter = 0): ModelPitch => ({
@@ -43,6 +45,9 @@ function stubModel(): ScoreModel & {
   keyChanges: number[];
   keyRestores: SetKeyRecord[];
   currentFifths: number;
+  timeChanges: { beats: number; beatType: number }[];
+  timeRestores: SetTimeRecord[];
+  currentTime: { beats: number; beatType: number };
 } {
   const pitches = new Map<number, ModelPitch>();
   const deleted: number[] = [];
@@ -53,6 +58,8 @@ function stubModel(): ScoreModel & {
   const durationRestores: ChangeDurationRecord[] = [];
   const keyChanges: number[] = [];
   const keyRestores: SetKeyRecord[] = [];
+  const timeChanges: { beats: number; beatType: number }[] = [];
+  const timeRestores: SetTimeRecord[] = [];
   const self = {
     pitches,
     deleted,
@@ -64,6 +71,9 @@ function stubModel(): ScoreModel & {
     keyChanges,
     keyRestores,
     currentFifths: 0,
+    timeChanges,
+    timeRestores,
+    currentTime: { beats: 4, beatType: 4 },
     handles: [],
     restHandles: [],
     fifthsForHandle: () => 0,
@@ -131,6 +141,27 @@ function stubModel(): ScoreModel & {
       keyRestores.push(record);
       self.currentFifths = record.oldFifths; // invert: back to the prior key
     },
+    initialTime: () => self.currentTime,
+    barsNotMatchingMeter: () => 0,
+    setTimeSignature: (beats: number, beatType: number): SetTimeRecord | null => {
+      // A no-op when the meter is unchanged (mirrors the real model, so a SetTimeCommand with after ==
+      // current pushes no real edit). Otherwise record the change + advance the stub's current meter.
+      if (beats === self.currentTime.beats && beatType === self.currentTime.beatType) return null;
+      timeChanges.push({ beats, beatType });
+      const old = self.currentTime;
+      self.currentTime = { beats, beatType };
+      return {
+        oldBeats: old.beats,
+        oldBeatType: old.beatType,
+        newBeats: beats,
+        newBeatType: beatType,
+        mismatchedBars: 0,
+      };
+    },
+    restoreTime: (record: SetTimeRecord) => {
+      timeRestores.push(record);
+      self.currentTime = { beats: record.oldBeats, beatType: record.oldBeatType }; // invert: prior meter
+    },
     serialize: () => "",
   };
   return self;
@@ -171,6 +202,16 @@ const changeDuration = (
 
 const setKey = (before: number, after: number): SetKeyCommand => ({
   kind: "setKey",
+  before,
+  after,
+  record: null,
+});
+
+const setTime = (
+  before: { beats: number; beatType: number },
+  after: { beats: number; beatType: number },
+): SetTimeCommand => ({
+  kind: "setTime",
   before,
   after,
   record: null,
@@ -540,5 +581,82 @@ describe("SetKeyCommand (apply / invert / stack) - the key-signature edit", () =
     expect(model.pitches.get(5)).toEqual(p("C", 4));
     stack.undo(); // then the key edit
     expect(model.currentFifths).toBe(0);
+  });
+});
+
+describe("SetTimeCommand (apply / invert / stack) - the time-signature edit", () => {
+  it("apply rewrites the meter via the model and stashes the record; invert restores the prior meter", () => {
+    const model = stubModel(); // starts at 4/4
+    const cmd = setTime({ beats: 4, beatType: 4 }, { beats: 3, beatType: 4 }); // 4/4 -> 3/4
+    applyCommand(model, cmd);
+    expect(model.timeChanges).toEqual([{ beats: 3, beatType: 4 }]); // routed through model.setTimeSignature
+    expect(model.currentTime).toEqual({ beats: 3, beatType: 4 });
+    expect(cmd.record).not.toBeNull();
+    expect(cmd.record?.oldBeats).toBe(4);
+    expect(cmd.record?.oldBeatType).toBe(4);
+    expect(cmd.record?.newBeats).toBe(3);
+    expect(cmd.record?.newBeatType).toBe(4);
+    const captured = cmd.record;
+    invertCommand(model, cmd);
+    expect(model.timeRestores).toEqual([captured]); // restoreTime got the captured record
+    expect(model.currentTime).toEqual({ beats: 4, beatType: 4 }); // back to 4/4
+  });
+
+  it("push applies a time change and undo restores it (round-trip through the stack)", () => {
+    const model = stubModel();
+    const stack = new CommandStack(model);
+    stack.push(setTime({ beats: 4, beatType: 4 }, { beats: 6, beatType: 8 })); // 4/4 -> 6/8
+    expect(model.currentTime).toEqual({ beats: 6, beatType: 8 });
+    expect(stack.canUndo()).toBe(true);
+    stack.undo();
+    expect(model.timeRestores.length).toBe(1);
+    expect(model.currentTime).toEqual({ beats: 4, beatType: 4 });
+    expect(stack.canRedo()).toBe(true);
+  });
+
+  it("redo re-applies, re-deriving a fresh record (the rewrite is deterministic)", () => {
+    const model = stubModel();
+    const stack = new CommandStack(model);
+    const cmd = setTime({ beats: 4, beatType: 4 }, { beats: 2, beatType: 2 }); // 4/4 -> 2/2
+    stack.push(cmd);
+    const recordAfterPush = cmd.record;
+    stack.undo();
+    expect(model.currentTime).toEqual({ beats: 4, beatType: 4 });
+    stack.redo();
+    expect(model.currentTime).toEqual({ beats: 2, beatType: 2 });
+    expect(model.timeChanges).toEqual([
+      { beats: 2, beatType: 2 },
+      { beats: 2, beatType: 2 },
+    ]); // applied on push AND on redo
+    expect(cmd.record).not.toBeNull();
+    expect(cmd.record).not.toBe(recordAfterPush); // a fresh record, not the stale one
+  });
+
+  it("pushApplied records a directly-run time edit without re-applying it (mirrors the orchestrator)", () => {
+    // main.ts runs model.setTimeSignature DIRECTLY (so a no-op does not push), then records via
+    // pushApplied. The model is already mutated; pushApplied must not run it again.
+    const model = stubModel();
+    const stack = new CommandStack(model);
+    const cmd = setTime({ beats: 4, beatType: 4 }, { beats: 3, beatType: 4 });
+    cmd.record = model.setTimeSignature(cmd.after.beats, cmd.after.beatType); // the direct (already-applied) edit
+    expect(model.timeChanges).toEqual([{ beats: 3, beatType: 4 }]); // applied ONCE
+    expect(model.currentTime).toEqual({ beats: 3, beatType: 4 });
+    stack.pushApplied(cmd);
+    expect(model.timeChanges).toHaveLength(1); // pushApplied did not re-apply
+    stack.undo();
+    expect(model.currentTime).toEqual({ beats: 4, beatType: 4 }); // undo still reverses it
+  });
+
+  it("a time edit then a key edit, both undone in LIFO order, route to the right model calls", () => {
+    const model = stubModel();
+    const stack = new CommandStack(model);
+    stack.push(setTime({ beats: 4, beatType: 4 }, { beats: 3, beatType: 4 })); // 4/4 -> 3/4
+    stack.push(setKey(0, 2)); // C major -> D major
+    expect(model.currentTime).toEqual({ beats: 3, beatType: 4 });
+    expect(model.currentFifths).toBe(2);
+    stack.undo(); // undoes the key edit first
+    expect(model.currentFifths).toBe(0);
+    stack.undo(); // then the time edit
+    expect(model.currentTime).toEqual({ beats: 4, beatType: 4 });
   });
 });

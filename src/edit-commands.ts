@@ -17,6 +17,7 @@ import type {
   ModelPitch,
   ScoreModel,
   SetKeyRecord,
+  SetTimeRecord,
 } from "./edit-model";
 
 // A pitch edit on one model note. `handleId` is the stable handle index; `before`/`after` are
@@ -95,12 +96,26 @@ export interface SetKeyCommand {
   record: SetKeyRecord | null; // filled by apply(); used by invert(). Re-filled on redo.
 }
 
+// A SET-TIME of the piece-level time signature (Smart Edit SIG-3): rewrite the initial <time>'s
+// <beats>/<beat-type> to `after`, DECLARATION-ONLY (no barline moves, no note split, no duration change;
+// the falling notes are unchanged). `before`/`after` are the meters, so a redo re-applies and an undo
+// restores; apply() runs model.setTimeSignature and stashes the SetTimeRecord (the old beats/beat-type +
+// the mismatched-bar count) for the invert + the announce. A no-op set (same meter, or no initial <time>)
+// yields a null record and is never pushed by the caller, so the stack only holds real meter changes.
+export interface SetTimeCommand {
+  kind: "setTime";
+  before: { beats: number; beatType: number }; // the meter before the edit (for the undo announce)
+  after: { beats: number; beatType: number }; // the target meter
+  record: SetTimeRecord | null; // filled by apply(); used by invert(). Re-filled on redo.
+}
+
 export type EditCommand =
   | SetPitchCommand
   | DeleteNoteCommand
   | AddNoteCommand
   | ChangeDurationCommand
-  | SetKeyCommand;
+  | SetKeyCommand
+  | SetTimeCommand;
 
 export function applyCommand(model: ScoreModel, cmd: EditCommand): void {
   switch (cmd.kind) {
@@ -127,6 +142,11 @@ export function applyCommand(model: ScoreModel, cmd: EditCommand): void {
       // deterministic, so a redo reproduces the same pitch-preserving accidental rewrite.
       cmd.record = model.setKeyFifths(cmd.after);
       break;
+    case "setTime":
+      // Re-derive the record on every apply (initial push AND redo): rewriting <beats>/<beat-type> to
+      // `after` is deterministic, so a redo reproduces the same declaration-only meter relabel.
+      cmd.record = model.setTimeSignature(cmd.after.beats, cmd.after.beatType);
+      break;
   }
 }
 
@@ -146,6 +166,9 @@ export function invertCommand(model: ScoreModel, cmd: EditCommand): void {
       break;
     case "setKey":
       if (cmd.record) model.restoreKey(cmd.record);
+      break;
+    case "setTime":
+      if (cmd.record) model.restoreTime(cmd.record);
       break;
   }
 }

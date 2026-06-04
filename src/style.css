@@ -1692,7 +1692,7 @@ button:focus-visible,
 }
 
 /* The check column: a brass tick reserved as a fixed-width gutter so names align; shown only on the
-   current (aria-checked) key. */
+   current (aria-selected) key. */
 .edit-sig-check {
   flex: none;
   width: 16px;
@@ -1701,12 +1701,77 @@ button:focus-visible,
   color: var(--accent);
 }
 
-.edit-sig-item[aria-checked="true"] .edit-sig-check {
+.edit-sig-item[aria-selected="true"] .edit-sig-check {
   opacity: 1;
 }
 
-.edit-sig-item[aria-checked="true"] {
+.edit-sig-item[aria-selected="true"] {
   font-weight: 700;
+}
+
+/* TIME picker (SIG-3): the popover is a small GRID of the 7 preset meters (vs the key list's column).
+   Each cell draws the meter STACKED (numerator over denominator, the engraved look). The grid + cells
+   reuse the same panel chrome as the key list; only the layout + the stacked-numeral glyph differ. */
+.edit-sig-menu-grid:not([hidden]) {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+  min-width: 0;
+}
+
+.edit-sig-menu-grid {
+  min-width: 200px;
+}
+
+/* One preset-meter cell: a square-ish ghost tile with the stacked meter, mirroring .edit-sig-item's
+   hover/focus/selected look so the two pickers feel the same. */
+.edit-sig-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0.35rem 0.4rem;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.edit-sig-cell:hover,
+.edit-sig-cell:focus-visible {
+  background: var(--ghost-bg-hover);
+  color: #fbf6ea;
+  outline: none;
+}
+
+/* The current meter: a brass-bordered, brass-ink tile so the selected cell reads at a glance (the grid
+   has no room for a check gutter, so the selection is shown by the tile chrome instead). */
+.edit-sig-cell[aria-selected="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* The stacked numerals (numerator over denominator), the engraved meter look. Tight line-height so the
+   two numerals sit close like a real time signature; aria-hidden (the cell's aria-label speaks it). */
+.edit-sig-meter {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.edit-sig-meter-num,
+.edit-sig-meter-den {
+  display: block;
 }
 
 /* Compact per-selection cluster (Smart Edit P1): shown only when a note is selected (main.ts

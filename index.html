@@ -508,20 +508,24 @@
               </svg>
             </button>
           </div>
-          <!-- SIGNATURE EDITING (SIG-2): a labeled PILL that shows the CURRENT key signature and opens
-               a popover to change it (the circle-of-fifths list). Pitch-preserving OMR correction:
+          <!-- SIGNATURE EDITING (SIG-2/3/4): two labeled PILLS that show the CURRENT key + time signature
+               and open a popover to change each. Both are OMR correction. KEY (SIG-4) is pitch-preserving:
                picking a key rewrites the printed signature + per-note accidentals; the notes keep their
-               sounding pitch. The popover reuses the export-menu pattern (absolute panel, click-outside
-               + Esc close, arrow-key roving, focus returns to the opener). Its options are built in
-               main.ts (15 keys, 7 flats..7 sharps) and the current row carries aria-checked. TIME is a
-               separate later increment, so only the key pill ships here. -->
+               sounding pitch. TIME (SIG-3) is declaration-only: picking a meter rewrites <time> and
+               re-engraves; no barline moves, the notes do not move. Each popover reuses the export-menu
+               pattern (absolute panel, click-outside + Esc close, arrow-key roving, focus returns to the
+               opener). Both popovers are SINGLE-SELECT listboxes: role="listbox" on the panel, role="option"
+               + aria-selected on each cell (the idiomatic select pattern, consistent with the export-menu's
+               flat container + per-option roling, and correct unlike the prior dialog+menuitemradio nit).
+               The options are built in main.ts (key: 15 keys 7 flats..7 sharps; time: the 7 preset meters)
+               and the current cell carries aria-selected. -->
           <div class="edit-tool-group edit-sig-group">
             <div class="edit-sig-wrap">
               <button
                 id="key-sig-btn"
                 class="edit-tool-btn edit-sig-btn"
                 type="button"
-                aria-haspopup="dialog"
+                aria-haspopup="listbox"
                 aria-expanded="false"
                 aria-controls="key-sig-menu"
                 aria-label="Key signature: C major. Change the key."
@@ -547,8 +551,44 @@
               <div
                 id="key-sig-menu"
                 class="edit-sig-menu"
-                role="dialog"
+                role="listbox"
                 aria-label="Choose the key signature"
+                hidden
+              ></div>
+            </div>
+            <div class="edit-sig-wrap">
+              <button
+                id="time-sig-btn"
+                class="edit-tool-btn edit-sig-btn"
+                type="button"
+                aria-haspopup="listbox"
+                aria-expanded="false"
+                aria-controls="time-sig-menu"
+                aria-label="Time signature: 4 4. Change the time signature."
+                title="Time signature. Pick the right meter for the whole piece; the notes and barlines do not move."
+              >
+                <span id="time-sig-label" class="edit-sig-label">4/4</span>
+                <svg
+                  class="edit-sig-caret"
+                  viewBox="0 0 24 24"
+                  width="12"
+                  height="12"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                  focusable="false"
+                >
+                  <path d="M6 9l6 6 6-6" />
+                </svg>
+              </button>
+              <div
+                id="time-sig-menu"
+                class="edit-sig-menu edit-sig-menu-grid"
+                role="listbox"
+                aria-label="Choose the time signature"
                 hidden
               ></div>
             </div>
