@@ -505,6 +505,264 @@ relevant section, dated.
      trash + straight-arrow glyphs are already spent on Delete and undo/redo, so Discard must look
      different to avoid a misread.
 
+## EXPORT menu: Video / PDF / MusicXML behind one disclosure pill (control pattern + DOM + a11y spec)
+
+- **2026-06-04 - We are adding two export actions (Export PDF of the Verovio engraving, Export
+  MusicXML download) alongside the existing single `#export-btn` ("Export video"). The existing
+  button is a ghost pill (inline `.btn-icon` SVG + `<span class="btn-label">`) in
+  `<div class="group group-output">`, `disabled` until a score loads. Video works for ANY loaded
+  score; PDF + MusicXML need an engravable sheet (`sourceMusicXml` present), so for AUDIO-ONLY
+  scores they must be DISABLED while Video stays enabled; the whole control is disabled with no
+  score. This entry is the full implementable spec; the Tech Lead owns the actual PDF render +
+  MusicXML serialization wiring.**
+
+  ### Decision EXPORT-1 (CONTROL, RECOMMENDED) - ONE "Export" disclosure pill that opens a 3-item popup, NOT a 3-button group.
+
+  RECOMMENDATION: replace the lone `#export-btn` with a single **Export disclosure button**
+  (`#export-menu-btn`, the same ghost pill, now carrying a small caret) that opens a compact popup
+  panel listing the three actions (Video, PDF, MusicXML). Reasons, in the Nocturne language and the
+  narrow/phone constraint:
+  - **Toolbar footprint stays at one pill.** `group-output` already sits in a row with the three
+    source loaders, Names, Edit, the hand-mute group, and tempo; on phone the whole `.controls`
+    bar already wraps (#84). Three full ghost pills (each icon + label) plus the `.group + .group`
+    hairline would turn the output slot into a multi-line block and make it compete with the source
+    loaders for the first wrap row. A disclosure keeps the exact footprint we have today (one pill).
+  - **It groups three things under one honest verb.** "Export" is the user's intent; Video/PDF/
+    MusicXML are formats of that one intent, so nesting them under one trigger reads more truthfully
+    than three peer buttons that imply three unrelated tools.
+  - **It gives PDF/MusicXML room for an honest disabled-with-reason treatment.** In a popup, a
+    disabled item can carry a short "Needs a sheet, audio has none" subtext (see EXPORT-5); inline
+    ghost pills have no room for that and would just dim mysteriously on audio-only scores.
+  - **Picked DISCLOSURE + a group of buttons, NOT a true `role="menu"`.** These are three
+    independent actions with MIXED enabled state (on audio-only, Video is live but PDF/MusicXML are
+    not). A `role="menu"` implies a uniform command list with roving-tabindex arrow nav and a single
+    tab stop; a disclosure that reveals a small `role="group"` of plain `<button>`s is the more
+    honest pattern for "a few buttons that happen to be hidden until you ask", lets each item be a
+    normal tab stop, and lets a disabled item stay focusable to announce WHY (a `role="menuitem"`
+    that is disabled is awkward to make explain itself). So: `aria-expanded` disclosure trigger +
+    a revealed `role="group"`, NOT `role="menu"`/`menuitem`.
+
+  Rejected: the 3-button group (Video/PDF/MusicXML as three peer ghost pills). It is the simplest to
+  build and needs no open/close, but it triples the output slot's width, wraps badly on phone, and
+  has nowhere to explain the audio-only disable. Acceptable as a fallback ONLY if a popup proves too
+  heavy to wire, but the disclosure is the recommended direction.
+
+  ### Decision EXPORT-2 (DOM) - exact structure to add to index.html (replaces the current `#export-btn` block).
+
+  The whole `<div class="group group-output"> ... </div>` becomes a relative-positioned anchor
+  holding the trigger + the popup. Mirror the existing icon-SVG + `.btn-label` build of
+  `#export-btn`/`#names-btn` (viewBox 0 0 24 24, stroke=currentColor, stroke-width 1.5,
+  `aria-hidden`/`focusable="false"` on the SVG). IDs to wire: trigger `#export-menu-btn`, popup
+  `#export-menu`, items `#export-video-btn`, `#export-pdf-btn`, `#export-musicxml-btn` (note: the
+  VIDEO item is now `#export-video-btn`; the old `#export-btn` id is retired, so the Tech Lead must
+  re-point the existing `exportVideo()` click handler to `#export-video-btn`).
+
+  ```html
+  <div class="group group-output">
+    <div class="export-menu-wrap">
+      <button
+        id="export-menu-btn"
+        class="toggle"
+        type="button"
+        aria-haspopup="true"
+        aria-expanded="false"
+        aria-controls="export-menu"
+        title="Export this score as a video, a PDF, or a MusicXML file."
+        disabled
+      >
+        <svg class="btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="none"
+          stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+          stroke-linejoin="round" aria-hidden="true" focusable="false">
+          <path d="M3 16.5V18.75C3 19.9926 4.00736 21 5.25 21H18.75C19.9926 21 21 19.9926 21 18.75V16.5M16.5 12L12 16.5M12 16.5L7.5 12M12 16.5V3" />
+        </svg>
+        <span class="btn-label">Export</span>
+        <svg class="export-caret" viewBox="0 0 24 24" width="14" height="14" fill="none"
+          stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+          stroke-linejoin="round" aria-hidden="true" focusable="false">
+          <path d="M6 9l6 6 6-6" />
+        </svg>
+      </button>
+      <div id="export-menu" class="export-menu" role="group"
+        aria-label="Export this score" hidden>
+        <button id="export-video-btn" class="export-item" type="button"
+          title="Record the falling notes and audio to a video (WebM).">
+          <svg class="export-item-icon" viewBox="0 0 24 24" width="18" height="18" fill="none"
+            stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+            stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <path d="M3.75 6.75A1.5 1.5 0 0 1 5.25 5.25h9A1.5 1.5 0 0 1 15.75 6.75v10.5A1.5 1.5 0 0 1 14.25 18.75h-9A1.5 1.5 0 0 1 3.75 17.25V6.75ZM15.75 9l4.5-2.25v10.5L15.75 15" />
+          </svg>
+          <span class="export-item-text">
+            <span class="export-item-label">Video</span>
+          </span>
+        </button>
+        <button id="export-pdf-btn" class="export-item" type="button"
+          title="Download the sheet music as a PDF.">
+          <svg class="export-item-icon" viewBox="0 0 24 24" width="18" height="18" fill="none"
+            stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+            stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <path d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625A1.125 1.125 0 0 0 4.5 3.375v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+          </svg>
+          <span class="export-item-text">
+            <span class="export-item-label">PDF</span>
+            <span class="export-item-hint">Needs a sheet, audio has none</span>
+          </span>
+        </button>
+        <button id="export-musicxml-btn" class="export-item" type="button"
+          title="Download the score as a MusicXML file.">
+          <svg class="export-item-icon" viewBox="0 0 24 24" width="18" height="18" fill="none"
+            stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+            stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <path d="M9 9V18M9 9L18 7.5V16.5M9 9L18 7.5M9 18A2.25 2.25 0 1 1 4.5 18 2.25 2.25 0 0 1 9 18ZM18 16.5A2.25 2.25 0 1 1 13.5 16.5 2.25 2.25 0 0 1 18 16.5ZM12.75 5.25l8.25-1.5v3l-8.25 1.5v-3Z" />
+          </svg>
+          <span class="export-item-text">
+            <span class="export-item-label">MusicXML</span>
+            <span class="export-item-hint">Needs a sheet, audio has none</span>
+          </span>
+        </button>
+      </div>
+    </div>
+  </div>
+  ```
+
+  The `.export-item-hint` rows are PRESENT in the DOM always but VISIBLE only while that item is
+  disabled (CSS: `.export-item:not(:disabled) .export-item-hint { display: none; }`). So a sheet
+  score shows three clean one-word items; an audio-only score shows the two disabled items with
+  their reason.
+
+  ### Decision EXPORT-3 (KEYBOARD + ARIA) - disclosure semantics, plain tab stops inside, Esc + click-outside dismiss.
+
+  - **Trigger** `#export-menu-btn`: `aria-haspopup="true"`, `aria-expanded` toggled true/false,
+    `aria-controls="export-menu"`. It is the `.toggle` ghost pill, so it inherits the shared
+    focus-visible ring (`--focus-ring`). Click or Enter/Space toggles the popup.
+  - **Open behavior:** show `#export-menu` (drop the `hidden` attr), set `aria-expanded="true"`,
+    and **move focus to the first ENABLED item** (Video on every score, since Video is always
+    enabled when the trigger is). Do not focus a disabled item.
+  - **Inside the popup = normal tab order, NOT a roving menu.** Tab / Shift+Tab move through
+    `#export-video-btn -> #export-pdf-btn -> #export-musicxml-btn` as ordinary buttons; disabled
+    items are skipped by Tab natively (they keep `aria-disabled` for SRs, see EXPORT-5). ALSO wire
+    Up/Down arrows to move focus between the items as a convenience (wrap top<->bottom, skip
+    disabled), since users expect arrows in a popped list, but this is additive, not a roving
+    single-tab-stop. Home/End optional (first/last enabled item).
+  - **Activate an item:** Enter/Space/click runs the action, then CLOSES the popup and returns
+    focus to `#export-menu-btn` (so the next Tab continues from the trigger, never from a now-hidden
+    item). The action itself (record video / generate PDF / download file) proceeds as today.
+  - **Dismiss without choosing:** Esc closes the popup, sets `aria-expanded="false"`, and returns
+    focus to `#export-menu-btn`. A pointer click OUTSIDE `.export-menu-wrap` also closes it (no
+    focus move on outside-click, the user is going elsewhere). Closing on Tab OUT of the last item
+    is optional polish; Esc + click-outside are the required two.
+  - **`aria-label`/`title` strings (exact):**
+    - Trigger: `title="Export this score as a video, a PDF, or a MusicXML file."` Label text
+      "Export" + caret; no separate aria-label needed (the visible "Export" label names it).
+    - Video item: `title="Record the falling notes and audio to a video (WebM)."`
+    - PDF item: `title="Download the sheet music as a PDF."`
+    - MusicXML item: `title="Download the score as a MusicXML file."`
+    - Each item's accessible name is its visible label ("Video" / "PDF" / "MusicXML"); the hint
+      span, when shown, is read after the label so a SR hears "PDF, Needs a sheet, audio has none".
+
+  ### Decision EXPORT-4 (COPY) - tight, consistent, NO em dashes.
+
+  | Control | Visible label | Title (tooltip) |
+  | --- | --- | --- |
+  | Trigger | `Export` | Export this score as a video, a PDF, or a MusicXML file. |
+  | Video item | `Video` | Record the falling notes and audio to a video (WebM). |
+  | PDF item | `PDF` | Download the sheet music as a PDF. |
+  | MusicXML item | `MusicXML` | Download the score as a MusicXML file. |
+
+  Disabled hint (PDF + MusicXML, shown only when disabled): `Needs a sheet, audio has none`.
+  Rationale: the old single button said "Export video"; folding into a menu lets the items drop to
+  one-word format names under the "Export" verb, which is tighter and scans instantly. "WebM" is
+  named in the Video tooltip so the user knows the container, matching how the audio loader names
+  "MP3/WAV".
+
+  ### Decision EXPORT-5 (ENABLE/DISABLE) - the exact per-item truth table.
+
+  Restated so the Tech Lead wires the precise logic. `hasScore` = any score loaded;
+  `hasSheet` = an engravable sheet exists (`sourceMusicXml !== null`, the same predicate
+  `editModeAvailable()` already uses for the Edit button).
+
+  | State | Trigger `#export-menu-btn` | Video `#export-video-btn` | PDF `#export-pdf-btn` | MusicXML `#export-musicxml-btn` |
+  | --- | --- | --- | --- | --- |
+  | No score | disabled (popup unreachable) | n/a (popup never opens) | n/a | n/a |
+  | Audio-only score (`hasScore && !hasSheet`) | enabled | ENABLED | DISABLED | DISABLED |
+  | Sheet score (`hasScore && hasSheet`) | enabled | enabled | ENABLED | ENABLED |
+
+  Wiring rules:
+  - **Trigger:** `disabled = !hasScore`. It rides the SAME enable site the current `#export-btn`
+    uses: `controlsEnabledForScore(!!score)` in `setBusyUI`, and the post-load enable, and the busy
+    path forces it disabled (lines ~452, ~1898-1908, ~2270 today). It is `disabled` (not just
+    `hidden`) when no score, matching how export is dimmed today.
+  - **Per-item:** Video item `disabled = false` whenever the trigger is enabled (Video works for any
+    loaded score, the existing guarantee). PDF + MusicXML items `disabled = !hasSheet`, AND carry
+    `aria-disabled="true"` set in lockstep, the SAME `disabled` + `aria-disabled` idiom as undo/redo
+    and the duration-ladder ends (main.ts ~834). A small `setExportMenuState()` that runs wherever
+    `setEditButtonEnabled()` runs keeps PDF/MusicXML in sync with sheet availability.
+  - **Disabled-item discoverability:** PDF/MusicXML stay in the DOM and remain focusable-by-arrow
+    inside the popup even when disabled (so a keyboard user can land on them and hear the reason),
+    but native Tab skips a `disabled` button. The chosen approach: keep `disabled` (so they cannot
+    be activated and look dim) AND mirror `aria-disabled="true"`, plus show the inline
+    `.export-item-hint`. The visible hint is the primary "why" for sighted users; the hint text
+    being part of the item's content covers SR users who arrow onto it. This matches the project's
+    existing "dim + aria-disabled" convention rather than inventing a tooltip-only explanation.
+
+  ### Decision EXPORT-6 (ICONS) - Heroicons stroke glyphs (viewBox 0 0 24 24, stroke 1.5).
+
+  - **Trigger:** keep the existing arrow-into-tray download glyph already on `#export-btn` (the
+    `M3 16.5V18.75...` path), plus a small chevron-down caret (`M6 9l6 6 6-6`, 14px) after the label
+    to signal "opens a menu". The tray-download glyph already reads as "export/save", so reusing it
+    keeps recognition.
+  - **Video item:** Heroicons `video-camera` (the camera body + lens triangle). Path:
+    `M3.75 6.75A1.5 1.5 0 0 1 5.25 5.25h9A1.5 1.5 0 0 1 15.75 6.75v10.5A1.5 1.5 0 0 1 14.25 18.75h-9A1.5 1.5 0 0 1 3.75 17.25V6.75ZM15.75 9l4.5-2.25v10.5L15.75 15`.
+  - **PDF item:** Heroicons `document` (a sheet of paper with a folded corner). Path:
+    `M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625A1.125 1.125 0 0 0 4.5 3.375v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z`.
+    A paper sheet reads as "a document to download" without faking a literal "PDF" badge (which a
+    1.5-weight stroke icon renders illegibly small).
+  - **MusicXML item:** a TWO-NOTE beamed/joined eighth pair (two noteheads on stems joined at the
+    top, the classic "music" glyph; Heroicons has `musical-note` for a single note, this is the
+    two-note variant so it does not collide with anything). Path:
+    `M9 9V18M9 9L18 7.5V16.5M9 9L18 7.5M9 18A2.25 2.25 0 1 1 4.5 18 2.25 2.25 0 0 1 9 18ZM18 16.5A2.25 2.25 0 1 1 13.5 16.5 2.25 2.25 0 0 1 18 16.5ZM12.75 5.25l8.25-1.5v3l-8.25 1.5v-3Z`.
+    The double note says "the music data itself", distinct from the PDF's paper (the rendered page)
+    and the Video's camera. If the Tech Lead prefers an unambiguous "structured data" read, the
+    fallback is Heroicons `code-bracket-square` (a `< >` in a rounded square), but the double-note is
+    the on-theme first choice.
+
+  ### Decision EXPORT-7 (MOTION + FOCUS) - reduced-motion + focus-ring.
+
+  - **Popup open/close:** a quick fade + 4px rise (opacity 0->1, translateY 4px->0, ~120ms
+    ease-out) is the only animation. Under `@media (prefers-reduced-motion: reduce)` the popup
+    appears/disappears INSTANTLY (no fade, no rise), matching the project's existing reduced-motion
+    blocks (style.css has three already; add the export popup to that treatment). No looped motion,
+    so no flash concern.
+  - **Panel surface:** the popup is a `--bar-surface` panel with a `--bar-border` 1px edge and an
+    8px radius (same family as the toolbar), positioned absolutely under the trigger
+    (`top: calc(100% + 6px); left: 0;`), `z-index` above the controls. Items are full-width ghost
+    rows: transparent fill, `--text`; hover/focus tints brass exactly like the ghost pills
+    (`--ghost-bg-hover` background). Keep contrast AA: `--text` on `--bar-surface` already passes;
+    the disabled item drops to `opacity: 0.4` (the established disabled dim) but its hint text must
+    stay legible, so apply the dim to the icon + label and give the hint its OWN `--text-muted`
+    color so it does not stack into unreadability as the explanation.
+  - **Focus ring:** every item and the trigger use the ONE shared `button:focus-visible` ring
+    (`2px solid var(--focus-ring)`, 2px offset) already defined; no per-control ring. The trigger's
+    `aria-expanded` does not change its ring; the open popup is the affordance.
+  - **Phone:** the trigger stays one pill (>=44px tall via the existing touch rule). The popup is
+    fixed-width ~220px but `max-width: calc(100vw - 24px)` so it never overflows a narrow viewport;
+    each item row is >=44px tall on touch (reuse the existing `min-height: 44px` touch rule scope by
+    adding `.export-item` to it). Because the popup is anchored to the trigger and the trigger can
+    wrap to any row on phone, position it relative to `.export-menu-wrap` (`position: relative`) so
+    it follows the trigger wherever it lands.
+
+  ### Decisions to confirm with the main agent / product owner
+  1. **Disclosure popup over a 3-button group.** Confirm we want the menu (keeps the toolbar at one
+     pill, groups the formats, room to explain the audio-only disable) rather than three peer pills.
+     I recommend the popup.
+  2. **Disclosure + `role="group"` of buttons, NOT `role="menu"`.** Confirm the non-menu semantics
+     (plain tab stops + additive arrow nav) given the mixed enabled state; I chose it so disabled
+     items can stay focusable and explain themselves.
+  3. **Disabled PDF/MusicXML show an inline "Needs a sheet, audio has none" hint** rather than
+     vanishing. Confirm we surface the two formats always (greyed with a reason) so audio-only users
+     learn the formats exist and why they are off, instead of seeing only Video and wondering.
+  4. **Video item keeps the WebM container, named in its tooltip.** Confirm; it matches today's
+     recorder output and the "MP3/WAV" naming on the audio loader.
+
 ## Smart Edit Mode P3 CHANGE-DURATION v1: shorten/lengthen a selected note along a note-value ladder (interaction + visual spec)
 
 - **2026-06-04 - The last leg of the stated vision ("move notes, change their duration, add

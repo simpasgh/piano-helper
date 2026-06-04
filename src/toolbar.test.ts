@@ -19,7 +19,11 @@ describe("toolbar markup invariants (issue #46)", () => {
     "file-input",
     "scan-input",
     "audio-input",
-    "export-btn",
+    "export-menu-btn",
+    "export-menu",
+    "export-video-btn",
+    "export-pdf-btn",
+    "export-musicxml-btn",
     "names-btn",
     "tempo-slider",
     "tempo-readout",
@@ -138,7 +142,7 @@ describe("Heroicons toolbar/transport icons (issue #48)", () => {
     camera: "M6.82689 6.1749C6.46581 6.75354 5.86127 7.13398 5.186 7.22994",
     // outline/musical-note - From audio
     "musical-note": "M9 9L19.5 6M19.5 12.5528V16.3028",
-    // outline/arrow-down-tray - Export video
+    // outline/arrow-down-tray - Export menu trigger
     "arrow-down-tray": "M3 16.5V18.75C3 19.9926 4.00736 21 5.25 21H18.75",
     // outline/eye - Names toggle
     eye: "M2.03555 12.3224C1.96647 12.1151 1.9664 11.8907 2.03536 11.6834",
@@ -253,12 +257,12 @@ describe("scan overlay markup + CSS (issue #86)", () => {
     // else branch exists and drives the enable off controlsEnabledForScore(!!score).
     const busyFn = main.slice(
       main.indexOf("function setBusyUI"),
-      main.indexOf("function setBusyUI") + 900,
+      main.indexOf("function setBusyUI") + 1200,
     );
     expect(busyFn).toContain("} else {");
     expect(busyFn).toContain("controlsEnabledForScore(!!score)");
     expect(busyFn).toMatch(/playBtn\.disabled\s*=\s*!enabled/);
-    expect(busyFn).toMatch(/exportBtn\.disabled\s*=\s*!enabled/);
+    expect(busyFn).toMatch(/exportMenuBtn\.disabled\s*=\s*!enabled/);
     expect(busyFn).toMatch(/setTransportControlsEnabled\(enabled\)/);
   });
 
@@ -296,5 +300,62 @@ describe("scan overlay markup + CSS (issue #86)", () => {
       html.indexOf('id="rotate-hint"'),
     );
     expect(overlay).not.toMatch(/[–—]/);
+  });
+});
+
+// Export menu (Video / PDF / MusicXML): the single Export disclosure pill + its popup of three
+// format buttons (design.md EXPORT-1..7). Text-guard the markup hooks main.ts wires, the disclosure
+// ARIA, the per-item glyphs, the disabled-reason hint, and the no-em-dash rule, so a refactor cannot
+// silently regress them.
+describe("export menu markup (Video / PDF / MusicXML)", () => {
+  // Everything from the trigger to the next control (Names): the whole export control.
+  const exportBlock = html.slice(
+    html.indexOf('id="export-menu-btn"'),
+    html.indexOf('id="names-btn"'),
+  );
+
+  it("makes the trigger a disclosure for the popup, retiring the old single button id", () => {
+    expect(exportBlock).toContain('aria-haspopup="true"');
+    expect(exportBlock).toContain('aria-expanded="false"');
+    expect(exportBlock).toContain('aria-controls="export-menu"');
+    expect(html).not.toContain('id="export-btn"');
+  });
+
+  it("groups the three formats in a popup that starts hidden", () => {
+    expect(exportBlock).toMatch(/id="export-menu"[\s\S]*?role="group"/);
+    expect(exportBlock).toMatch(/id="export-menu"[\s\S]*?hidden/);
+  });
+
+  it("labels each format item", () => {
+    expect(exportBlock).toMatch(/id="export-video-btn"[\s\S]*?>Video</);
+    expect(exportBlock).toMatch(/id="export-pdf-btn"[\s\S]*?>PDF</);
+    expect(exportBlock).toMatch(/id="export-musicxml-btn"[\s\S]*?>MusicXML</);
+  });
+
+  it("explains the audio-only disable on the two sheet-only formats", () => {
+    // PDF + MusicXML carry the reason hint (CSS shows it only while the item is disabled).
+    expect(exportBlock.match(/Needs a sheet, audio has none/g)?.length).toBe(2);
+  });
+
+  it("inlines a distinct glyph per format (camera / document / music)", () => {
+    expect(exportBlock).toContain("M3.75 6.75A1.5 1.5 0 0 1 5.25 5.25h9");
+    expect(exportBlock).toContain("M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375");
+    expect(exportBlock).toContain("M9 9V18M9 9L18 7.5V16.5");
+  });
+
+  it("keeps the export menu copy free of em and en dashes", () => {
+    expect(exportBlock).not.toMatch(/[–—]/);
+  });
+
+  it("renders the export PDF on a dedicated Verovio toolkit, never the shared edit-mode one (B1)", () => {
+    // Reusing the shared `verovioToolkit` for PDF export races with entering edit mode: both mutate
+    // the one toolkit via setOptions/loadData across awaits, silently corrupting the PDF. The PDF
+    // render must resolve its OWN instance (getExportToolkit -> exportToolkit), so this can't recur.
+    const fn = main.slice(
+      main.indexOf("function getExportToolkit"),
+      main.indexOf("function getExportToolkit") + 260,
+    );
+    expect(fn).toMatch(/return exportToolkit/);
+    expect(fn).not.toMatch(/return verovioToolkit/);
   });
 });

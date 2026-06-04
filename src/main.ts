@@ -71,6 +71,7 @@ import {
   clearStreamOverlay,
 } from "./sheet-stream-overlay";
 import { chooseVideoFormat, buildExportFilename } from "./recorder";
+import { chooseExportXml, musicXmlBlob, renderMusicXmlToPdfBlob } from "./export-score";
 import {
   uniqueOnsets,
   nextOnset,
@@ -115,7 +116,12 @@ const prevNoteBtn = document.getElementById("prev-note-btn") as HTMLButtonElemen
 const nextNoteBtn = document.getElementById("next-note-btn") as HTMLButtonElement;
 const seekSlider = document.getElementById("seek-slider") as HTMLInputElement;
 const timeReadout = document.getElementById("time-readout") as HTMLSpanElement;
-const exportBtn = document.getElementById("export-btn") as HTMLButtonElement;
+const exportMenuBtn = document.getElementById("export-menu-btn") as HTMLButtonElement;
+const exportMenu = document.getElementById("export-menu") as HTMLDivElement;
+const exportMenuWrap = exportMenuBtn.closest(".export-menu-wrap") as HTMLDivElement;
+const exportVideoBtn = document.getElementById("export-video-btn") as HTMLButtonElement;
+const exportPdfBtn = document.getElementById("export-pdf-btn") as HTMLButtonElement;
+const exportMusicxmlBtn = document.getElementById("export-musicxml-btn") as HTMLButtonElement;
 const namesBtn = document.getElementById("names-btn") as HTMLButtonElement;
 const namesLabel = document.getElementById("names-label") as HTMLSpanElement;
 const playLabel = document.getElementById("play-label") as HTMLSpanElement;
@@ -460,12 +466,13 @@ function loadNotes(data: ScoreData, name: string, sheet: boolean): void {
   sheetNoteCount.hidden = false;
   setSheetName(name);
   playBtn.disabled = false;
-  exportBtn.disabled = false;
+  exportMenuBtn.disabled = false;
   setTransportControlsEnabled(true);
   // Smart Edit Mode (P0) is available only for MusicXML/OMR scores (a rendered sheet + retained
   // source). A fresh load also resets the Edit button's pressed state via exitEditMode in the
   // loaders, so a previous score's edit view never carries over.
   setEditButtonEnabled();
+  setExportMenuState();
   updateSeekUI(0);
   setPlaying(false);
 }
@@ -2036,8 +2043,9 @@ function setBusyUI(active: boolean): void {
   audioInput.disabled = active;
   if (active) {
     playBtn.disabled = true;
-    exportBtn.disabled = true;
+    exportMenuBtn.disabled = true;
     editBtn.disabled = true;
+    closeExportMenu();
     setTransportControlsEnabled(false);
   } else {
     // Restore play/export/transport to match whether a score is loaded (issue #86 cancel
@@ -2046,8 +2054,9 @@ function setBusyUI(active: boolean): void {
     // exists, matching the post-load and post-export enable conditions.
     const enabled = controlsEnabledForScore(!!score);
     playBtn.disabled = !enabled;
-    exportBtn.disabled = !enabled;
+    exportMenuBtn.disabled = !enabled;
     setEditButtonEnabled();
+    setExportMenuState();
     setTransportControlsEnabled(enabled);
   }
 }
@@ -2408,9 +2417,158 @@ async function exportVideo(): Promise<void> {
   }
 }
 
-exportBtn.addEventListener("click", () => {
+// ===== Export menu (Video / PDF / MusicXML) =====
+//
+// The single "Export" disclosure pill opens a small popup of three formats. Video records the
+// performance (exportVideo, above); PDF renders the Verovio engraving to a multi-page PDF; MusicXML
+// downloads the score's MusicXML. PDF + MusicXML need an engravable sheet, so they disable for
+// audio-only scores (design.md EXPORT-5). The popup is a disclosure + a GROUP of plain buttons (not
+// a role="menu"), so each item is a normal tab stop and a disabled item can still show why it is off.
+
+const exportItems = (): HTMLButtonElement[] => [exportVideoBtn, exportPdfBtn, exportMusicxmlBtn];
+
+// Set both `disabled` and `aria-disabled` in lockstep, the project's disabled idiom (undo/redo, the
+// duration-ladder ends).
+function setItemDisabled(btn: HTMLButtonElement, disabled: boolean): void {
+  btn.disabled = disabled;
+  btn.setAttribute("aria-disabled", String(disabled));
+}
+
+// Sync the per-format items with what the current score supports. Video works for any loaded score;
+// PDF + MusicXML need a sheet (editModeAvailable() = a rendered sheet + retained MusicXML). Runs
+// wherever setEditButtonEnabled() does, so the items track sheet availability.
+function setExportMenuState(): void {
+  const canExport = !busy && !!score;
+  const canSheet = canExport && editModeAvailable();
+  setItemDisabled(exportVideoBtn, !canExport);
+  setItemDisabled(exportPdfBtn, !canSheet);
+  setItemDisabled(exportMusicxmlBtn, !canSheet);
+}
+
+function openExportMenu(): void {
+  if (exportMenuBtn.disabled || !exportMenu.hidden) return;
+  exportMenu.hidden = false;
+  exportMenuBtn.setAttribute("aria-expanded", "true");
+  // Focus the first ENABLED item (Video is enabled whenever the trigger is).
+  exportItems()
+    .find((b) => !b.disabled)
+    ?.focus();
+  // Dismiss on a pointer press outside the wrap (capture so it runs before the items' own handlers).
+  document.addEventListener("pointerdown", onExportOutsidePointer, true);
+}
+
+function closeExportMenu(opts: { restoreFocus?: boolean } = {}): void {
+  if (exportMenu.hidden) return;
+  exportMenu.hidden = true;
+  exportMenuBtn.setAttribute("aria-expanded", "false");
+  document.removeEventListener("pointerdown", onExportOutsidePointer, true);
+  if (opts.restoreFocus) exportMenuBtn.focus();
+}
+
+function onExportOutsidePointer(e: PointerEvent): void {
+  if (!exportMenuWrap.contains(e.target as Node)) closeExportMenu();
+}
+
+// Move focus among the ENABLED items (wrapping), for Up/Down arrow nav inside the open popup.
+function moveExportFocus(dir: 1 | -1): void {
+  const items = exportItems().filter((b) => !b.disabled);
+  if (items.length === 0) return;
+  const idx = items.indexOf(document.activeElement as HTMLButtonElement);
+  items[(idx + dir + items.length) % items.length].focus();
+}
+
+exportMenuBtn.addEventListener("click", () => {
+  if (exportMenu.hidden) openExportMenu();
+  else closeExportMenu({ restoreFocus: true });
+});
+
+exportMenuBtn.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown" && exportMenu.hidden && !exportMenuBtn.disabled) {
+    e.preventDefault();
+    openExportMenu();
+  }
+});
+
+exportMenu.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    closeExportMenu({ restoreFocus: true });
+  } else if (e.key === "ArrowDown") {
+    e.preventDefault();
+    moveExportFocus(1);
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    moveExportFocus(-1);
+  }
+});
+
+// Each item: close the popup and return focus to the trigger, then run the format's export. The
+// action's own guards (disabled item, missing source) still apply.
+exportVideoBtn.addEventListener("click", () => {
+  closeExportMenu({ restoreFocus: true });
   exportVideo();
 });
+exportPdfBtn.addEventListener("click", () => {
+  closeExportMenu({ restoreFocus: true });
+  exportPdf();
+});
+exportMusicxmlBtn.addEventListener("click", () => {
+  closeExportMenu({ restoreFocus: true });
+  exportMusicXml();
+});
+
+// The MusicXML to export: the LIVE edited model in edit mode, else the retained source (null for an
+// audio-only score, where the items are disabled anyway).
+function currentExportXml(): string | null {
+  return chooseExportXml({
+    editMode,
+    editedXml: editMode && scoreModel ? scoreModel.serialize() : null,
+    sourceMusicXml,
+  });
+}
+
+// Export MusicXML: a Blob + object-URL download (downloadBlob), named from the sheet like the video.
+function exportMusicXml(): void {
+  if (!score) return;
+  const xml = currentExportXml();
+  if (!xml) return; // audio-only; the item is disabled, this is a belt-and-braces guard
+  downloadBlob(musicXmlBlob(xml), buildExportFilename(sheetName || "score", "musicxml"));
+}
+
+// A dedicated Verovio toolkit for PDF export, ALWAYS its own instance (never the shared edit-mode
+// `verovioToolkit`). PDF render is async: it sets the paginating options, loadData, then walks the
+// pages across awaits. If it shared the edit toolkit, a user entering edit mode mid-build would
+// re-run setOptions/loadData on that same instance and silently corrupt the in-flight PDF (and the
+// edit view). loadVerovioToolkit builds a fresh toolkit sharing only the immutable WASM module, so a
+// second instance is cheap (the WASM is not recompiled) and fully isolated from the edit engraving.
+let exportToolkit: VerovioToolkit | null = null;
+async function getExportToolkit(): Promise<VerovioToolkit> {
+  if (!exportToolkit) exportToolkit = await loadVerovioToolkit();
+  return exportToolkit;
+}
+
+// Export PDF: render the score's Verovio engraving to a (multi-page) PDF via svg2pdf + jsPDF (both
+// lazy-loaded). Named from the sheet; a brief status covers the first-use toolkit load. The
+// re-entrancy guard stops a second click from interleaving two renders on the one export toolkit.
+let pdfBuilding = false;
+async function exportPdf(): Promise<void> {
+  if (!score || pdfBuilding) return;
+  const xml = currentExportXml();
+  if (!xml) return;
+  pdfBuilding = true;
+  showStatus("Building PDF...");
+  try {
+    const toolkit = await getExportToolkit();
+    const blob = await renderMusicXmlToPdfBlob(toolkit, xml);
+    downloadBlob(blob, buildExportFilename(sheetName || "score", "pdf"));
+  } catch (err) {
+    console.error("PDF export failed:", err);
+    alert(`PDF export failed: ${(err as Error).message}`);
+  } finally {
+    pdfBuilding = false;
+    restoreSheetName();
+  }
+}
 
 // Apply a tempo percent: clamp it, update the rate, the live transport bpm, the slider,
 // and the readout. Works before playback (bpm is set for the next start) and live during

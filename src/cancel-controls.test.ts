@@ -17,14 +17,14 @@ import { controlsEnabledForScore } from "./playback";
 function makeControls() {
   document.body.innerHTML = `
     <button id="play-btn" disabled></button>
-    <button id="export-btn" disabled></button>
+    <button id="export-menu-btn" disabled></button>
     <button id="prev-note-btn" disabled></button>
     <button id="next-note-btn" disabled></button>
     <input id="seek-slider" type="range" disabled />
   `;
   return {
     playBtn: document.getElementById("play-btn") as HTMLButtonElement,
-    exportBtn: document.getElementById("export-btn") as HTMLButtonElement,
+    exportMenuBtn: document.getElementById("export-menu-btn") as HTMLButtonElement,
     prevBtn: document.getElementById("prev-note-btn") as HTMLButtonElement,
     nextBtn: document.getElementById("next-note-btn") as HTMLButtonElement,
     seek: document.getElementById("seek-slider") as HTMLInputElement,
@@ -35,7 +35,7 @@ function makeControls() {
 function applyNotBusy(els: ReturnType<typeof makeControls>, scoreLoaded: boolean) {
   const enabled = controlsEnabledForScore(scoreLoaded);
   els.playBtn.disabled = !enabled;
-  els.exportBtn.disabled = !enabled;
+  els.exportMenuBtn.disabled = !enabled;
   els.prevBtn.disabled = !enabled;
   els.nextBtn.disabled = !enabled;
   els.seek.disabled = !enabled;
@@ -51,7 +51,7 @@ describe("cancel re-enables controls based on a loaded score (issue #86)", () =>
   it("re-enables play/export/transport when a score is still loaded", () => {
     // Simulate the busy state first (a scan/audio job in flight).
     els.playBtn.disabled = true;
-    els.exportBtn.disabled = true;
+    els.exportMenuBtn.disabled = true;
     els.prevBtn.disabled = true;
     els.nextBtn.disabled = true;
     els.seek.disabled = true;
@@ -60,7 +60,7 @@ describe("cancel re-enables controls based on a loaded score (issue #86)", () =>
     applyNotBusy(els, true);
 
     expect(els.playBtn.disabled).toBe(false);
-    expect(els.exportBtn.disabled).toBe(false);
+    expect(els.exportMenuBtn.disabled).toBe(false);
     expect(els.prevBtn.disabled).toBe(false);
     expect(els.nextBtn.disabled).toBe(false);
     expect(els.seek.disabled).toBe(false);
@@ -70,7 +70,7 @@ describe("cancel re-enables controls based on a loaded score (issue #86)", () =>
     applyNotBusy(els, false);
 
     expect(els.playBtn.disabled).toBe(true);
-    expect(els.exportBtn.disabled).toBe(true);
+    expect(els.exportMenuBtn.disabled).toBe(true);
     expect(els.prevBtn.disabled).toBe(true);
     expect(els.nextBtn.disabled).toBe(true);
     expect(els.seek.disabled).toBe(true);
@@ -102,7 +102,7 @@ describe("scan-path Cancel re-enables controls synchronously (issue #93)", () =>
   it("re-enables a still-loaded score's controls immediately on scan cancel", () => {
     // Busy: a scan job in flight (setBusyUI(true) disabled everything).
     els.playBtn.disabled = true;
-    els.exportBtn.disabled = true;
+    els.exportMenuBtn.disabled = true;
     els.prevBtn.disabled = true;
     els.nextBtn.disabled = true;
     els.seek.disabled = true;
@@ -112,7 +112,7 @@ describe("scan-path Cancel re-enables controls synchronously (issue #93)", () =>
 
     // No awaiting the OMR promise: controls are usable right away.
     expect(els.playBtn.disabled).toBe(false);
-    expect(els.exportBtn.disabled).toBe(false);
+    expect(els.exportMenuBtn.disabled).toBe(false);
     expect(els.prevBtn.disabled).toBe(false);
     expect(els.nextBtn.disabled).toBe(false);
     expect(els.seek.disabled).toBe(false);
@@ -120,7 +120,7 @@ describe("scan-path Cancel re-enables controls synchronously (issue #93)", () =>
 
   it("keeps controls disabled on scan cancel when no score is loaded", () => {
     els.playBtn.disabled = true;
-    els.exportBtn.disabled = true;
+    els.exportMenuBtn.disabled = true;
     els.prevBtn.disabled = true;
     els.nextBtn.disabled = true;
     els.seek.disabled = true;
@@ -128,7 +128,7 @@ describe("scan-path Cancel re-enables controls synchronously (issue #93)", () =>
     cancelScan(false);
 
     expect(els.playBtn.disabled).toBe(true);
-    expect(els.exportBtn.disabled).toBe(true);
+    expect(els.exportMenuBtn.disabled).toBe(true);
     expect(els.prevBtn.disabled).toBe(true);
     expect(els.nextBtn.disabled).toBe(true);
     expect(els.seek.disabled).toBe(true);
