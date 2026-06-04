@@ -1160,30 +1160,70 @@ def _find_stem(head_cx, head_cy, stems, sp):
         return None
 
 
-def _count_beams_flags(chord_cy, stem, beams, flags, sp):
-    """(n_beams, n_flags) for a note/chord given its stem. Beams: beam boxes whose x-range covers
-    the stem column and whose y-range overlaps the stem (a 16th run shows 2 stacked beams a stem
-    crosses on real/DeepScores-style detections; the synthetic render unions a group to ONE box, so
-    this under-reads synthetic 16ths -> eighths, gated on real_eval). Flags: flag boxes near the
-    stem's FREE end (the end away from the heads). NEVER raises."""
-    if stem is None:
-        return 0, 0
+def _count_beams_flags(head_cx, head_cy, stem, beams, flags, sp):
+    """(n_beams, n_flags) for a note/chord at (head_cx, head_cy). Associates beams/flags with the
+    notehead's X-COLUMN, NOT via the detected stem: the thin `stem` class detects poorly (real-data
+    recall ~0.05-0.30, so only ~20-30% of beamed heads get a stem), and a stem-gated association
+    then misreads beamed eighths/16ths as quarters. A beam/flag for this note sits in its x-column
+    within a stem-length (~5 interlines) above OR below the head. When a stem IS detected it refines
+    the column x + the vertical side (free end); when not, the head's own x and both sides are used.
+    A 16th run shows 2 stacked beams a column crosses on real/DeepScores detections; the synthetic
+    render unions a group to ONE box (under-reads synthetic 16ths -> eighths, gated on real_eval).
+    NEVER raises."""
     try:
-        sx, sy, sw, sh = stem
-        scx = sx + sw / 2.0
+        if stem is not None:
+            sx, sy, sw, sh = stem
+            col_x = sx + sw / 2.0
+            free_y = sy + sh if head_cy < sy + sh / 2.0 else sy
+            y_lo, y_hi = min(head_cy, free_y) - 1.0 * sp, max(head_cy, free_y) + 1.0 * sp
+            xt = 0.4 * sp
+        else:
+            col_x = head_cx
+            y_lo, y_hi = head_cy - 5.0 * sp, head_cy + 5.0 * sp
+            xt = 0.7 * sp  # the stem (and its beam) sits ~0.6 interline off the head center
         nb = 0
         for (bx, by, bw, bh) in beams:
-            if bx - 0.3 * sp <= scx <= bx + bw + 0.3 * sp and not (by > sy + sh or by + bh < sy):
+            bcy = by + bh / 2.0
+            if bx - xt <= col_x <= bx + bw + xt and y_lo <= bcy <= y_hi:
                 nb += 1
-        # the free end is the stem extreme farther from the head cluster.
-        free_y = sy + sh if chord_cy < sy + sh / 2.0 else sy
         nf = 0
         for (fx, fy, fw, fh) in flags:
-            if abs(fx + fw / 2.0 - scx) < 1.6 * sp and abs(fy + fh / 2.0 - free_y) < 3.5 * sp:
+            if abs(fx + fw / 2.0 - col_x) < 1.6 * sp and y_lo <= fy + fh / 2.0 <= y_hi:
                 nf += 1
         return nb, nf
     except Exception:
         return 0, 0
+
+
+def _has_stem_cv(gray, head_cx, head_cy, sp):
+    """Classical stem-presence probe on the grayscale image: is there a near-vertical dark run at
+    the notehead's left or right side, longer than ~1.5 interlines? Recovers the stem signal the
+    trained `stem` class misses (recall ~0.05-0.30). Used ONLY to split an OPEN head into half (has
+    stem) vs whole (no stem); filled heads do not need it (fill alone -> quarter-or-shorter). Needs
+    numpy (GEOM_AVAILABLE) and the image; returns False without them. NEVER raises."""
+    if gray is None or not GEOM_AVAILABLE:
+        return False
+    try:
+        h, w = gray.shape
+        for side in (-1, 1):
+            cx = int(round(head_cx + side * 0.6 * sp))
+            if cx < 1 or cx >= w - 1:
+                continue
+            col = (gray[:, cx - 1:cx + 2] < 0.5).any(axis=1)  # dark at this x-band, per row
+            y0, y1 = max(0, int(head_cy - 4 * sp)), min(h, int(head_cy + 4 * sp))
+            run = best = 0
+            for r in range(y0, y1):
+                if col[r]:
+                    run += 1
+                    if run > best:
+                        best = run
+                else:
+                    run = 0
+            if best >= 1.5 * sp:
+                return True
+        return False
+    except Exception:
+        return False
 
 
 def _count_dots(head_cx, head_right, head_cy, dots, sp):
@@ -1246,7 +1286,7 @@ def _ottava_spans_from_boxes(syms, staff_lines, sp):
         return []
 
 
-def _decode_staff(staff_lines, syms, fifths, default_sign="G"):
+def _decode_staff(staff_lines, syms, fifths, default_sign="G", gray=None):
     """Decode one staff's glyphs into (events, opening_clef_sign, clef_changes):
       events        : [(rep_x, event_dict), ...] x-ordered (notes/chords with duration+type+dots+
                       pitches incl. inline accidentals, plus rests).
@@ -1334,11 +1374,16 @@ def _decode_staff(staff_lines, syms, fifths, default_sign="G"):
                 stem = _find_stem(h[0] + h[2] / 2.0, h[1] + h[3] / 2.0, stems, sp)
                 if stem is not None:
                     break
-            nb, nf = _count_beams_flags(chord_cy, stem, beams, flags, sp)
+            nb, nf = _count_beams_flags(rep_x, chord_cy, stem, beams, flags, sp)
             nd = max((_count_dots(h[0] + h[2] / 2.0, h[0] + h[2], h[1] + h[3] / 2.0, dots, sp)
                       for h in chord), default=0)
             filled_any = any(h[4] for h in chord)
-            type_name, dots_n, ticks = decode_note_duration(filled_any, stem is not None, nb, nf, nd)
+            # has_stem only distinguishes an OPEN head (half vs whole); the trained stem class is
+            # unreliable, so fall back to a classical CV probe for open heads with no detected stem.
+            has_stem = stem is not None
+            if not has_stem and not filled_any:
+                has_stem = _has_stem_cv(gray, rep_x, chord_cy, sp)
+            type_name, dots_n, ticks = decode_note_duration(filled_any, has_stem, nb, nf, nd)
             ev = {"duration": ticks, "type": type_name, "pitches": pitches}
             if dots_n:
                 ev["dots"] = dots_n
@@ -1447,9 +1492,9 @@ def decode_symbols_to_musicxml(staves, symbols, key_fifths=None, gray=None):
             # default_sign matches the by-index opening clef printed below (treble upper, bass
             # lower), so a staff with NO detected clef glyph decodes pitch under the SAME clef it
             # is labeled with (no treble/bass desync if the detector misses a clef).
-            t_ev, t_open, t_chg = (_decode_staff(staves[ti], per_staff[ti], fifths, default_sign="G")
+            t_ev, t_open, t_chg = (_decode_staff(staves[ti], per_staff[ti], fifths, default_sign="G", gray=gray)
                                    if ti < len(staves) else ([], None, []))
-            b_ev, b_open, b_chg = (_decode_staff(staves[bi], per_staff[bi], fifths, default_sign="F")
+            b_ev, b_open, b_chg = (_decode_staff(staves[bi], per_staff[bi], fifths, default_sign="F", gray=gray)
                                    if bi < len(staves) else ([], None, []))
             if t_ev or b_ev:
                 any_event = True
