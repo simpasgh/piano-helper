@@ -44,6 +44,13 @@ import {
   resolveEditedSheetName,
   DEFAULT_SHEET_NAME,
 } from "./sheet-name";
+import {
+  loadVerovioToolkit,
+  renderMusicXml,
+  notesAtScoreTime,
+  type VerovioRender,
+} from "./verovio-view";
+import type { VerovioToolkit } from "verovio/esm";
 
 const canvas = document.getElementById("stage") as HTMLCanvasElement;
 const fileInput = document.getElementById("file-input") as HTMLInputElement;
@@ -77,6 +84,9 @@ function reflectHandMute(btn: HTMLButtonElement, muted: boolean): void {
     : `${name}: audible. Click to mute.`;
 }
 const correctBtn = document.getElementById("correct-btn") as HTMLButtonElement;
+const editBtn = document.getElementById("edit-btn") as HTMLButtonElement;
+const verovioCredit = document.getElementById("verovio-credit") as HTMLAnchorElement;
+const staffEditLive = document.getElementById("staff-edit-live") as HTMLSpanElement;
 const noteEdit = document.getElementById("note-edit") as HTMLDivElement;
 const noteEditReadout = document.getElementById("note-edit-readout") as HTMLSpanElement;
 const pitchDownBtn = document.getElementById("pitch-down-btn") as HTMLButtonElement;
@@ -155,6 +165,26 @@ let handBalance = BALANCE_DEFAULT;
 // falling-notes model only, marked per-note with `edited` and surfaced once in #track-status.
 let correctMode = false;
 let selectedIndex: number | null = null;
+
+// Smart Edit Mode P0 (read-only Verovio viewer + notehead selection; NO editing yet). The
+// source MusicXML is retained per load so edit mode can hand it to Verovio; loadScoreXml used
+// to discard it (it was a local). Cleared for audio loads, which have no MusicXML to engrave.
+let sourceMusicXml: string | null = null;
+// True while the Verovio staff view is showing in place of the OSMD sheet. Lazy state below is
+// allocated on first entry only, so non-editing users never load the ~7MB toolkit.
+let editMode = false;
+let verovioToolkit: VerovioToolkit | null = null;
+let verovioRender: VerovioRender | null = null;
+let verovioHost: HTMLDivElement | null = null;
+// The currently-selected notehead's MEI id (also its SVG <g> id), or null. Distinct from the
+// falling-canvas `selectedIndex`: edit mode selects on the staff, not the canvas.
+let staffSelectedId: string | null = null;
+// Note ids in musical order (onset, then pitch) for Left/Right selection stepping.
+let staffNavIds: string[] = [];
+// Ids currently tinted as "playing" so the rAF loop only touches the DOM when the set changes.
+let staffPlayingIds: string[] = [];
+// Guard against overlapping enter-edit-mode loads (the lazy import is async).
+let editModeLoading = false;
 
 // Reflect the current selection on screen + to assistive tech, and show/hide the edit cluster.
 // The cluster is visible only in Correct mode WITH a note selected (Designer decision #4).
@@ -336,6 +366,10 @@ function loadNotes(data: ScoreData, name: string, sheet: boolean): void {
   playBtn.disabled = false;
   exportBtn.disabled = false;
   setTransportControlsEnabled(true);
+  // Smart Edit Mode (P0) is available only for MusicXML/OMR scores (a rendered sheet + retained
+  // source). A fresh load also resets the Edit button's pressed state via exitEditMode in the
+  // loaders, so a previous score's edit view never carries over.
+  setEditButtonEnabled();
   updateSeekUI(0);
   setPlaying(false);
 }
@@ -481,6 +515,179 @@ function exitCorrectMode(): void {
   reflectSelection();
 }
 
+// ----- Smart Edit Mode P0 (read-only Verovio viewer + notehead selection) -----
+//
+// Edit mode shows the Verovio engraving in place of the OSMD sheet and lets the user click a
+// notehead to select it. There is NO editing yet: this proves the Verovio substrate (render +
+// id-based hit-testing + timemap sync) behind a flag. The OSMD view is hidden, not destroyed,
+// so exiting restores the normal player instantly.
+
+// Whether edit mode can be entered: only with a rendered sheet AND retained MusicXML to engrave.
+// Audio-derived scores have neither, so the Edit button stays disabled for them.
+function editModeAvailable(): boolean {
+  return hasSheet && sourceMusicXml !== null;
+}
+
+function setEditButtonEnabled(): void {
+  editBtn.disabled = !editModeAvailable();
+}
+
+// Enter edit mode: lazy-load the Verovio toolkit + WASM (~7MB) on first use, render the retained
+// MusicXML into the sheet pane, and arm notehead selection. Pauses playback and leaves Correct
+// mode so the two edit surfaces never fight (one surface of truth). Idempotent and guarded
+// against overlapping async loads.
+async function enterEditMode(): Promise<void> {
+  if (editMode || editModeLoading || !editModeAvailable() || !sourceMusicXml) return;
+  // Editing a moving target is never allowed (Designer decision): pause first.
+  if (playing) {
+    Tone.getTransport().pause();
+    setPlaying(false);
+  }
+  // The falling-canvas editor and the staff editor are mutually exclusive.
+  if (correctMode) exitCorrectMode();
+
+  editModeLoading = true;
+  editBtn.disabled = true;
+  staffEditLive.textContent = "Loading the staff editor...";
+  try {
+    if (!verovioToolkit) verovioToolkit = await loadVerovioToolkit();
+    // The score could have been swapped or audio-loaded while the toolkit streamed in; bail if
+    // edit mode is no longer applicable so we never engrave a stale/cleared score.
+    if (!editModeAvailable() || !sourceMusicXml) {
+      staffEditLive.textContent = "";
+      return;
+    }
+    renderVerovio();
+    editMode = true;
+    editBtn.setAttribute("aria-pressed", "true");
+    verovioCredit.hidden = false;
+    sheetContainer.classList.add("editing");
+    staffEditLive.textContent =
+      "Edit mode on. Click a notehead to select it, or use Left and Right arrows. This view is read-only for now.";
+  } catch (err) {
+    console.error("Failed to enter edit mode:", err);
+    staffEditLive.textContent = "Could not load the staff editor.";
+    // Leave the normal player intact on failure.
+    exitEditMode();
+  } finally {
+    editModeLoading = false;
+    setEditButtonEnabled();
+  }
+}
+
+// Leave edit mode: restore the OSMD view (un-hide its SVG + overlay), hide the Verovio host +
+// credit, and clear the staff selection. The Verovio toolkit instance is kept for a fast
+// re-entry; only the on-screen render is torn down.
+function exitEditMode(): void {
+  editMode = false;
+  editBtn.setAttribute("aria-pressed", "false");
+  verovioCredit.hidden = true;
+  sheetContainer.classList.remove("editing");
+  staffSelectedId = null;
+  staffNavIds = [];
+  staffPlayingIds = [];
+  if (verovioHost) verovioHost.replaceChildren();
+}
+
+// Render (or re-render) the retained MusicXML with Verovio into a host div inside #sheet, then
+// rebuild the selection nav order and re-apply any current selection/playhead tint. The host is
+// created once and reused; OSMD's SVG sits beside it (hidden by the `.editing` class).
+function renderVerovio(): void {
+  if (!verovioToolkit || !sourceMusicXml || !score) return;
+  if (!verovioHost) {
+    verovioHost = document.createElement("div");
+    verovioHost.id = "verovio-host";
+  }
+  // Always (re)attach the host to #sheet. OSMD owns #sheet and an osmd.load/render between edit
+  // sessions can detach our node, so re-appending here keeps the render going into the live DOM
+  // instead of an orphaned div. appendChild is a no-op move when it is already the last child.
+  if (verovioHost.parentNode !== sheetContainer) {
+    sheetContainer.appendChild(verovioHost);
+  }
+  const width = sheetContainer.clientWidth || 800;
+  verovioRender = renderMusicXml(verovioToolkit, sourceMusicXml, score.notes, width);
+  verovioHost.innerHTML = verovioRender.svg;
+  // Musical nav order for Left/Right: by onset, then pitch (low to high within a chord).
+  staffNavIds = verovioRender.notes
+    .slice()
+    .sort((a, b) => a.timeSec - b.timeSec || a.midi - b.midi)
+    .map((n) => n.id);
+  // Re-apply a surviving selection (e.g. after a resize re-render); drop it if the id is gone.
+  if (staffSelectedId && !staffNavIds.includes(staffSelectedId)) staffSelectedId = null;
+  applyStaffSelectionHighlight();
+  staffPlayingIds = [];
+  updateVerovioPlayhead(Tone.getTransport().seconds * tempoRate, true);
+}
+
+// Find a notehead <g> by id within the Verovio host.
+function staffNoteEl(id: string): SVGGElement | null {
+  if (!verovioHost) return null;
+  return verovioHost.querySelector<SVGGElement>(`g.note[id="${CSS.escape(id)}"]`);
+}
+
+// Reflect the current staff selection in the SVG: stroke the selected notehead with the brass
+// halo class, clearing it from any previously-selected one. Also surface the mapped VisNote name
+// (when the id maps to one) so selection is consistent with the falling-notes model.
+function applyStaffSelectionHighlight(announce?: string): void {
+  if (!verovioHost) return;
+  for (const el of verovioHost.querySelectorAll(".ph-selected")) {
+    el.classList.remove("ph-selected");
+  }
+  if (staffSelectedId) {
+    staffNoteEl(staffSelectedId)?.classList.add("ph-selected");
+  }
+  if (announce) staffEditLive.textContent = announce;
+}
+
+// A human label for a selected notehead. Prefer the mapped VisNote (so the staff and falling
+// view agree); fall back to the raw id when the note has no VisNote (e.g. a tie continuation).
+function staffNoteLabel(id: string): string {
+  const index = verovioRender?.idToVisIndex.get(id);
+  if (index !== undefined && score) return editNoteLabel(score.notes[index]);
+  return "note";
+}
+
+// Select a notehead by id (from a click or a keyboard step) and announce it.
+function selectStaffNote(id: string): void {
+  staffSelectedId = id;
+  applyStaffSelectionHighlight(`Selected ${staffNoteLabel(id)}`);
+}
+
+// Step the staff selection to the previous/next notehead in musical order (Left/Right). With no
+// current selection, Right selects the first note and Left the last, so a single arrow always
+// lands somewhere. No-op when the score has no noteheads.
+function moveStaffSelection(delta: 1 | -1): void {
+  if (staffNavIds.length === 0) return;
+  let next: number;
+  if (staffSelectedId === null) {
+    next = delta > 0 ? 0 : staffNavIds.length - 1;
+  } else {
+    const current = staffNavIds.indexOf(staffSelectedId);
+    next = (current + delta + staffNavIds.length) % staffNavIds.length;
+  }
+  selectStaffNote(staffNavIds[next]);
+}
+
+// Tint the notehead(s) sounding at `scoreTime` so the Verovio staff shows the playhead, mirroring
+// the OSMD cursor. Derived purely from the timemap (no per-frame WASM call). Only touches the DOM
+// when the playing set changes, so the rAF loop stays cheap. `force` re-applies after a render.
+function updateVerovioPlayhead(scoreTime: number, force = false): void {
+  if (!editMode || !verovioRender || !verovioHost) return;
+  const ids = notesAtScoreTime(verovioRender.timemap, scoreTime);
+  if (
+    !force &&
+    ids.length === staffPlayingIds.length &&
+    ids.every((id, i) => id === staffPlayingIds[i])
+  ) {
+    return; // unchanged; skip DOM work
+  }
+  for (const el of verovioHost.querySelectorAll(".ph-playing")) {
+    el.classList.remove("ph-playing");
+  }
+  for (const id of ids) staffNoteEl(id)?.classList.add("ph-playing");
+  staffPlayingIds = ids;
+}
+
 // Load MusicXML into OSMD and rebuild the pipeline. Shared by the direct MusicXML file
 // path and the OMR scan result path.
 async function loadScoreXml(
@@ -488,6 +695,12 @@ async function loadScoreXml(
   name: string,
   opts: { upgrade?: boolean } = {},
 ): Promise<void> {
+  // Retain the source MusicXML so Smart Edit Mode can hand it to Verovio (P0). This was
+  // previously discarded (a local that vanished after osmd.load). A fresh load also drops any
+  // active edit-mode view + its Verovio render, which belonged to the previous score.
+  sourceMusicXml = xml;
+  if (editMode) exitEditMode();
+  verovioRender = null;
   await osmd.load(xml);
   osmd.render();
   osmd.cursor.reset();
@@ -522,6 +735,12 @@ async function loadScoreXml(
 // job B's overlay). When the guard is false we skip loadNotes entirely, so the prior state
 // (or the newer job) is left untouched.
 async function loadAudioFile(file: File, shouldApply: () => boolean): Promise<void> {
+  // Audio scores have no MusicXML to engrave, so drop any retained source + exit edit mode
+  // (the Edit button stays disabled without a sheet). Guarded so a cancelled/superseded job
+  // that never reaches loadNotes still leaves edit state coherent.
+  sourceMusicXml = null;
+  if (editMode) exitEditMode();
+  verovioRender = null;
   // The cursor only exists once a sheet has been loaded; it is undefined on a fresh page.
   osmd.cursor?.hide();
   try {
@@ -787,6 +1006,7 @@ function setBusyUI(active: boolean): void {
   if (active) {
     playBtn.disabled = true;
     exportBtn.disabled = true;
+    editBtn.disabled = true;
     setTransportControlsEnabled(false);
   } else {
     // Restore play/export/transport to match whether a score is loaded (issue #86 cancel
@@ -796,6 +1016,7 @@ function setBusyUI(active: boolean): void {
     const enabled = controlsEnabledForScore(!!score);
     playBtn.disabled = !enabled;
     exportBtn.disabled = !enabled;
+    setEditButtonEnabled();
     setTransportControlsEnabled(enabled);
   }
 }
@@ -1012,11 +1233,15 @@ window.addEventListener("keydown", (e) => {
   } else if (e.code === "ArrowRight") {
     if (isFormField) return;
     e.preventDefault();
-    stepNote(1);
+    // In edit mode Left/Right step the STAFF selection between noteheads (Designer decision);
+    // the player is paused there, so they do not also scrub the transport.
+    if (editMode) moveStaffSelection(1);
+    else stepNote(1);
   } else if (e.code === "ArrowLeft") {
     if (isFormField) return;
     e.preventDefault();
-    stepNote(-1);
+    if (editMode) moveStaffSelection(-1);
+    else stepNote(-1);
   }
 });
 
@@ -1246,6 +1471,29 @@ correctBtn.addEventListener("click", () => {
   else enterCorrectMode();
 });
 
+// Smart Edit Mode toggle (P0): flip the staff editor. Entering lazy-loads Verovio and engraves
+// the retained MusicXML; leaving restores the OSMD view. Disabled for audio scores.
+editBtn.addEventListener("click", () => {
+  if (editMode) exitEditMode();
+  else enterEditMode();
+});
+
+// Click a notehead in the Verovio staff to select it (P0). Delegated on the persistent host so
+// it survives re-renders. Clicking empty staff space clears the selection. Every notehead is a
+// `<g class="note" id>`, so closest("g.note") resolves the click to a stable MEI id.
+sheetContainer.addEventListener("click", (e) => {
+  if (!editMode) return;
+  const target = e.target as Element | null;
+  const noteG = target?.closest("g.note") as SVGGElement | null;
+  if (noteG && noteG.id) {
+    selectStaffNote(noteG.id);
+  } else if (target?.closest("#verovio-host")) {
+    // A click on the staff but not on a notehead clears the selection.
+    staffSelectedId = null;
+    applyStaffSelectionHighlight("Selection cleared.");
+  }
+});
+
 // Click/tap a falling bar to select it (issue #6). Only meaningful in Correct mode (and the
 // transport is paused there). Convert the click to canvas-local px and hit-test against the
 // current playhead so the rectangle matches what the user sees.
@@ -1313,6 +1561,9 @@ function frame(): void {
     updateSeekUI(scoreTime);
   }
   visualizer.render(scoreTime);
+  // Smart Edit Mode P0: mirror the playhead onto the Verovio staff via the timemap. Cheap (only
+  // touches the DOM when the sounding set changes) and skipped entirely when edit mode is off.
+  if (editMode) updateVerovioPlayhead(scoreTime);
   requestAnimationFrame(frame);
 }
 
@@ -1324,6 +1575,9 @@ window.addEventListener("resize", () => {
   if (resizeTimer !== undefined) clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
     renderSheetLabels(osmd, sheetContainer, labelMode);
+    // Re-engrave the Verovio staff at the new width so it is not clipped (it preserves the
+    // current selection by id). Cheap re-render; only runs while edit mode is active.
+    if (editMode) renderVerovio();
   }, 150);
 });
 

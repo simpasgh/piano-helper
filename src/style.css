@@ -483,9 +483,10 @@ button:focus-visible,
   gap: 0.4rem;
 }
 
-/* Correct mode (issue #6): the ghost toggle turns to an engaged brass fill when active,
-   matching the hand-mute pressed style so the toolbar stays consistent. */
-#correct-btn[aria-pressed="true"] {
+/* Correct mode (issue #6) + Edit mode (Smart Edit P0): the ghost toggle turns to an engaged
+   brass fill when active, matching the hand-mute pressed style so the toolbar stays consistent. */
+#correct-btn[aria-pressed="true"],
+#edit-btn[aria-pressed="true"] {
   background: rgba(216, 162, 58, 0.28);
   border-color: var(--accent);
   color: var(--text);
@@ -1012,6 +1013,80 @@ button:focus-visible,
   color: #6f6043; /* warm brown on cream, meets AA (~4.8:1) */
   font-size: 0.9rem;
   padding: 1rem;
+}
+
+/* Smart Edit Mode P0: while editing, the Verovio engraving REPLACES the OSMD view in the sheet
+   pane. main.ts adds `.editing` to #sheet and renders the Verovio SVG into #verovio-host. OSMD
+   wraps its SVG in an inner `div#osmdCanvasPageN` (confirmed against the installed package), and
+   the note-name overlay is `#sheet-labels`; both are direct children of #sheet. So we hide every
+   direct child EXCEPT the Verovio host (not destroyed, just hidden), and exiting edit mode shows
+   them again. #sheet stays non-empty, so the :empty placeholder never appears. */
+#sheet.editing > *:not(#verovio-host) {
+  display: none !important;
+}
+
+#verovio-host {
+  position: relative;
+  width: 100%;
+}
+
+/* Verovio renders dark ink; the cream sheet pane already gives it a paper backdrop. Let the SVG
+   size to its own layout and scroll inside #sheet (which is overflow-y:auto). */
+#verovio-host svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+/* Click hit target: every notehead is a <g class="note" id>. Make the whole group respond to a
+   pointer so a click anywhere on the notehead selects it. */
+#verovio-host svg g.note {
+  cursor: pointer;
+}
+
+/* Selection halo (Designer spec): a brass rounded outline + soft glow on the selected notehead,
+   tinting the glyph to --focus-ring so the engraving reads "this is the edit target" without a
+   separate overlay layer. P0 is selection-only, so this is the single edit affordance. */
+#verovio-host svg g.note.ph-selected {
+  fill: var(--focus-ring);
+  stroke: var(--accent);
+  stroke-width: 18px; /* Verovio user units; renders as a thin brass ring at scale */
+  paint-order: stroke;
+}
+
+/* Playback position cue: the notehead(s) sounding at the current time get a brass fill so the
+   Verovio staff shows the playhead, mirroring the OSMD cursor. Distinct from selection (which
+   also strokes a ring) so the two never look identical. */
+#verovio-host svg g.note.ph-playing {
+  fill: var(--accent);
+}
+
+/* Verovio attribution (LGPL obligation). Sits at the bottom-right of the cream sheet pane,
+   visible only while the Verovio view is active. Quiet brass-brown ink on cream so it reads as
+   a credit, not a control. */
+.verovio-credit {
+  position: absolute;
+  right: 0.75rem;
+  bottom: 0.4rem;
+  z-index: 2;
+  font-size: 0.7rem;
+  color: #6b4f1f;
+  text-decoration: none;
+  opacity: 0.8;
+  background: rgba(246, 241, 230, 0.85); /* cream wash so it stays legible over the staff */
+  padding: 0.05rem 0.35rem;
+  border-radius: 4px;
+}
+
+.verovio-credit:hover,
+.verovio-credit:focus-visible {
+  opacity: 1;
+  text-decoration: underline;
+}
+
+.verovio-credit:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 
 #stage {
