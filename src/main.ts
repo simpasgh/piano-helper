@@ -85,6 +85,8 @@ import {
   renderMusicXml,
   notesAtScoreTime,
   buildRestIndexToId,
+  nearestPaddedBoxIndex,
+  type PaddedBox,
   type VerovioRender,
 } from "./verovio-view";
 import type { VerovioToolkit } from "verovio/esm";
@@ -2148,7 +2150,11 @@ sheetContainer.addEventListener("pointerdown", (e) => {
   if (!editMode || playing) return;
   if (!e.isPrimary) return; // ignore secondary touch points entirely
   const target = e.target as Element | null;
-  const noteG = target?.closest("g.note") as SVGGElement | null;
+  // A notehead is small, so accept a DIRECT hit on g.note OR the nearest notehead within a >=24px
+  // padded hot zone (parity with the rest tap target, #33/#84). The direct hit is the fast path;
+  // the padded fallback makes tapping reliable when a notehead is only a few px wide.
+  const directNote = target?.closest("g.note") as SVGGElement | null;
+  const noteG = directNote?.id ? directNote : nearestNoteGWithinPadding(e.clientX, e.clientY);
   if (noteG && noteG.id) {
     // Resolve the notehead to its model handle FIRST; only select + start a drag if it maps to a
     // real editable note (a tie continuation maps to no handle, so we do nothing rather than drag
@@ -2161,8 +2167,9 @@ sheetContainer.addEventListener("pointerdown", (e) => {
     if (shouldStartPitchDrag(e)) beginStaffDrag(noteG, handle, e);
     return;
   }
-  // No notehead: try a REST (ADD-a-note v1). A rest glyph is small, so accept a DIRECT hit OR the
-  // nearest rest within a >=24px padded hot zone (parity with the notehead tap target, #33/#84).
+  // No notehead (direct or padded): try a REST (ADD-a-note v1). A rest glyph is small, so accept a
+  // DIRECT hit OR the nearest rest within the same >=24px padded hot zone the notehead uses (#33/
+  // #84). Noteheads are resolved first, so a tap near both a note and a rest selects the note.
   // Selecting a rest needs only a primary press (no drag); the same primary-button gate as notes
   // applies via e.isPrimary above (a rest has no drag, so shouldStartPitchDrag is not consulted).
   const directRest = target?.closest("g.rest") as SVGGElement | null;
@@ -2184,30 +2191,57 @@ sheetContainer.addEventListener("pointerdown", (e) => {
   }
 });
 
-// The rest `<g>` whose padded bounding box (inflated by REST_HIT_PADDING px on each side) contains
-// the client point and is nearest its center, or null. Gives the small rest glyph a finger-sized
-// hit target without enlarging the drawn glyph. Only consulted when a direct hit on g.rest missed.
-const REST_HIT_PADDING = 12; // px each side => a >=24px-wider hot zone than the glyph
-function nearestRestGWithinPadding(clientX: number, clientY: number): SVGGElement | null {
+// Padding (px each side) that inflates a glyph's box into a finger-sized hot zone: a notehead or a
+// rest glyph is only ~10px, so a >=24px-wider zone makes a near-miss tap still select it. 12px each
+// side => a 24px-wider zone than the glyph itself.
+const GLYPH_HIT_PADDING = 12;
+
+// The mapped `<g>` (matching `selector`, with a model mapping per `isMapped`) whose padded box is
+// nearest the client point, or null. Reads each candidate's screen box and defers the geometry to
+// the pure nearestPaddedBoxIndex; only consulted when a direct hit on the glyph missed. Shared by
+// the notehead and rest hit tests so the two padded-target idioms stay identical.
+function nearestMappedGWithinPadding(
+  selector: string,
+  isMapped: (id: string) => boolean,
+  clientX: number,
+  clientY: number,
+): SVGGElement | null {
   if (!verovioHost) return null;
-  let best: { el: SVGGElement; dist: number } | null = null;
-  for (const el of verovioHost.querySelectorAll<SVGGElement>("g.rest")) {
-    if (!el.id || idToRestIndex.get(el.id) === undefined) continue;
+  const els: SVGGElement[] = [];
+  const boxes: PaddedBox[] = [];
+  for (const el of verovioHost.querySelectorAll<SVGGElement>(selector)) {
+    if (!el.id || !isMapped(el.id)) continue;
     const b = el.getBoundingClientRect();
-    if (
-      clientX < b.left - REST_HIT_PADDING ||
-      clientX > b.right + REST_HIT_PADDING ||
-      clientY < b.top - REST_HIT_PADDING ||
-      clientY > b.bottom + REST_HIT_PADDING
-    ) {
-      continue;
-    }
-    const cx = b.left + b.width / 2;
-    const cy = b.top + b.height / 2;
-    const dist = Math.hypot(clientX - cx, clientY - cy);
-    if (best === null || dist < best.dist) best = { el, dist };
+    boxes.push({ index: els.length, left: b.left, right: b.right, top: b.top, bottom: b.bottom });
+    els.push(el);
   }
-  return best ? best.el : null;
+  const idx = nearestPaddedBoxIndex(boxes, clientX, clientY, GLYPH_HIT_PADDING);
+  return idx === null ? null : els[idx];
+}
+
+// The nearest selectable notehead within the padded hot zone (a notehead maps to a handle via its
+// idToVisIndex -> visIndexToHandle; a tie continuation does not and is skipped so it never wins).
+function nearestNoteGWithinPadding(clientX: number, clientY: number): SVGGElement | null {
+  return nearestMappedGWithinPadding(
+    "g.note",
+    (id) => {
+      const visIndex = verovioRender?.idToVisIndex.get(id);
+      return visIndex !== undefined && visIndexToHandle.has(visIndex);
+    },
+    clientX,
+    clientY,
+  );
+}
+
+// The nearest selectable rest within the padded hot zone (a rest maps to a model rest via
+// idToRestIndex). Only consulted when a direct hit on g.rest missed.
+function nearestRestGWithinPadding(clientX: number, clientY: number): SVGGElement | null {
+  return nearestMappedGWithinPadding(
+    "g.rest",
+    (id) => idToRestIndex.get(id) !== undefined,
+    clientX,
+    clientY,
+  );
 }
 
 // ----- CANVAS surface: click to select + HORIZONTAL drag to change pitch (chromatic) -----

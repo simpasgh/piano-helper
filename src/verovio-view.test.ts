@@ -10,8 +10,12 @@ import {
   restStavesFromSvg,
   restKey,
   buildRestIndexToId,
+  nearestPaddedBoxIndex,
+  buildToolkitOptions,
+  VEROVIO_SCALE,
   type VerovioNote,
   type VerovioRest,
+  type PaddedBox,
 } from "./verovio-view";
 import type { TimemapEntry } from "verovio/esm";
 import type { VisNote } from "./visualizer";
@@ -312,5 +316,81 @@ describe("restKey + buildRestIndexToId", () => {
   it("leaves a model rest unmapped when no glyph shares its key (degrades, never throws)", () => {
     const map = buildRestIndexToId([{ id: "g", timeSec: 0, staff: 1 }], [{ onsetSec: 9, staff: 1 }]);
     expect(map.size).toBe(0);
+  });
+});
+
+// ----- Padded notehead/rest hit target (#33/#84 generalized to notes): forgiving tap selection ---
+
+describe("nearestPaddedBoxIndex", () => {
+  // One small 10x10 glyph centered at (100, 100): box [95,105] x [95,105].
+  const box: PaddedBox = { index: 7, left: 95, right: 105, top: 95, bottom: 105 };
+
+  it("returns the index for a DIRECT hit inside the glyph box", () => {
+    expect(nearestPaddedBoxIndex([box], 100, 100, 12)).toBe(7);
+  });
+
+  it("selects a near-miss tap within the padding (the whole point of the hot zone)", () => {
+    // 10px to the left of the glyph's left edge (x=85): outside the glyph, inside the 12px pad.
+    expect(nearestPaddedBoxIndex([box], 85, 100, 12)).toBe(7);
+    // Diagonally past a corner but still within padding on both axes.
+    expect(nearestPaddedBoxIndex([box], 94, 94, 12)).toBe(7);
+  });
+
+  it("returns null when the tap is beyond the padding on any axis", () => {
+    expect(nearestPaddedBoxIndex([box], 82, 100, 12)).toBeNull(); // 13px left of the left edge
+    expect(nearestPaddedBoxIndex([box], 100, 200, 12)).toBeNull(); // far below
+  });
+
+  it("picks the glyph whose CENTER is nearest when padded zones overlap", () => {
+    // Two glyphs 15px apart; their 12px pads overlap in the middle. A tap at x=44 is inside both
+    // padded zones but closer to glyph A's center (40) than B's center (60).
+    const a: PaddedBox = { index: 0, left: 35, right: 45, top: 95, bottom: 105 }; // center x=40
+    const b: PaddedBox = { index: 1, left: 55, right: 65, top: 95, bottom: 105 }; // center x=60
+    expect(nearestPaddedBoxIndex([a, b], 44, 100, 12)).toBe(0);
+    expect(nearestPaddedBoxIndex([a, b], 56, 100, 12)).toBe(1);
+  });
+
+  it("returns null for no candidates", () => {
+    expect(nearestPaddedBoxIndex([], 100, 100, 12)).toBeNull();
+  });
+
+  it("a >=24px-wide zone: a tap up to 12px from a ~10px glyph still hits (the touch-target goal)", () => {
+    // The drawn glyph is 10px wide; with 12px pads each side the hot zone is 34px wide (>=24).
+    // A tap 11px right of the right edge (x=116) still selects.
+    expect(nearestPaddedBoxIndex([box], 116, 100, 12)).toBe(7);
+  });
+});
+
+describe("buildToolkitOptions (staff fills the pane, readable scale)", () => {
+  it("derives pageWidth so the rendered SVG px width equals the container (no CSS downscale)", () => {
+    // The rendered SVG px width is pageWidth * scale / 100; with pageWidth = container * 100 / scale
+    // that reduces to the container width itself, so `max-width: 100%` never shrinks the engraving.
+    const containerPx = 1500;
+    const opts = buildToolkitOptions(containerPx);
+    const renderedPx = (Number(opts.pageWidth) * Number(opts.scale)) / 100;
+    expect(renderedPx).toBeCloseTo(containerPx, 0);
+    expect(opts.scale).toBe(VEROVIO_SCALE);
+  });
+
+  it("uses a readable scale (>= the old 40) so glyphs are larger than the tiny prod render", () => {
+    // The bug shipped scale 40 AND a 5x-too-wide page (which the CSS then halved). The fix keeps the
+    // page exactly container-width and raises the scale, so the engraving is clearly larger.
+    expect(VEROVIO_SCALE).toBeGreaterThanOrEqual(40);
+    expect(buildToolkitOptions(1500).scale).toBe(VEROVIO_SCALE);
+  });
+
+  it("floors a degenerate (zero / unmeasured) container width instead of laying out at 0", () => {
+    const opts = buildToolkitOptions(0);
+    // pageWidth must be a sane positive number (floored container 320 * 100 / scale), never 0.
+    expect(Number(opts.pageWidth)).toBeGreaterThan(0);
+    const renderedPx = (Number(opts.pageWidth) * Number(opts.scale)) / 100;
+    expect(renderedPx).toBeCloseTo(320, 0);
+  });
+
+  it("keeps a tall page + auto breaks so long scores wrap into scrollable systems", () => {
+    const opts = buildToolkitOptions(1500);
+    expect(opts.breaks).toBe("auto");
+    expect(Number(opts.pageHeight)).toBeGreaterThan(10000);
+    expect(opts.adjustPageHeight).toBe(true);
   });
 });
