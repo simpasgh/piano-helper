@@ -4,6 +4,72 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-06-04: BLOCK-BY-BLOCK OMR STREAMING (OMR_PROGRESSIVE_BLOCKS) end-to-end prod QA ->
+  **FAIL: the streaming path is NOT running in prod. No progressive partials are published at
+  all, so the feature never engages.** Frontend code IS deployed and correct; the worker is not
+  emitting partials. Root cause points to the PARENT gate `OMR_PROGRESSIVE` being OFF on cx33
+  (the task said only `OMR_PROGRESSIVE_BLOCKS=1` was flipped, but the block-stream branch needs
+  `progressive_enabled() AND progressive_blocks_enabled() AND is_pdf_input` -- worker.py:1671 --
+  and even the frontier-less FAST-THEN-REFINE geom partial -- worker.py:1700, gated on
+  `progressive_enabled()` alone -- never appeared, which only happens if OMR_PROGRESSIVE is off).
+  - METHOD (primary, programmatic, client-side): wrote a Node driver
+    (C:\tmp\qa-blocks\drive.mjs) that replicates src/omr.ts EXACTLY -- POST /api/omr (multipart
+    file) -> poll /api/omr/result every 3s (and a 600ms fast variant) -- using the BYTE-IDENTICAL
+    regexes (FAILURE_SENTINEL_RE / PARTIAL_SENTINEL_RE / omr-version / omr-systems-total /
+    omr-systems-done) and recording the FULL response sequence + each partial's frontier. Ran two
+    real multi-system grand-staff piano PDFs from the user's MuseScore4 dir:
+    `tctab.pdf` ("the cut that always bleeds", 70952 B, 2 pages, final = 70 measures) and
+    `icarus.pdf` (37757 B, 2 pages, final = 26 measures).
+  - OBSERVED SEQUENCE (both runs): submit -> 202 jobId, then a run of 404 pending, then ONE jump
+    straight to **200 COMPLETE** with ZERO intermediate partials. tctab: 404...404 then complete
+    at +234s (507 notes / 478 pitched / 70 measures). icarus (600ms poll, race-proof): 404...404
+    then complete at +79s (147 notes / 145 pitched / 26 measures). NO partial body of ANY kind was
+    received or written in either run (only final.musicxml exists; no partial-vNNN.musicxml).
+  - WHY THIS IS NOT A MISSED-PARTIAL RACE: Clarity streams ~9s/system; the icarus run polled every
+    600ms across a 79s job, so a published partial could not slip between polls. Two PDFs, two
+    clean reproductions, deterministic (not flaky).
+  - WHAT IS LIVE vs NOT: (a) FRONTEND is deployed + correct -- served JS `main-Fc10t1kD.js`
+    carries `omr-systems-total`/`omr-systems-done`/`Recognizing system`, served CSS
+    `main-jKTopWQC.css` carries `sys-scan-beam` + `skeleton-sheen`. (b) FUSION is on -- the final
+    score is the canonical geom+Clarity fusion grand staff (single <part>, <staves>2</staves>,
+    <divisions>4</divisions>, G@1/F@2 clefs, chord-stacked LH, fifths 0, real notes, NOT the
+    failure sentinel), so OMR_GEOM + OMR_GEOM_FUSION ARE active. (c) PROGRESSIVE PUBLISHING is OFF
+    -- not a single partial (frontier-bearing OR frontier-less) is published, which isolates the
+    miss to OMR_PROGRESSIVE.
+  - GATE RESULT: G1 (>=1 frontier-bearing partial) FAIL count=0; G2 (done count increases) FAIL
+    seq=[]; G3 (final valid MusicXML real notes) PASS. Overall FAIL because the feature under test
+    (block streaming) provably did not run.
+  - SECONDARY (browser) check NOT RUN, by design: the per-system loader (finished=real notes /
+    active=brass scan-beam / pending=skeleton shimmer) is driven entirely by onPartial receiving a
+    frontier (main.ts:1994-2024 -> shouldShowSystemLoader -> renderStreamOverlay). With zero
+    partials published, onPartial never fires, so a real browser on current prod would show only
+    the normal #86 full-stage overlay then the complete score -- it CANNOT exercise the streaming
+    visuals. Playwright Chromium 1223 is cached and ready; re-run the browser pass AFTER the flag
+    is fixed and partials actually flow.
+  - ACTION FOR THE OWNER: this is a config/flag issue, NOT a code bug. Verify on cx33
+    (/etc/piano-helper-omr.env or the /admin flags page, which is reachable: GET /admin -> 200)
+    that **OMR_PROGRESSIVE=1** is set ALONGSIDE OMR_PROGRESSIVE_BLOCKS=1 (and OMR_GEOM_FUSION=1,
+    already confirmed on). OMR_PROGRESSIVE_BLOCKS alone is inert. After flipping OMR_PROGRESSIVE on
+    + the config polls through, re-run C:\tmp\qa-blocks\drive.mjs against tctab.pdf to confirm
+    frontier-bearing partials with an increasing done count, then the browser visual pass.
+  - METHOD GOTCHAS (Windows): the Bash tool's `/tmp` maps to
+    C:\Users\pascu\AppData\Local\Temp while the Write tool's C:\tmp is a DIFFERENT dir -- keep the
+    driver + PDFs + outputs all under one absolute path (I used C:\tmp\qa-blocks) and pass absolute
+    Windows paths to node. Backgrounding node with `&` inside a Bash call detaches it from the task
+    wrapper (the wrapper reports "completed" while node keeps running); instead launch to a log
+    file and poll the log with an until-loop for the `OVERALL:` line. `pdfinfo`/`pdftoppm` are NOT
+    on the Bash PATH here, so count systems from the stream's `omr-systems-total` rather than a
+    local render. Artifacts: C:\tmp\qa-blocks\ (drive.mjs, drive-fast.mjs, tctab.pdf, icarus.pdf,
+    run-tctab.log, run-icarus.log, final.musicxml).
+  - RESOLVED 2026-06-04 (same day): the FAIL was a config issue, now fixed and re-verified PASS.
+    The /admin R2 config `config/omr-flags.json` carried `OMR_PROGRESSIVE="0"` and omitted
+    `OMR_PROGRESSIVE_BLOCKS`, and the worker's per-poll overlay stomped the env file (see
+    infrastructure.md, same date). it-support set both to "1" in R2 (no restart). Re-running
+    `drive-fast.mjs icarus.pdf` then PASSED all gates: partials cascaded 1/6 @+33s, 2/6 @+42s,
+    3/6 @+53s, 4/6 @+62s, 5/6 @+71s (pitched notes growing 47, 100, 141), final COMPLETE 145
+    pitched @+84s, system total 6. Block-stream path confirmed LIVE end-to-end. Browser visual
+    pass still pending (owner watching).
+
 - 2026-06-04: SMART EDIT MODE full live QA on PROD (https://piano-helper.pages.dev, served
   bundle `main-zQeMQ_s2.js`, lazy chunks `verovio-module-DtKpMCQ-.js` + `verovio-wycgSLAY.js`).
   **VERDICT: PASS on all 11 battery items + the multi-measure regression is FIXED.** Drove live in
