@@ -146,27 +146,81 @@ def _borrow_durations(g_cells: Dict, c_cells: Dict) -> Dict:
     return out
 
 
+def _bar_capacity16(beats: int, beat_type: int) -> Optional[int]:
+    """The bar's metric capacity in omr_eval._dur16 SIXTEENTHS: beats * (16 / beat_type) (a whole
+    note is 16 sixteenths, so beats quarters at beat_type=4 give beats*4, a 2/4 bar 8, a 3/4 bar
+    12, a 6/8 bar 12). None when beat_type does not divide 16*beats exactly (an odd meter we will
+    not guess a fractional capacity for). PURE; used only to CLAMP the unmatched-chord fallback so
+    a borrowed bar is never inflated past its meter -- it never touches a borrowed duration."""
+    if not beats or not beat_type or beat_type <= 0:
+        return None
+    num = beats * 16
+    if num % beat_type != 0:
+        return None
+    return num // beat_type
+
+
+def _bar_fallback_durs(durs: List[Optional[int]], capacity16: Optional[int],
+                       fallback: int) -> List[int]:
+    """Resolve a (measure, staff) voice's per-chord durations, sizing the UNMATCHED chords (a None
+    entry) so the bar does not exceed its meter. Matched chords (an int) pass through unchanged.
+
+    WHY (the reverie m17 / tctab over-read this fix targets). An unmatched geom chord previously took
+    a blind quarter (fallback=4 sixteenths). When the bar's matched borrows already (nearly) fill the
+    meter, that quarter OVERFILLS it: reverie's last bar read a half + four eighths but one eighth
+    failed to align to its (re-ordered) Clarity twin, so it took a quarter and the bar summed to 18/16
+    = 4.5 beats (the user's symptom). geom's OWN duration cannot rescue this -- the deployed notehead
+    path fakes duration:1 for every note -- so the fix sizes the fallback to the room the bar has
+    LEFT: each unmatched chord takes clamp(room_remaining, 1, quarter), consuming the room greedily.
+    A lone unmatched chord in a near-empty bar still gets a full quarter (room >= 4), so this is
+    IDENTICAL to the old behaviour except where a quarter would overfill (room < 4) -- exactly the
+    over-read case. An always-positive floor of one sixteenth keeps every geom notehead present (a
+    dropped note would regress geom's pitch edge), even when the matched borrows already overfill.
+    capacity16=None (unknown / odd meter) -> every unmatched chord keeps the blind quarter (no room
+    signal to improve). PURE."""
+    n_unmatched = sum(1 for d in durs if d is None)
+    if capacity16 is None or n_unmatched == 0:
+        return [int(d) if d and d > 0 else fallback for d in durs]
+    matched_sum = sum(int(d) for d in durs if d and d > 0)
+    room = capacity16 - matched_sum
+    out: List[int] = []
+    for d in durs:
+        if d and d > 0:
+            out.append(int(d))
+            continue
+        take = max(1, min(fallback, room))  # clamp to [1, quarter]; >= quarter room keeps a quarter.
+        out.append(take)
+        room -= take
+    return out
+
+
 def _build(g_cells: Dict, borrowed: Dict, fifths: int, beats: int = 4, beat_type: int = 4,
            fallback: int = 4) -> Optional[bytes]:
     """Rebuild geom's notes (pitch + measures) with the borrowed durations and the meter the caller
     resolved (beats/beat_type: Clarity's declared meter, except a 4/4-equivalent meter is passed as
-    4/4 -- see fuse -- so a non-4/4 piece renders at its true width). Unmatched geom chords keep a
-    neutral quarter note (fallback=4 sixteenths). The key stays geom's (a non-C key borrow is a
-    later enhancement, validated on a non-C piece first; all current eval pieces are C major).
+    4/4 -- see fuse -- so a non-4/4 piece renders at its true width). An UNMATCHED geom chord takes a
+    fallback sized so its bar is not inflated past the meter (_bar_fallback_durs: clamp(room left, 1,
+    quarter); a lone unmatched chord in a near-empty bar still gets a full quarter, so this only bites
+    when a quarter would overfill -- the reverie/tctab over-read). The key stays geom's (a non-C key
+    borrow is a later enhancement, validated on a non-C piece first; all current eval pieces are C
+    major).
 
     divisions stays 4 and is LOAD-BEARING: the borrowed durations are omr_eval._dur16 SIXTEENTHS,
     and divisions=4 makes a <duration> value of N equal N sixteenths == N ticks, so the borrowed
     dur16 numbers are directly usable as tick durations. Only the <time> is borrowed, never
-    <divisions> (changing it would desync every borrowed duration). PURE; returns None if nothing
-    usable."""
+    <divisions> (changing it would desync every borrowed duration), and _bar_capacity16 reads the
+    SAME divisions-invariant sixteenth scale, so the clamp is consistent. PURE; returns None if
+    nothing usable."""
+    capacity16 = _bar_capacity16(beats, beat_type)
     measures: List[dict] = []
     for mm in sorted(set(k[0] for k in g_cells)):
         per_staff = {}
         for s in (1, 2):
+            cell = g_cells.get((mm, s), [])
+            durs = [borrowed.get((mm, s, idx)) for idx in range(len(cell))]
+            sized = _bar_fallback_durs(durs, capacity16, fallback)
             evs = []
-            for idx, (_o, pitches, _gd) in enumerate(g_cells.get((mm, s), [])):
-                dur = borrowed.get((mm, s, idx), fallback)
-                dur = int(dur) if dur and dur > 0 else fallback
+            for (_o, pitches, _gd), dur in zip(cell, sized):
                 evs.append({
                     "duration": dur,
                     "pitches": [{"step": st, "alter": al, "octave": oc} for (st, al, oc) in pitches],
