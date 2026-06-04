@@ -66,7 +66,9 @@ def test_fuse_aligns_by_pitch_class_when_geom_octave_differs():
 
 
 def test_fuse_unmatched_geom_chord_keeps_quarter_fallback():
-    # geom has an extra note clarity missed; matched notes borrow, the extra keeps a quarter.
+    # geom has an extra note clarity missed; matched notes borrow, the extra keeps a quarter. Here the
+    # matched borrows (two eighths = 4 sixteenths) leave 12 of the 16-cap bar free, so the unmatched
+    # chord still takes a full quarter (room >= a quarter): the capacity clamp is a no-op here.
     geom = _xml([{"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]},
                              {"duration": 1, "pitches": [{"step": "E", "octave": 5}]},
                              {"duration": 1, "pitches": [{"step": "G", "octave": 5}]}], "staff2": []}])
@@ -74,6 +76,81 @@ def test_fuse_unmatched_geom_chord_keeps_quarter_fallback():
                                 {"duration": 2, "pitches": [{"step": "G", "octave": 5}]}], "staff2": []}])
     fused = fusion.fuse(geom, clarity)
     assert _durs(fused) == [2, 2, 4]      # C,G borrow eighth; E (unmatched) -> quarter fallback
+
+
+def test_fuse_unmatched_chord_clamps_to_remaining_bar_room():
+    # ROOT-CAUSE FIX (reverie m17 / tctab over-read). geom reads a half + four short notes (the
+    # screenshot's "La" + "Do Si Do Si"); Clarity read the same bar but ordered the four shorts
+    # differently (C B B C vs geom's C B C B), so geom's LAST short fails to align to any Clarity
+    # chord. The matched borrows already fill 8 + 2 + 2 + 2 = 14 of the 16-sixteenth (4/4) bar, so a
+    # blind quarter (4) on the unmatched note would sum the bar to 18 == 4.5 beats (the bug). The
+    # capacity clamp gives the unmatched note clamp(room=2, 1, 4) = an eighth, so the bar sums to 16.
+    geom = _xml([{"staff1": [
+        {"duration": 1, "pitches": [{"step": "A", "octave": 4}]},   # half "La"
+        {"duration": 1, "pitches": [{"step": "C", "octave": 6}]},   # "Do"
+        {"duration": 1, "pitches": [{"step": "B", "octave": 5}]},   # "Si"
+        {"duration": 1, "pitches": [{"step": "C", "octave": 6}]},   # "Do"
+        {"duration": 1, "pitches": [{"step": "B", "octave": 5}]},   # "Si" (the one that fails to align)
+    ], "staff2": []}])
+    clarity = _xml([{"staff1": [
+        {"duration": 8, "pitches": [{"step": "A", "octave": 4}]},   # half
+        {"duration": 2, "pitches": [{"step": "C", "octave": 6}]},   # eighth
+        {"duration": 2, "pitches": [{"step": "B", "octave": 5}]},   # eighth
+        {"duration": 2, "pitches": [{"step": "B", "octave": 5}]},   # eighth (re-ordered vs geom)
+        {"duration": 2, "pitches": [{"step": "C", "octave": 6}]},   # eighth (re-ordered vs geom)
+    ], "staff2": []}])
+    fused = fusion.fuse(geom, clarity)
+    assert _midis(fused) == [69, 83, 83, 84, 84]   # geom's pitches preserved (A4 + C6/B5 x2)
+    assert sum(_durs(fused)) == 16                  # the bar is metrically whole, NOT 18 (4.5 beats)
+    # the unmatched short note took an eighth (room), not the old blind quarter
+    assert _durs(fused) == [2, 2, 2, 2, 8]
+
+
+def test_fuse_unmatched_chord_floors_to_a_sixteenth_when_bar_already_full():
+    # When the matched borrows ALONE already fill (or overfill) the bar, an unmatched geom chord still
+    # must keep a positive duration (a dropped notehead would regress geom's pitch edge), so it floors
+    # to ONE sixteenth -- the least it can add -- rather than the blind quarter that would overfill
+    # harder. geom: two notes; Clarity matches only the first and gives it a whole note (16 = the full
+    # bar). The unmatched second note gets a sixteenth, not a quarter.
+    geom = _xml([{"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]},
+                             {"duration": 1, "pitches": [{"step": "E", "octave": 5}]}], "staff2": []}])
+    clarity = _xml([{"staff1": [{"duration": 16, "pitches": [{"step": "C", "octave": 5}]}],
+                     "staff2": []}])
+    fused = fusion.fuse(geom, clarity)
+    assert _midis(fused) == [72, 76]    # both geom pitches kept (C5, E5)
+    assert _durs(fused) == [1, 16]      # unmatched E5 floors to a sixteenth (was a quarter), C5 whole
+
+
+def test_fuse_clamp_respects_non_4_4_capacity():
+    # The clamp reads the resolved meter's capacity, so it sizes the fallback to a NON-4/4 bar too.
+    # 2/4 (capacity 8 sixteenths): a matched quarter (4) leaves 4 of room, and the unmatched chord
+    # takes clamp(4, 1, 4) = a quarter, filling the 2/4 bar exactly (not overfilling past 8).
+    geom = _xml([{"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]},
+                             {"duration": 1, "pitches": [{"step": "G", "octave": 5}]}], "staff2": []}],
+                time={"beats": 2, "beat_type": 4})
+    clarity = _xml([{"staff1": [{"duration": 4, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []}],
+                   time={"beats": 2, "beat_type": 4})
+    fused = fusion.fuse(geom, clarity)
+    assert _time(fused) == ("2", "4")
+    assert sum(_durs(fused)) == 8       # quarter (borrowed) + quarter (clamped) == the 2/4 bar
+    assert _durs(fused) == [4, 4]
+
+
+def test_bar_fallback_durs_unit():
+    # Direct unit on the pure sizer: matched ints pass through; a None (unmatched) takes clamp(room,
+    # 1, quarter). Two unmatched chords split the remaining room greedily, capped at a quarter each.
+    f = fusion._bar_fallback_durs
+    assert f([8, 2, 2, 2, None], 16, 4) == [8, 2, 2, 2, 2]   # reverie shape: last note -> eighth
+    assert f([None], 16, 4) == [4]                            # lone note, full bar of room -> quarter
+    assert f([16, None], 16, 4) == [16, 1]                    # bar already full -> sixteenth floor
+    assert f([14, None, None], 16, 4) == [14, 2, 1]           # 2 room split: 2 then floored to 1
+    assert f([None, None], None, 4) == [4, 4]                 # unknown capacity -> blind quarters
+    assert f([2, None, 2], 16, 4) == [2, 4, 2]                # room 12 -> a full quarter (no clamp)
+    # A MATCHED chord whose borrowed dur16 rounded to 0 (a sub-sixteenth Clarity read) is degenerate,
+    # NOT an unmatched slot: it takes the blind fallback like the no-capacity path and does NOT draw on
+    # the unmatched-room budget, so its size never depends on whether a sibling happened to be unmatched.
+    assert f([12, 0, None], 16, 4) == [12, 4, 4]              # matched-0 -> quarter; only None takes room
+    assert f([12, 0], 16, 4) == [12, 4]                       # no unmatched -> early path, matched-0 -> quarter
 
 
 def test_fuse_preserves_chords():

@@ -4,6 +4,41 @@ Self-contained plan so any session (esp. the one on the GPU PC) can pick up and 
 without the prior machine's local memory. Newest status at the top. NO em dashes in generated
 text (project rule). Ship every code change through the gated flow (see "Constraints" below).
 
+## STATUS: fusion FALLBACK over-read FIXED (an unmatched geom chord no longer overfills its bar) (2026-06-04)
+
+Branch `fix/fusion-rhythm-overread` (off main, not yet merged). RHYTHM lever, prod-primary fusion path.
+A geom chord that fails the pitch-class Needleman-Wunsch against Clarity (`fusion._nw`) is UNMATCHED and
+took a blind QUARTER fallback. When the bar's MATCHED borrows already (nearly) fill the meter, that
+quarter OVERFILLED it. CONFIRMED root cause on reverie (the user's symptom): m17 staff1 read a half +
+four eighths, but geom and Clarity ORDERED the four shorts differently (geom C6 B5 C6 B5 vs Clarity C6
+B5 B5 C6), so geom's last short went unmatched and took a quarter -> the bar summed to 18 sixteenths ==
+4.5 beats. geom's OWN duration is useless here: the deployed notehead path (`transcribe_with_detector`)
+fakes `duration:1` for EVERY note (geom dur16 histogram `{1: N}` on all 4 eval pieces); #196's
+full-symbol decode is research-only, NOT in the prod fusion path. `rhythm_repair` can't mask it (skips
+the last bar; refuses to shrink a pitched overfull bar by design).
+
+FIX (`fusion.py`, never-raise + pitch-safe): a CAPACITY-CLAMPED fallback. `_bar_capacity16(beats,
+beat_type)` = bar capacity in `omr_eval._dur16` SIXTEENTHS (`beats*16/beat_type`); `_bar_fallback_durs`
+sizes each UNMATCHED chord to `clamp(room_remaining_in_bar, 1, quarter)`, consuming the leftover room
+greedily. A lone unmatched chord in a near-empty bar still gets a full quarter (room >= 4), so the
+change is IDENTICAL to the old behaviour except where a quarter would overfill (room < 4) -- exactly the
+over-read case. Floors at a sixteenth so every geom notehead keeps a positive duration (a dropped note
+would regress geom's pitch edge). Reads the NORMALIZED meter `fuse` resolves (a 2/2 cut-time misread ->
+4/4 cap 16). NEVER touches a borrowed (matched) duration or geom's pitch, so it cannot regress pitch.
+
+MEASURED never-worse (box `fusion_repair_eval.py`, BEFORE deployed vs AFTER `RHY_SRC` shadowing the edit):
+- reverie: m17 18 -> 16 sixteenths (the symptom is GONE); incomplete bars after repair 1/32 -> 0/32; ndf1
+  0.427 unchanged (the bar RENDERS correct now; the metric is pitch-gated on geom's B5-vs-truth mismatch).
+- tctab: FUSED note_dur_f1 0.875 -> 0.890, duration_acc 0.880 -> 0.894, incomplete bars after repair
+  12/134 -> 6/134; overfull bars 12 -> 6. nf1 unchanged 0.995.
+- icarus + liminality: IDENTICAL (no unmatched chord lands in an overfull bar; clamp is a no-op).
+NO regression on any piece. The RESIDUAL tctab overfull bars (e.g. m68 sum 26) are a SEPARATE culprit:
+Clarity's OWN over-read on the MATCHED side (every chord there is a borrowed duration), which this fix
+deliberately leaves alone. NEXT for those: a matched-side bar-sum sanity check on Clarity's borrows, or
+the full-symbol geom durations (which would also give the unmatched-chord fallback a real value instead
+of a clamp). Tests: `test_fusion.py` +6 (reverie shape, full-bar sixteenth floor, 2/4 capacity, the
+`_bar_fallback_durs` unit); full omr-worker suite 463 passed / 15 torch-skipped locally.
+
 ## STATUS: FULL-SYMBOL DECODE built (durations/key/accidentals/clefs/rests from glyphs); detector training + eval in flight (2026-06-04)
 
 Step 3 of the full-symbol detector. The DECODE that reads musical content from the trained
