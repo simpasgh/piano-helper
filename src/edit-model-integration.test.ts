@@ -643,3 +643,89 @@ describe("CROSS-BARLINE TIE: the ties refactor keeps the real reverie engine pat
     }
   });
 });
+
+// ----- SET-KEY (SIG-4) through the REAL engine on the real reverie file -----
+//
+// A key-signature edit rewrites <key><fifths> + per-note accidentals, PITCH-PRESERVING. Verovio must
+// engrave the NEW signature + the added accidentals WITHOUT a "unsupported note-type-value" warning
+// (every note still carries a <type>), reverie must stay 185/185 (the click map is unchanged because
+// the pitches are unchanged), and the rendered key signature must show the new sharps. This is the
+// in-engine proof that the pitch-preserving accidental rewrite engraves correctly on real OMR.
+
+describe("SET-KEY (SIG-4): a key edit on real reverie engraves the new signature with no warning", () => {
+  let toolkit: VerovioToolkit;
+  beforeAll(async () => {
+    toolkit = await loadVerovioToolkit();
+  }, 60000);
+
+  it("correcting reverie to D major engraves the key + accidentals, stays 185/185, no engine warning", () => {
+    const model = parseScoreModel(REVERIE_XML);
+    expect(model.handles.length).toBe(185);
+
+    // The falling notes the app derives BEFORE the key edit (pitch-preserving means these never move).
+    const visBefore = model.handles
+      .filter((h) => !h.isTieContinuation)
+      .map((h) => ({ midi: h.midi, time: h.onsetSec, duration: 0.5, hand: "right" as const }));
+
+    // Correct the (mis-read) key to D major.
+    const rec = model.setKeyFifths(2);
+    expect(rec).not.toBeNull();
+    const xml = model.serialize();
+    expect(xml.includes("<fifths>2</fifths>")).toBe(true); // the new signature is declared
+
+    // PITCH-PRESERVING: every handle's MIDI is unchanged, so the SAME vis derives + the click map holds.
+    const visAfter = model.handles
+      .filter((h) => !h.isTieContinuation)
+      .map((h) => ({ midi: h.midi, time: h.onsetSec, duration: 0.5, hand: "right" as const }));
+    expect(visAfter.map((n) => n.midi)).toEqual(visBefore.map((n) => n.midi));
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let render;
+    try {
+      render = renderMusicXml(toolkit, xml, visAfter, 800);
+    } finally {
+      const allOutput = [...logSpy.mock.calls, ...warnSpy.mock.calls]
+        .flat()
+        .map((a) => String(a))
+        .join("\n");
+      logSpy.mockRestore();
+      warnSpy.mockRestore();
+      // The accidental rewrite never strips a <type>, so no blank/unsupported note-type-value warning.
+      expect(allOutput).not.toContain("note-type-value");
+    }
+
+    // 185/185: every rendered notehead resolves to a VisNote and the handle map is complete.
+    expect(render!.notes).toHaveLength(185);
+    expect(render!.idToVisIndex.size).toBe(render!.notes.length);
+    const handleMap = buildHandleToVisIndex(model.handles, visAfter);
+    expect(handleMap.size).toBe(visAfter.length);
+
+    // The engraved SVG shows a key signature (Verovio draws a <g class="keySig"> for the 2 sharps).
+    expect(render!.svg).toMatch(/class="[^"]*\bkeySig\b/);
+
+    // Every note still carries a <type> (the accidental rewrite touched <alter>/<accidental> only).
+    const doc = new DOMParser().parseFromString(xml, "application/xml");
+    const pitched = Array.from(doc.getElementsByTagName("note")).filter(
+      (n) => n.getElementsByTagName("rest").length === 0,
+    );
+    for (const n of pitched) {
+      expect(n.getElementsByTagName("type").item(0)?.textContent ?? "").not.toBe("");
+    }
+  });
+
+  it("a key edit + undo round-trips reverie back to the original render (185/185)", () => {
+    const model = parseScoreModel(REVERIE_XML);
+    const before = model.serialize();
+    const rec = model.setKeyFifths(-3)!; // correct to E flat major
+    expect(model.serialize()).not.toBe(before);
+    model.restoreKey(rec);
+    expect(model.serialize()).toBe(before); // byte-exact undo
+    const vis = model.handles
+      .filter((h) => !h.isTieContinuation)
+      .map((h) => ({ midi: h.midi, time: h.onsetSec, duration: 0.5, hand: "right" as const }));
+    const restored = renderMusicXml(toolkit, model.serialize(), vis, 800);
+    expect(restored.notes).toHaveLength(185);
+    expect(restored.idToVisIndex.size).toBe(restored.notes.length);
+  });
+});

@@ -3,6 +3,272 @@
 UX, visual design, interaction decisions. Append durable learnings at the top of the
 relevant section, dated.
 
+## Smart Edit Mode SIGNATURE EDITING: correct the KEY + TIME signature (interaction + visual spec)
+
+- **2026-06-04 - The next musescore-like capability after the duration editor. Framing that
+  drives every decision: this is OMR CORRECTION, not composition. The dominant case is a SCANNED
+  score whose key or meter the OMR misread, where the NOTES and BARLINES are already right and only
+  the DECLARATION glyph (`<key><fifths>` / `<time><beats>/<beat-type>`) is wrong. So the mental
+  model is "correct the declared key/meter", NOT "transpose" or "re-bar". The real OMR fixture
+  (reverie-omr.musicxml) confirms the shape: ONE initial `<attributes>` in measure 1 carrying
+  `<key><fifths>0</fifths></key>` and `<time><beats>4</beats><beat-type>4</beat-type></time>`, and
+  noteheads with NO printed accidentals. This entry is interaction + visual; the Tech Lead owns the
+  model mutation (a new `setKeyFifths` / `setTimeSignature` on ScoreModel + their command records),
+  the fixed-bar capacity recompute, and the accidental-preservation on a key change.**
+
+  ### DECISION SIG-1 (SCOPE) - ship KEY FIRST, then TIME, each as its own increment; BOTH edit only the INITIAL (piece-level) declaration in MVP.
+
+  RECOMMENDATION: two increments, KEY before TIME, and confirmed: **MVP edits the initial,
+  piece-level declaration only.** Per-measure / mid-piece key or meter changes are v2.
+
+  - **Why two increments, not one shipment:** they share the affordance pattern (SIG-2) but have
+    DIFFERENT semantics and risk. KEY is pure-additive and low-risk: it changes the printed
+    signature + each note's default accidental, the notes keep their sounding pitch, no bar math
+    moves. TIME is the riskier one because it changes bar CAPACITY, which collides with the duration
+    editor's FIXED-BAR invariant (a bar that was full at 4/4 is now over/under-full at 3/4). Landing
+    KEY first proves the "select the signature, pick a value, one undoable command, both surfaces
+    re-render" loop on the SAFE axis, so when TIME lands the only new thing to reason about is the
+    capacity interaction, not the whole affordance. It also lets QA sign off the simpler half first.
+  - **Why KEY before TIME (not TIME first):** KEY is the more common real misread (a scan drops or
+    miscounts sharps/flats far more often than it mis-detects the meter), it is strictly local (no
+    downstream bar consequence), and it has the cleaner "nothing else moves" story for a first
+    shipment. TIME inherits the proven affordance and adds the capacity recompute on top.
+  - **Why initial-declaration-only for MVP (confirmed the strong prior):** real piano OMR almost
+    always emits a single `<attributes>` at measure 1 and no mid-piece signature changes (the
+    fixture has exactly this). Editing the one initial declaration fixes the overwhelming majority of
+    misreads with the simplest possible model (find the first `<key>` / `<time>`, rewrite it) and the
+    simplest affordance (one target, always present). Mid-piece changes need a SECOND selection model
+    ("which signature, at which measure") and a re-engrave that only affects bars from that point on,
+    which is real scope for a rare case. State the limit plainly in help/PM copy: "Editing changes
+    the signature for the whole piece; a signature that changes partway through is not editable yet."
+
+  ### DECISION SIG-2 (AFFORDANCE) - a TOOLBAR control per signature, NOT click-the-glyph in MVP. New `#key-sig-btn` / `#time-sig-btn` open a small popover picker.
+
+  RECOMMENDATION: add ONE toolbar control per signature that opens a small picker, placed in a NEW
+  trailing-but-before-commit `.edit-tool-group` (a "signatures" group), so the strip reads: history |
+  selection (pitch/dur/delete OR add) | **signatures (key, time)** | commit (save/discard). Reasons
+  and the rejected alternatives below.
+
+  - **The control is a LABELED PILL, not an icon-only square.** Unlike every other strip button
+    (which is a 32px icon glyph), the signature control's whole job is to SHOW THE CURRENT VALUE and
+    let you change it, so it reads its value as TEXT: `#key-sig-btn` shows the current key name
+    ("C major", "2 sharps", see SIG-4 for the label form) and `#time-sig-btn` shows the current meter
+    stacked or slashed ("4/4"). This doubles as a passive readout (the user can SEE the declared
+    key/meter the OMR gave them, which is itself useful) and an affordance (click to change). It is a
+    `<button>` with `aria-haspopup="dialog"` + `aria-expanded`, class `edit-tool-btn edit-sig-btn`
+    (a wider text variant of the ghost button: auto width, `padding: 0 0.6rem`, the brass-brown text
+    on cream, same 32px/44px height + border + focus ring as the icon buttons so it sits flush in the
+    strip). A small chevron-down glyph (the same 12px stroke chevron the export menu uses) trails the
+    text to signal "opens a menu".
+  - **It is a NEW selection target, but a LIGHT one:** the existing selection model selects notes/
+    rests on the surfaces; the signature is NOT added to that note/rest selection spine. Instead the
+    toolbar button IS the selection + the editor in one (click it, pick a value, done), exactly like a
+    `<select>`. This keeps the notes/rests selection model untouched (no "is a signature selected?"
+    state leaking into the readout, the canvas, the staff highlight, Left/Right nav, or delete). The
+    signature editor is a self-contained popover, not a new member of the shared selection.
+  - **The picker is a small POPOVER anchored under the button**, reusing the export menu's popover
+    pattern (`#export-menu`: an absolutely-positioned panel, click-outside to close, Esc to close,
+    arrow-key roving among options, focus returns to the opener on close). This is FREE infrastructure
+    the app already has, themed and accessible. KEY popover = a vertical list of the 15 keys
+    (SIG-4); TIME popover = a small grid of the 7 preset meters (SIG-3). Each option is a button;
+    the CURRENT value is marked `aria-checked="true"` + a brass check, and is where focus lands on
+    open. Choosing an option applies the edit and closes the popover.
+  - **Keyboard path:** the buttons are in the toolbar tab order (after the selection cluster, before
+    Save). Tab/Shift+Tab reach them; Enter/Space/ArrowDown opens the popover; inside, Up/Down (and
+    Home/End) move the roving focus, Enter/Space choose, Esc cancels back to the button. No new
+    global single-key shortcut is added (the letter/number keys stay reserved for the future
+    note-input idiom, the same reason DOT used `;` not `d`); signature editing is a deliberate,
+    infrequent correction, so a discoverable toolbar control + its in-popover arrows is the right
+    weight, not a hot key. This keeps the busy edit keymap (arrows, comma/period/semicolon, Enter,
+    Delete, +/-, Ctrl+Z/Y) untouched.
+  - **Why NOT click-the-staff-glyph for MVP (the main rejected alternative):** it is TECHNICALLY
+    feasible (Verovio renders the key signature as `<g class="keySig">` and the meter as
+    `<g class="meterSig">` with stable MEI ids, and the sheet pointerdown handler already does
+    `target.closest("g.note")` / `g.rest`, so a `g.keySig` / `g.meterSig` branch would slot in), and
+    it is the most direct "fix what I see" gesture. But for MVP it loses to the toolbar control on
+    three counts: (1) the signature glyph is a SMALL, awkward hit target (a key sig can be a single
+    thin sharp; an empty C-major key sig has NO glyph at all to click, which is a dealbreaker for the
+    most common correction "OMR read C major but it is really D"), whereas the toolbar pill is always
+    present and full-sized even when the key is empty; (2) it would need a NEW popover-anchoring-to-an-
+    SVG-glyph path + a NEW hit test, where the toolbar reuses the export popover wholesale; (3) the
+    toolbar pill carries the current value as readable text, giving a passive "here is what the OMR
+    declared" readout the glyph cannot. RECORD the glyph-click as the natural v2 UPGRADE: once the
+    popover + the model edit exist, ALSO opening the same popover from a click on `g.keySig` /
+    `g.meterSig` is a small, additive enhancement (it reuses the popover and the command); the empty-
+    C-major case still needs the toolbar pill, so the glyph click augments rather than replaces it.
+  - **Why NOT a bare native `<select>`:** the meter "4/4" wants a stacked/slashed look and the key
+    list wants a check on the current value + a roving focus, which the themed popover gives for free
+    and which matches the neon-on-cream edit aesthetic; a native select would be an unstyled OS
+    dropdown breaking the toolbar's visual language. The popover is the same cost (the export menu
+    proves it) and stays on-brand.
+
+  ### DECISION SIG-3 (TIME SEMANTICS) - a PRESET LIST of 7 meters; change the DECLARATION only, do NOT re-bar. Bars that no longer fit are flagged, not auto-fixed.
+
+  - **Values: a preset list, not a free numerator/denominator picker.** Offer exactly:
+    **4/4, 3/4, 2/4, 2/2, 6/8, 3/8, 12/8** (the task's list). Rationale: these cover essentially every
+    real piano score; a free N/D picker invites nonsense meters (e.g. 7/13) and needs validation and a
+    two-control interaction for a case that almost never arises in OMR correction. The preset grid is
+    one tap. Present them as a 7-cell grid in the popover, each cell drawing the meter stacked
+    (numerator over denominator, the engraved look), the current one checked. (A free N/D entry is the
+    obvious v2 if a user ever needs 5/4 or 7/8; flag to PM.)
+  - **MVP behavior, confirmed: change the `<time>` DECLARATION only; do NOT re-bar.** The edit
+    rewrites the initial `<time>`'s `<beats>` + `<beat-type>` (and updates the fusion-borrow path's
+    declared meter if relevant, Tech Lead's call) and re-engraves. It does NOT move barlines, split
+    notes, or redistribute durations. This is the correct OMR-correction model: the scan already has
+    the barlines in the right places (the OMR read the bar STRUCTURE correctly), only the meter LABEL
+    was wrong, so relabeling is the whole fix and the bars line up again.
+  - **What happens to bars that no longer match the new meter, stated plainly:** changing the meter
+    changes each bar's CAPACITY (4/4 = 16 sixteenths at divisions=4; 3/4 = 12; 6/8 = 12; 2/2 = 16).
+    A bar whose notes summed to the OLD capacity is now OVER-full (new capacity smaller) or UNDER-full
+    (new capacity larger) against the NEW meter. We do NOT auto-fix these; the user corrects durations
+    bar by bar with the existing duration editor, which now reads the NEW meter for its fixed-bar
+    capacity (the Tech Lead must point the bar-capacity computation at the live `<time>`, so a lengthen
+    clamps/ties at the right new barline and a shorten leaves the right rest). In the common correction
+    (the scan was RIGHT about the bars and the meter label was the only error) the bars ALREADY sum to
+    the new capacity, so nothing is over/under-full and there is nothing to fix; the meter edit alone
+    makes the piece consistent. The over/under case only arises when the meter genuinely differs from
+    the bar contents, which is the rarer "the OMR also mis-split the bars" situation.
+  - **Guardrail: a NON-BLOCKING readout, not a hard stop.** Do NOT prevent a meter change that leaves
+    bars not matching (the user may be mid-correction, fixing the meter first then the durations). DO
+    give honest, quiet feedback: after a meter change, announce how many bars do not fit the new meter,
+    e.g. "Time signature set to 3/4. 4 bars no longer fill the bar; adjust their note lengths." (When
+    all bars fit: "Time signature set to 3/4.") This tells the user the consequence without blocking
+    the legitimate workflow. (A per-bar visual "this bar is short/long" affordance is a nice v2; MVP
+    uses the spoken/readout count. The duration editor already enforces no-overflow per bar at the new
+    capacity, so the user cannot make a bar WORSE; they can only fix it.) RECOMMENDATION: ship the
+    count-of-mismatched-bars announce, defer the per-bar marker.
+
+  ### DECISION SIG-4 (KEY SEMANTICS) - a CIRCLE-OF-FIFTHS list 7 flats..7 sharps; PITCH-PRESERVING (notes keep their sounding pitch; only the printed signature + default accidentals change).
+
+  - **Values: the 15 keys from 7 flats to 7 sharps, as a NAMED list** (the circle of fifths,
+    laid out flats..natural..sharps). Each row shows the key NAME and its accidental count, e.g.
+    "3 flats - E flat major / C minor", "0 - C major / A minor", "2 sharps - D major / B minor". The
+    underlying value is `<fifths>` (-7..+7); the row stores the fifths and the picker writes it.
+    Present MAJOR and its relative MINOR on one row (same `<fifths>`), since a key signature does not
+    by itself distinguish them and the OMR only knows the accidental count; showing both names lets a
+    user recognize their key without us guessing major vs minor. (We do NOT write `<mode>`; MVP edits
+    only `<fifths>`, which is all the engraving + default-accidental behavior needs.) Layout: a
+    vertical scroll list of 15 rows in the popover, the current one checked + focused on open. A
+    circle-of-fifths DIAL is a lovely v2 visual; the list is the MVP and is fully accessible.
+  - **THE KEY DECISION: changing the key is PITCH-PRESERVING. Notes do NOT transpose and do NOT
+    re-spell to new letters; every note keeps its exact SOUNDING pitch (its MIDI), and only the
+    PRINTED key signature + each note's DEFAULT accidental change.** This is the correct OMR model:
+    the OMR read the noteheads at the right staff positions (right pitches), it only mislabeled the
+    signature, so the pitches must not move when we fix the label. Rejected: TRANSPOSE (changes the
+    sounding pitches, wrong for correction, that is a different "transpose the piece" feature) and
+    RE-SPELL to diatonic letters (changes C to B-sharp etc., churns the notation for no correctness
+    gain and can be wrong). Pitch-preserving is the only option that matches "the OMR got the notes
+    right, fix the declaration".
+  - **Exactly what changes on screen + in the model (CRITICAL for the Tech Lead):** rewrite the
+    initial `<key>`'s `<fifths>`. Then, to KEEP every note's sounding pitch under the new signature,
+    each existing note that currently relies on the OLD key's default accidental must get an EXPLICIT
+    `<accidental>` (and matching `<alter>`) so its pitch does not silently shift. Concretely: a note's
+    sounding pitch = letter + octave + alter. The PRINTED signature changes what alter a bare
+    (accidental-less) notehead implies. So for every note, if the new key's default alter for its
+    letter differs from the note's actual alter, the note needs an explicit accidental to pin its
+    pitch. The clean rule the Tech Lead should implement: after changing `<fifths>`, for each note,
+    if `note.alter == keyAlterForLetter(note.letter, NEW_fifths)` then it may print bare (no
+    accidental), else it must carry an explicit `<accidental>`/`<alter>` for that letter (including a
+    natural when the new key would otherwise sharp/flat that letter). The model already has
+    `keyAlterForLetter(letter, fifths)` (edit-model.ts) which is exactly this lookup, so the
+    transform is: new-key default == note alter -> bare; else -> explicit accidental. The
+    notehead does not MOVE on the staff (same line/space); it may GAIN or LOSE a printed accidental,
+    and the engraved signature at the clef changes. This keeps the sounding pitch invariant while the
+    signature is corrected. (In the common fixture case - C major notes with no accidentals, key being
+    corrected to a SHARP/FLAT key - any note whose letter the new key alters now needs an explicit
+    natural to stay natural; a note whose letter the new key leaves alone still prints bare. This is
+    the accidental implication the task flags, and it is the load-bearing correctness point.)
+  - **Falling-notes consequence:** because the pitch is preserved (MIDI unchanged), the falling notes
+    do NOT move, recolor, or re-time. The ONE thing that can change is the NOTE-NAME SPELLING in the
+    canvas labels if (and only if) the spelling is derived from the key: today the model carries the
+    letter+alter spelling per note, and a pitch-preserving key edit does NOT change any note's letter
+    (it only toggles whether an accidental prints), so the spoken/printed letter name stays the same
+    too. Net: on a key change the falling notes are visually unchanged. Verovio re-engraves the staff
+    signature + accidentals; the canvas is untouched. (Confirm in QA that the canvas labels do not
+    flicker spelling on a key edit; if a future spelling pass keys off the signature, it must keep the
+    letter and only the accidental.)
+
+  ### DECISION SIG-5 (FEEDBACK + READOUT + ANNOUNCE + A11Y) - the pill IS the readout; exact `#edit-live` strings; aria + help additions; no em dashes.
+
+  - **Both surfaces:** Verovio re-engraves the signature (and, for a key change, the per-note
+    accidentals) on the next render through the existing `finishEdit` -> `renderVerovio` path; no new
+    render code. For a declaration-only edit the FALLING NOTES are unchanged (SIG-3 time: bars keep
+    their notes, only capacity is relabeled; SIG-4 key: pitch-preserving, so MIDI + spelling hold).
+    So the visible change is on the STAFF only, which is correct: the user sees the signature they
+    fixed re-engrave.
+  - **Readout = the button label.** `#key-sig-btn` / `#time-sig-btn` always display the CURRENT value
+    (SIG-2), so after an edit the button text updates to the new key/meter and that IS the persistent
+    readout. No separate readout span is needed (unlike the note cluster, which needed
+    `#note-edit-readout` because the selection moves; the signature pill is stationary and self-
+    labeling). Update the button text + its `aria-label` on every signature edit + on entering edit
+    mode (seed it from the model's initial `<key>`/`<time>`).
+  - **aria-labels (no em dashes):**
+    - `#key-sig-btn`: aria-label = "Key signature: {current key name}. Change the key." (e.g. "Key
+      signature: C major. Change the key."). `aria-haspopup="dialog"`, `aria-expanded` toggled.
+    - `#time-sig-btn`: aria-label = "Time signature: {beats} {beat-type}. Change the time signature."
+      Read the meter as words to avoid "4/4" being spoken as a date/fraction oddly, e.g. "Time
+      signature: 4 4. Change the time signature." (the popover options likewise carry a spoken label
+      like "4 4 time"). `aria-haspopup="dialog"`, `aria-expanded` toggled.
+    - Each KEY option button: aria-label = the row's spoken name, e.g. "2 sharps, D major or B minor".
+      The current one adds `aria-checked="true"`.
+    - Each TIME option button: aria-label = "{beats} {beat-type} time", e.g. "3 4 time". Current one
+      `aria-checked="true"`.
+  - **Announcements (`#edit-live`, polite, em-dash-free):**
+    - Key changed: **"Key signature set to {key name}."** e.g. "Key signature set to D major." If the
+      edit added explicit accidentals to keep pitches: keep it simple, the same string (the user does
+      not need to hear the accidental bookkeeping; the pitches are preserved by design). Optionally,
+      for transparency, "Key signature set to D major. Notes keep their pitch." Prefer the short form;
+      add the reassurance clause only if QA finds users worry the notes changed.
+    - Time changed, all bars fit: **"Time signature set to {beats}/{beat-type}."** e.g. "Time
+      signature set to 3/4."
+    - Time changed, some bars do not fit: **"Time signature set to 3/4. {N} bars no longer fill the
+      bar; adjust their note lengths."** (the SIG-3 guardrail readout).
+    - Undo of a key edit: **"Undid key change. Back to {previous key name}."**
+    - Undo of a time edit: **"Undid time change. Back to {previous beats}/{beat-type}."**
+    - Opening/closing the popover does not announce (the `aria-expanded` + focus move carry it);
+      cancelling with Esc does not announce (nothing changed).
+  - **Help-string additions (no em dashes), append a signatures clause to BOTH surface strings:**
+    - Staff aria/help (main.ts ~744): append after the existing clauses: "...use the key and time
+      buttons on the toolbar to fix the key or time signature for the whole piece." (Only mention the
+      axis that has shipped: add "key" when KEY ships, extend to "key and time" when TIME ships.)
+    - Canvas aria/help (main.ts ~611): the canvas does not host the signature controls (they are
+      toolbar-only and the staff is where the signature engraves), so the canvas string does NOT need
+      a per-axis edit clause; optionally a single sentence "the key and time signature are edited from
+      the toolbar." Keep both strings em-dash-free.
+  - **Reduced motion:** no new motion. The signature re-engraves in place; the optional selection
+    pulse used for note edits (P3-4) does NOT apply to a signature edit (there is no single notehead
+    to flash; the whole signature changes). Nothing to gate.
+
+  ### DECISION SIG-6 (UNDO + SAVE/DISCARD + EXPORT) - one undoable command per signature change; captured by Save/Discard; flows into MusicXML/PDF export. Confirmed.
+
+  - **One undoable command.** A key change is ONE `SetKeyCommand` (before/after `fifths` + the set of
+    notes whose explicit-accidental state changed, so invert restores them); a time change is ONE
+    `SetTimeCommand` (before/after `beats`/`beat-type`). Each pushes a single entry on the existing
+    CommandStack and inverts cleanly, exactly like setPitch/changeDuration. Tech Lead note: the KEY
+    command must snapshot enough to restore the per-note accidentals it added/removed (simplest:
+    snapshot the affected measure's children like ChangeDurationRecord does, OR record the per-note
+    accidental deltas); the TIME command only rewrites the `<time>` element (and any cached capacity),
+    so its record is tiny (the old beats/beat-type). Both make the model dirty, so the SAME dirty
+    signal (canUndo) lights Save/Discard, with zero new commit wiring (reflectCommitButtons already
+    keys off canUndo).
+  - **Save/Discard:** a signature edit is a normal edit, so Save persists it into the retained source
+    MusicXML (serialize() already writes `<key>`/`<time>` straight from the DOM) and Discard reverts
+    to the session baseline, identical to every other edit. No new commit code.
+  - **Export:** PDF/MusicXML export already serialize the edited model, so a corrected key/meter flows
+    into both exports for free (the `<key>`/`<time>` and any added accidentals are in the serialized
+    DOM). Nothing to add.
+  - **Tech Lead summary of new surface:** (1) `ScoreModel.setKeyFifths(fifths)` -> returns a record
+    (old fifths + the per-note accidental changes) for undo, pitch-preserving (rewrite `<fifths>`,
+    then bare-vs-explicit each note via `keyAlterForLetter`); (2) `ScoreModel.setTimeSignature(beats,
+    beatType)` -> returns a tiny record (old beats/beat-type), declaration-only, and the duration
+    editor's bar-capacity computation must read the LIVE `<time>` so fixed-bar math uses the new
+    meter; (3) two new EditCommand variants on the stack; (4) a count of bars-not-matching-meter after
+    a time edit, for the SIG-3 announce; (5) the two toolbar pills + a popover each (reuse the export-
+    menu popover). Decisions to confirm with the owner: KEY ships first, then TIME; both edit the
+    INITIAL declaration only (mid-piece = v2); TIME presets are the 7 listed meters and do NOT re-bar;
+    KEY is pitch-preserving with explicit accidentals added to hold pitch; glyph-click is a v2 upgrade
+    over the MVP toolbar control.
+
 ## Smart Edit Mode P3 DURATION COMPLETION: DOTTED durations + CROSS-BARLINE ties (interaction + visual spec)
 
 - **2026-06-04 - Completes the duration editor specced below. The shipped v1 walks a PLAIN

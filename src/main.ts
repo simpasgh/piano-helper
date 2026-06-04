@@ -27,11 +27,18 @@ import {
 } from "./edit-model";
 import {
   CommandStack,
+  applyCommand,
   type SetPitchCommand,
   type DeleteNoteCommand,
   type AddNoteCommand,
   type ChangeDurationCommand,
+  type SetKeyCommand,
 } from "./edit-commands";
+import {
+  CIRCLE_OF_FIFTHS,
+  keyMajorName,
+  buildKeyOptionButton,
+} from "./key-names";
 import { shouldStartPitchDrag } from "./edit-pointer";
 import {
   staffNavOrder,
@@ -170,6 +177,12 @@ const addNoteBtn = document.getElementById("add-note-btn") as HTMLButtonElement;
 // COMMIT v1: explicit Save / Discard when leaving edit mode (trailing toolbar group).
 const editSaveBtn = document.getElementById("edit-save-btn") as HTMLButtonElement;
 const editDiscardBtn = document.getElementById("edit-discard-btn") as HTMLButtonElement;
+// SIGNATURE EDITING (SIG-2): the key-signature pill + its popover picker. The pill shows the current
+// key name + opens the popover; the popover's option rows are built once below from CIRCLE_OF_FIFTHS.
+const keySigBtn = document.getElementById("key-sig-btn") as HTMLButtonElement;
+const keySigMenu = document.getElementById("key-sig-menu") as HTMLDivElement;
+const keySigLabel = document.getElementById("key-sig-label") as HTMLSpanElement;
+const keySigWrap = keySigBtn.closest(".edit-sig-wrap") as HTMLDivElement;
 const editLive = document.getElementById("edit-live") as HTMLSpanElement;
 const tempoSlider = document.getElementById("tempo-slider") as HTMLInputElement;
 const tempoReadout = document.getElementById("tempo-readout") as HTMLButtonElement;
@@ -612,6 +625,9 @@ async function enterEditMode(): Promise<void> {
     );
     reflectUndoRedoButtons();
     reflectSharedSelection();
+    // SIGNATURE EDITING (SIG-2/SIG-5): seed the key pill + the popover's checked row from the model's
+    // initial <key>, so the pill reads the declared key the OMR gave (the passive readout half).
+    reflectKeySig(scoreModel.initialFifths());
     editLive.textContent =
       "Edit mode on. Click a note on the staff or the falling notes to select it, then edit its pitch.";
   } catch (err) {
@@ -633,6 +649,9 @@ function exitEditMode(): void {
   editBtn.title =
     "Edit mode off. Click to fix wrong notes on the staff or the falling notes.";
   verovioCredit.hidden = true;
+  // SIGNATURE EDITING: close the key popover if it was open (the toolbar is about to hide; leaving the
+  // popover open would orphan its outside-pointer listener).
+  closeKeySigMenu();
   editToolbar.hidden = true;
   sheetContainer.classList.remove("editing");
   scoreModel = null;
@@ -788,7 +807,7 @@ function renderVerovio(): void {
   verovioHost.setAttribute("role", "application");
   verovioHost.setAttribute(
     "aria-label",
-    "Staff editor. Left and right select a note or a rest; up and down change a note's pitch by a step; Control with up or down changes by a semitone; Shift with up or down by an octave; comma makes a note shorter and period makes it longer, crossing into the next bar with a tie when it must; semicolon dots the note; on a rest, press Enter to add a note of the same duration; Delete removes a note; Control Z undoes.",
+    "Staff editor. Left and right select a note or a rest; up and down change a note's pitch by a step; Control with up or down changes by a semitone; Shift with up or down by an octave; comma makes a note shorter and period makes it longer, crossing into the next bar with a tie when it must; semicolon dots the note; on a rest, press Enter to add a note of the same duration; Delete removes a note; Control Z undoes; use the key button on the toolbar to fix the key signature for the whole piece.",
   );
   // Always (re)attach the host to #sheet. OSMD owns #sheet and an osmd.load/render between edit
   // sessions can detach our node, so re-appending here keeps the render going into the live DOM
@@ -1200,6 +1219,14 @@ function doUndo(): void {
     undoOrRedoDuration(cmd, "undo", elementToHand);
     return;
   }
+  if (cmd.kind === "setKey") {
+    // Undo of a key edit: the model restored the prior <fifths> + accidentals (restoreKey). Pitch is
+    // preserved, so the falling notes do not move; refresh the pill to the prior key, re-render the
+    // staff (the signature + accidentals re-engrave back), and announce the reversal (SIG-5).
+    reflectKeySig(cmd.before);
+    finishEdit(`Undid key change. Back to ${keyMajorName(cmd.before)}.`, score ? score.notes.slice() : undefined);
+    return;
+  }
   // Re-select the affected note (it now shows its prior pitch) and announce what reversed. Do
   // NOT rebuild the maps here: finishEdit projects the reverted model pitch onto the falling
   // notes using the existing (index-stable) map, THEN reloadNotes + rederiveMaps rebuild it
@@ -1238,6 +1265,14 @@ function doRedo(): void {
     // Redo of a duration edit: applyCommand re-ran model.changeDuration against the restored bar
     // (deterministic), so the bar is edited again. Re-derive + re-select + announce like the undo.
     undoOrRedoDuration(cmd, "redo", elementToHand);
+    return;
+  }
+  if (cmd.kind === "setKey") {
+    // Redo of a key edit: applyCommand re-ran model.setKeyFifths(after) (deterministic), so the new
+    // signature is applied again. Pitch-preserving, so the falling notes hold; refresh the pill +
+    // re-engrave the staff and announce like the forward edit.
+    reflectKeySig(cmd.after);
+    finishEdit(`Key signature set to ${keyMajorName(cmd.after)}.`, score ? score.notes.slice() : undefined);
     return;
   }
   // Same map ordering as doUndo: project with the existing map, then rebuild in finishEdit.
@@ -2627,6 +2662,137 @@ exportMusicxmlBtn.addEventListener("click", () => {
   closeExportMenu({ restoreFocus: true });
   exportMusicXml();
 });
+
+// ===== Key-signature picker (Smart Edit Mode SIGNATURE EDITING, SIG-2 / SIG-4) =====
+//
+// The #key-sig-btn pill shows the current key + opens a popover listing the 15 keys (7 flats..7
+// sharps). Picking one runs the pitch-preserving model edit (setKeyFifths) through the command stack.
+// The popover reuses the export-menu pattern (absolute panel, click-outside + Esc close, arrow-key
+// roving, focus returns to the opener), themed to match. Built once: the option rows never change.
+
+// One option button per key, in circle-of-fifths order. Each row: a brass check (shown on the current
+// key) + the spoken name (accidental count, major or relative minor). aria-checked marks the current
+// key; the click applies that fifths. Stored in document order so roving nav matches the visual list.
+// Built via the shared buildKeyOptionButton (also unit-tested), then wired to the edit on click.
+const keySigItems: HTMLButtonElement[] = CIRCLE_OF_FIFTHS.map((k) => {
+  const btn = buildKeyOptionButton(document, k.fifths, false);
+  btn.addEventListener("click", () => {
+    closeKeySigMenu({ restoreFocus: true });
+    setKeyEdit(k.fifths);
+  });
+  return btn;
+});
+keySigMenu.append(...keySigItems);
+
+// Mark the option matching `fifths` as checked (and clear the rest), so the popover shows the current
+// key. Called on entering edit mode + after every key edit / undo / redo.
+function reflectKeySigChecked(fifths: number): void {
+  for (const btn of keySigItems) {
+    btn.setAttribute("aria-checked", String(Number(btn.dataset.fifths) === fifths));
+  }
+}
+
+// Seed/refresh the pill label + its aria-label + the popover's checked row from a fifths value. The
+// pill IS the persistent readout (SIG-5), so this runs on entering edit mode and after every key edit.
+function reflectKeySig(fifths: number): void {
+  const name = keyMajorName(fifths);
+  keySigLabel.textContent = name;
+  keySigBtn.setAttribute("aria-label", `Key signature: ${name}. Change the key.`);
+  reflectKeySigChecked(fifths);
+}
+
+function openKeySigMenu(): void {
+  if (keySigBtn.disabled || !keySigMenu.hidden) return;
+  keySigMenu.hidden = false;
+  keySigBtn.setAttribute("aria-expanded", "true");
+  // Focus the CURRENT key row on open (SIG-2), else the first row.
+  const checked = keySigItems.find((b) => b.getAttribute("aria-checked") === "true");
+  (checked ?? keySigItems[0])?.focus();
+  document.addEventListener("pointerdown", onKeySigOutsidePointer, true);
+}
+
+function closeKeySigMenu(opts: { restoreFocus?: boolean } = {}): void {
+  if (keySigMenu.hidden) return;
+  keySigMenu.hidden = true;
+  keySigBtn.setAttribute("aria-expanded", "false");
+  document.removeEventListener("pointerdown", onKeySigOutsidePointer, true);
+  if (opts.restoreFocus) keySigBtn.focus();
+}
+
+function onKeySigOutsidePointer(e: PointerEvent): void {
+  if (!keySigWrap.contains(e.target as Node)) closeKeySigMenu();
+}
+
+// Roving focus among the option rows (wrapping), for Up/Down + Home/End inside the open popover.
+function moveKeySigFocus(to: 1 | -1 | "first" | "last"): void {
+  if (keySigItems.length === 0) return;
+  if (to === "first") {
+    keySigItems[0].focus();
+    return;
+  }
+  if (to === "last") {
+    keySigItems[keySigItems.length - 1].focus();
+    return;
+  }
+  const idx = keySigItems.indexOf(document.activeElement as HTMLButtonElement);
+  const next = idx === -1 ? (to === 1 ? 0 : keySigItems.length - 1) : idx + to;
+  keySigItems[(next + keySigItems.length) % keySigItems.length].focus();
+}
+
+keySigBtn.addEventListener("click", () => {
+  if (keySigMenu.hidden) openKeySigMenu();
+  else closeKeySigMenu({ restoreFocus: true });
+});
+
+keySigBtn.addEventListener("keydown", (e) => {
+  if ((e.key === "ArrowDown" || e.key === "ArrowUp") && keySigMenu.hidden && !keySigBtn.disabled) {
+    e.preventDefault();
+    openKeySigMenu();
+  }
+});
+
+keySigMenu.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    closeKeySigMenu({ restoreFocus: true });
+  } else if (e.key === "ArrowDown") {
+    e.preventDefault();
+    moveKeySigFocus(1);
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    moveKeySigFocus(-1);
+  } else if (e.key === "Home") {
+    e.preventDefault();
+    moveKeySigFocus("first");
+  } else if (e.key === "End") {
+    e.preventDefault();
+    moveKeySigFocus("last");
+  }
+});
+
+// Apply a key-signature edit (SIG-4): rewrite the initial <key><fifths> to `fifths`, PITCH-PRESERVING,
+// as ONE undoable command. The notes keep their MIDI/time/letter, so the falling notes are unchanged
+// (we pass the current notes to finishEdit, which re-engraves the staff via Verovio); only the printed
+// signature + per-note accidentals move. A no-op (same key, or no initial <key>) just refreshes the
+// pill. Routed through the command stack so Save/Discard + undo/redo all see it.
+function setKeyEdit(fifths: number): void {
+  if (!scoreModel || !commandStack) return;
+  const before = scoreModel.initialFifths();
+  const cmd: SetKeyCommand = { kind: "setKey", before, after: fifths, record: null };
+  // Apply directly (not via push) so a no-op (null record) never pushes a command or wipes the redo
+  // branch, mirroring the duration edits' probe-then-pushApplied discipline.
+  applyCommand(scoreModel, cmd);
+  if (!cmd.record) {
+    // No change (already this key, or the score has no <key>): just reseat the pill, no announce.
+    reflectKeySig(before);
+    return;
+  }
+  commandStack.pushApplied(cmd);
+  reflectKeySig(fifths);
+  // Pitch-preserving: pass the CURRENT falling notes so they do not move/recolor/re-time; finishEdit
+  // re-renders the staff (Verovio re-engraves the new signature + accidentals) and refreshes the maps.
+  finishEdit(`Key signature set to ${keyMajorName(fifths)}.`, score ? score.notes.slice() : undefined);
+}
 
 // The MusicXML to export: the LIVE edited model in edit mode, else the retained source (null for an
 // audio-only score, where the items are disabled anyway).

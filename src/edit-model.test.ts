@@ -2551,3 +2551,309 @@ describe("deriveVisNotesFromModel preserves per-note hand across a duration edit
     expect(d5Notes[0].duration).toBeCloseTo(1.0, 5); // quarter (0.5s) + tied quarter (0.5s) = half
   });
 });
+
+// ===== SET-KEY (Smart Edit SIGNATURE EDITING, SIG-4): pitch-preserving key-signature correction =====
+//
+// The load-bearing claim: rewriting <key><fifths> NEVER changes a note's sounding pitch (MIDI); it
+// only toggles each note's printed accidental so the SAME pitch reads correctly under the new key. A
+// note prints bare when the new key's default for its letter already sounds its pitch, else it gets an
+// explicit accidental (incl. a natural). These tests cover the rule end to end, undo/redo byte-exact,
+// notes arriving with an explicit accidental, and the real reverie (C major, bare noteheads) fixture.
+
+// A small C-major one-bar fixture with one note PER letter (C..B) plus an explicitly-sharped F#, so we
+// can watch which letters gain an accidental in each target key, and that an arriving accidental holds.
+// divisions=4, 4/4 (capacity 16 = 8 eighths; 7 naturals + 1 sharp = 8 eighths fills the bar).
+const KEY_C_MAJOR_SCALE = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><type>eighth</type></note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><type>eighth</type></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><type>eighth</type></note>
+      <note><pitch><step>F</step><alter>1</alter><octave>4</octave></pitch><duration>2</duration><voice>1</voice><type>eighth</type><accidental>sharp</accidental></note>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><type>eighth</type></note>
+      <note><pitch><step>A</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><type>eighth</type></note>
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><type>eighth</type></note>
+      <note><pitch><step>F</step><octave>5</octave></pitch><duration>2</duration><voice>1</voice><type>eighth</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+const REVERIE_KEY_XML = readFileSync(
+  join(process.cwd(), "src", "test-fixtures", "reverie-omr.musicxml"),
+  "utf8",
+);
+
+// Read the initial <fifths> from a serialized score (the value the pill seeds from).
+function serializedFifths(xml: string): number {
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  return Number(doc.getElementsByTagName("fifths").item(0)?.textContent ?? "0");
+}
+
+// The MIDI of every pitched handle, in id order, so a key change can be asserted pitch-preserving.
+function handleMidis(model: ReturnType<typeof parseScoreModel>): number[] {
+  return model.handles.map((h) => h.midi);
+}
+
+describe("ScoreModel.setKeyFifths rewrites the initial <fifths>", () => {
+  it("rewrites the piece-level <key><fifths> to the new value", () => {
+    const model = parseScoreModel(KEY_C_MAJOR_SCALE);
+    expect(model.initialFifths()).toBe(0);
+    const rec = model.setKeyFifths(2); // C major -> D major
+    expect(rec).not.toBeNull();
+    expect(rec?.oldFifths).toBe(0);
+    expect(rec?.newFifths).toBe(2);
+    expect(serializedFifths(model.serialize())).toBe(2);
+    expect(model.initialFifths()).toBe(2);
+  });
+
+  it("clamps the fifths to -7..+7", () => {
+    const model = parseScoreModel(KEY_C_MAJOR_SCALE);
+    model.setKeyFifths(99);
+    expect(serializedFifths(model.serialize())).toBe(7);
+    model.setKeyFifths(-99);
+    expect(serializedFifths(model.serialize())).toBe(-7);
+  });
+
+  it("is a no-op (returns null, pushes nothing) when the key is unchanged", () => {
+    const model = parseScoreModel(KEY_C_MAJOR_SCALE);
+    const before = model.serialize();
+    expect(model.setKeyFifths(0)).toBeNull(); // already C major
+    expect(model.serialize()).toBe(before); // untouched
+  });
+
+  it("never writes a <mode> (MVP edits only <fifths>)", () => {
+    const model = parseScoreModel(KEY_C_MAJOR_SCALE);
+    model.setKeyFifths(-3);
+    expect(model.serialize()).not.toContain("<mode>");
+  });
+
+  it("is a no-op returning null for a score with NO initial <key>", () => {
+    const noKey = KEY_C_MAJOR_SCALE.replace("<key><fifths>0</fifths></key>", "");
+    const model = parseScoreModel(noKey);
+    expect(model.initialFifths()).toBe(0);
+    const before = model.serialize();
+    expect(model.setKeyFifths(3)).toBeNull();
+    expect(model.serialize()).toBe(before);
+  });
+});
+
+describe("ScoreModel.setKeyFifths is PITCH-PRESERVING (every note's MIDI unchanged)", () => {
+  it("keeps every MIDI across C -> D (a sharp key)", () => {
+    const model = parseScoreModel(KEY_C_MAJOR_SCALE);
+    const before = handleMidis(model);
+    model.setKeyFifths(2);
+    expect(handleMidis(model)).toEqual(before); // not a single note moved
+  });
+
+  it("keeps every MIDI across C -> E flat (a flat key)", () => {
+    const model = parseScoreModel(KEY_C_MAJOR_SCALE);
+    const before = handleMidis(model);
+    model.setKeyFifths(-3);
+    expect(handleMidis(model)).toEqual(before);
+  });
+
+  it("keeps every MIDI across a SHARP key to a FLAT key (D -> E flat)", () => {
+    const model = parseScoreModel(KEY_C_MAJOR_SCALE);
+    model.setKeyFifths(2); // C -> D (sharp)
+    const atD = handleMidis(model);
+    model.setKeyFifths(-3); // D -> E flat (flat)
+    expect(handleMidis(model)).toEqual(atD); // still every original pitch
+  });
+
+  it("keeps every MIDI across several chained changes (C -> D -> E flat -> C)", () => {
+    const model = parseScoreModel(KEY_C_MAJOR_SCALE);
+    const before = handleMidis(model);
+    model.setKeyFifths(2);
+    model.setKeyFifths(-3);
+    model.setKeyFifths(0);
+    expect(handleMidis(model)).toEqual(before);
+  });
+
+  it("preserves the falling-notes derivation (MIDI/time unchanged) after a key edit", () => {
+    const model = parseScoreModel(KEY_C_MAJOR_SCALE);
+    const elementToHand = new Map<Element, Hand | undefined>(); // hand is immaterial here
+    const before = deriveVisNotesFromModel(model.handles, elementToHand);
+    model.setKeyFifths(-2); // C -> B flat
+    const after = deriveVisNotesFromModel(model.handles, elementToHand);
+    expect(after.map((n) => ({ midi: n.midi, time: n.time }))).toEqual(
+      before.map((n) => ({ midi: n.midi, time: n.time })),
+    );
+  });
+});
+
+describe("ScoreModel.setKeyFifths adds EXPLICIT accidentals exactly where the new key shifts a letter", () => {
+  // Helper: the printed accidental token on the note at index `i`, or "" when bare.
+  function accAt(model: ReturnType<typeof parseScoreModel>, i: number): string {
+    return model.handles[i].el.getElementsByTagName("accidental").item(0)?.textContent ?? "";
+  }
+  // Helper: a fresh DOMParser read of the note's <alter>, or "" when absent.
+  function alterAt(model: ReturnType<typeof parseScoreModel>, i: number): string {
+    const pitchEl = model.handles[i].el.getElementsByTagName("pitch").item(0)!;
+    return pitchEl.getElementsByTagName("alter").item(0)?.textContent ?? "";
+  }
+
+  it("a natural C in D major gains an explicit NATURAL (the new key would sharp C)", () => {
+    const model = parseScoreModel(KEY_C_MAJOR_SCALE);
+    model.setKeyFifths(2); // D major: F# C#
+    // Note 0 is C natural; D major implies C#, so it must print a natural to stay C natural.
+    expect(accAt(model, 0)).toBe("natural");
+    expect(alterAt(model, 0)).toBe(""); // a natural carries no <alter> (alter 0)
+    expect(model.handles[0].midi).toBe(midiFromPitch({ step: "C", octave: 4, alter: 0 }));
+  });
+
+  it("leaves a note BARE where the new key's default already matches (D natural in D major)", () => {
+    const model = parseScoreModel(KEY_C_MAJOR_SCALE);
+    model.setKeyFifths(2); // D major does NOT alter D, E, G, A, B
+    expect(accAt(model, 1)).toBe(""); // D bare
+    expect(accAt(model, 4)).toBe(""); // G bare
+    expect(accAt(model, 6)).toBe(""); // B bare
+  });
+
+  it("the explicitly-sharped F# goes BARE in D major (the key now supplies the sharp)", () => {
+    const model = parseScoreModel(KEY_C_MAJOR_SCALE);
+    model.setKeyFifths(2); // D major sharps F by default
+    // Note 3 arrived as F# (alter 1 + sharp). In D major F is sharp by default, so it prints bare,
+    // but its pitch is still F# (MIDI preserved).
+    expect(accAt(model, 3)).toBe("");
+    expect(alterAt(model, 3)).toBe(""); // the now-redundant <alter> is removed
+    expect(model.handles[3].midi).toBe(midiFromPitch({ step: "F", octave: 4, alter: 1 }));
+  });
+
+  it("a natural B in B flat major gains an explicit NATURAL (the new key would flat B)", () => {
+    const model = parseScoreModel(KEY_C_MAJOR_SCALE);
+    model.setKeyFifths(-2); // B flat major: B flat, E flat
+    expect(accAt(model, 6)).toBe("natural"); // B natural needs a natural to override the key's flat
+    expect(model.handles[6].midi).toBe(midiFromPitch({ step: "B", octave: 4, alter: 0 }));
+  });
+
+  it("a note that ARRIVED with an explicit accidental keeps its exact pitch in a new key", () => {
+    const model = parseScoreModel(KEY_C_MAJOR_SCALE);
+    const fSharpMidiBefore = model.handles[3].midi; // F#4
+    model.setKeyFifths(-3); // E flat major: does NOT touch F, so F# is non-diatonic here
+    // F# in E flat major is non-default, so it must STILL carry the sharp to stay F#.
+    expect(accAt(model, 3)).toBe("sharp");
+    expect(alterAt(model, 3)).toBe("1");
+    expect(model.handles[3].midi).toBe(fSharpMidiBefore);
+  });
+
+  it("a previously-explicit natural is REMOVED when the new key makes the note bare again", () => {
+    const model = parseScoreModel(KEY_C_MAJOR_SCALE);
+    model.setKeyFifths(2); // D major: C gains a natural (note 0)
+    expect(accAt(model, 0)).toBe("natural");
+    model.setKeyFifths(0); // back to C major: C is natural by default, so the natural is removed
+    expect(accAt(model, 0)).toBe("");
+    expect(alterAt(model, 0)).toBe("");
+  });
+
+  it("a DOTTED note that gains an accidental keeps valid DTD order (accidental AFTER the dot)", () => {
+    // A dotted-quarter C natural in C major: in D major it needs a natural, which must be placed AFTER
+    // the <dot> (DTD: type, dot*, accidental), and Verovio must still read it without a warning.
+    const dottedC = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>6</duration><voice>1</voice><type>quarter</type><dot/></note>
+      <note><rest/><duration>10</duration><voice>1</voice><type>half</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const model = parseScoreModel(dottedC);
+    model.setKeyFifths(2); // D major would sharp C, so the C gets an explicit natural
+    const noteEl = model.handles[0].el;
+    const order = Array.from(noteEl.children).map((c) => c.tagName.toLowerCase());
+    const dotIdx = order.indexOf("dot");
+    const accIdx = order.indexOf("accidental");
+    expect(dotIdx).toBeGreaterThanOrEqual(0);
+    expect(accIdx).toBeGreaterThan(dotIdx); // accidental comes AFTER the dot (valid order)
+    expect(accAt(model, 0)).toBe("natural");
+    expect(model.handles[0].midi).toBe(midiFromPitch({ step: "C", octave: 4, alter: 0 }));
+  });
+});
+
+describe("ScoreModel.setKeyFifths undo/redo via restoreKey is byte-exact", () => {
+  it("undo restores the exact <fifths> + every accidental (serialize byte-identical)", () => {
+    const model = parseScoreModel(KEY_C_MAJOR_SCALE);
+    const before = model.serialize();
+    const rec = model.setKeyFifths(2)!;
+    expect(model.serialize()).not.toBe(before); // the edit changed the document
+    model.restoreKey(rec);
+    expect(model.serialize()).toBe(before); // restored byte-for-byte
+  });
+
+  it("redo (re-running setKeyFifths) re-applies the same change", () => {
+    const model = parseScoreModel(KEY_C_MAJOR_SCALE);
+    const rec = model.setKeyFifths(-3)!;
+    const afterEdit = model.serialize();
+    model.restoreKey(rec);
+    // Re-apply (what applyCommand does on redo): the rewrite is deterministic, same result.
+    model.setKeyFifths(-3);
+    expect(model.serialize()).toBe(afterEdit);
+  });
+
+  it("a chain undo restores each prior key exactly (C -> D -> A, undo twice)", () => {
+    const model = parseScoreModel(KEY_C_MAJOR_SCALE);
+    const atC = model.serialize();
+    const recCD = model.setKeyFifths(2)!; // C -> D
+    const atD = model.serialize();
+    const recDA = model.setKeyFifths(3)!; // D -> A
+    model.restoreKey(recDA); // back to D
+    expect(model.serialize()).toBe(atD);
+    model.restoreKey(recCD); // back to C
+    expect(model.serialize()).toBe(atC);
+  });
+});
+
+describe("ScoreModel.setKeyFifths on the REAL reverie file (C major, bare noteheads)", () => {
+  it("rewrites reverie's key, preserves all 185 MIDIs, and undo is byte-exact", () => {
+    const model = parseScoreModel(REVERIE_KEY_XML);
+    expect(model.handles.length).toBe(185);
+    expect(model.initialFifths()).toBe(0); // reverie is C major
+    const beforeMidis = handleMidis(model);
+    const beforeXml = model.serialize();
+
+    const rec = model.setKeyFifths(2)!; // correct it to D major
+    expect(serializedFifths(model.serialize())).toBe(2);
+    // PITCH-PRESERVING: every one of the 185 notes keeps its MIDI.
+    expect(handleMidis(model)).toEqual(beforeMidis);
+    // Bare C/F/... noteheads that D major would sharp gain explicit accidentals (the doc changed).
+    expect(model.serialize()).not.toBe(beforeXml);
+
+    model.restoreKey(rec);
+    expect(model.serialize()).toBe(beforeXml); // undo byte-exact
+    expect(handleMidis(model)).toEqual(beforeMidis);
+  });
+});
+
+describe("SET-KEY edit-OFF no-op: parsing without a key edit never mutates the document", () => {
+  it("serialize() of a parsed-but-UNEDITED score round-trips the key + every accidental unchanged", () => {
+    // No setKeyFifths call: the key-aware parse (effectiveAlter) must be READ-ONLY, leaving the
+    // declared <fifths> and every printed accidental/alter exactly as written. (Whitespace/quoting may
+    // be normalized by the serializer, so compare structurally, like the duration edit-OFF test.)
+    const model = parseScoreModel(KEY_C_MAJOR_SCALE);
+    const out = model.serialize();
+    const fields = (x: string) => {
+      const doc = new DOMParser().parseFromString(x, "application/xml");
+      const fifths = doc.getElementsByTagName("fifths").item(0)?.textContent ?? "";
+      const notes = Array.from(doc.getElementsByTagName("note")).map((n) => {
+        const pitch = n.getElementsByTagName("pitch").item(0);
+        return {
+          step: pitch?.getElementsByTagName("step").item(0)?.textContent ?? "",
+          alter: pitch?.getElementsByTagName("alter").item(0)?.textContent ?? "",
+          octave: pitch?.getElementsByTagName("octave").item(0)?.textContent ?? "",
+          accidental: n.getElementsByTagName("accidental").item(0)?.textContent ?? "",
+        };
+      });
+      return { fifths, notes };
+    };
+    expect(fields(out)).toEqual(fields(KEY_C_MAJOR_SCALE));
+    // And no element leaked into the DOM (no stray child from the key-aware read).
+    const count = (x: string) =>
+      new DOMParser().parseFromString(x, "application/xml").getElementsByTagName("*").length;
+    expect(count(out)).toBe(count(KEY_C_MAJOR_SCALE));
+  });
+});

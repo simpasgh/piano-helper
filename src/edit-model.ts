@@ -218,13 +218,56 @@ const num = (el: Element | null, fallback: number): number => {
 const child = (el: Element, tag: string): Element | null =>
   el.getElementsByTagName(tag).item(0);
 
-// Read a <pitch> element into a ModelPitch. Defensive: a malformed pitch falls back to C4.
+// Read a <pitch> element into a ModelPitch. Defensive: a malformed pitch falls back to C4. The
+// `alter` is the RAW value from the DOM (the explicit <alter> element, or 0 when absent); the
+// key-signature implication for a BARE notehead is layered on separately (see effectiveAlter) so
+// the model's pitch/MIDI match what a key-aware engraver (OSMD/Verovio) sounds.
 function readPitch(pitchEl: Element): ModelPitch {
   const stepText = (child(pitchEl, "step")?.textContent?.trim() ?? "C").toUpperCase();
   const step = (LETTERS.includes(stepText as NoteLetter) ? stepText : "C") as NoteLetter;
   const octave = num(child(pitchEl, "octave"), 4);
   const alter = num(child(pitchEl, "alter"), 0);
   return { step, octave, alter };
+}
+
+// Map a printed <accidental> token back to its alter value. The inverse of accidentalToken, used to
+// recover a note's SOUNDING alter when it carries an <accidental> but no explicit <alter> (some OMR /
+// publishers print the glyph and rely on it, not on <alter>). Unknown tokens yield null (no override).
+function alterFromAccidentalToken(token: string): number | null {
+  switch (token) {
+    case "double-sharp":
+    case "sharp-sharp":
+      return 2;
+    case "sharp":
+      return 1;
+    case "natural":
+      return 0;
+    case "flat":
+      return -1;
+    case "flat-flat":
+      return -2;
+    default:
+      return null;
+  }
+}
+
+// The note's ACTUAL (sounding) alter, accounting for the key signature exactly as an engraver does:
+//  - an explicit <alter> element wins (the note states its own chromatic offset);
+//  - else an explicit <accidental> glyph (no <alter>) is honoured for its alter;
+//  - else the note is BARE and takes the key signature's default for its letter (a bare F in D major
+//    sounds F#). `pitch.alter` is the raw DOM alter (0 when absent), so "has explicit <alter>" is
+//    detected from the DOM, not from a 0 value (which is ambiguous between absent and <alter>0).
+// This is the single key-aware reading the parse + setKeyFifths share, so a bare note's MIDI matches
+// what OSMD/Verovio sound under the same key (the (midi, onset) map then lines up in any key).
+function effectiveAlter(noteEl: Element, pitch: ModelPitch, fifths: number): number {
+  const pitchEl = child(noteEl, "pitch");
+  if (pitchEl && child(pitchEl, "alter")) return pitch.alter; // explicit <alter> is authoritative
+  const accidental = child(noteEl, "accidental")?.textContent?.trim();
+  if (accidental) {
+    const fromToken = alterFromAccidentalToken(accidental);
+    if (fromToken !== null) return fromToken;
+  }
+  return keyAlterForLetter(pitch.step, fifths); // bare: the key signature supplies the alter
 }
 
 // The MusicXML <accidental> token for an alter value, or null when no accidental should print
@@ -326,6 +369,27 @@ export interface ChangeDurationRecord {
   dotVerb?: "lengthen" | "shorten";
 }
 
+// What a SET-KEY captured, so it can be inverted exactly (the OLD <fifths> + every per-note accidental
+// that changed). A key edit (SIG-4) is PITCH-PRESERVING: it rewrites the initial <key><fifths> and
+// then, for every note, makes the printed accidental BARE (the new key's default already sounds the
+// note's pitch) or EXPLICIT (an <alter>/<accidental> that pins the pitch the new key would otherwise
+// shift, including a natural). The sounding pitch / MIDI never changes; only the printed signature +
+// per-note accidentals do. Because the edit can touch the <key> element AND many notes across many
+// measures, the record snapshots EVERY measure's children (deep clones) before mutating, exactly like
+// ChangeDurationRecord does for one bar; restore re-appends the snapshot to each measure in place (the
+// <measure> nodes are never replaced) so the prior <fifths> + every accidental return byte-for-byte.
+// `oldFifths`/`newFifths` name the change for the announce; `changedCount` is how many notes gained or
+// lost an explicit accidental (for tests / diagnostics), not needed for the invert itself.
+export interface SetKeyRecord {
+  oldFifths: number;
+  newFifths: number;
+  // Deep-cloned children of every <measure> in the score, at edit time, keyed by the live (stable)
+  // <measure> element. restore drops each measure's live children and re-appends its snapshot, then
+  // re-indexes, restoring the exact prior signature + accidentals.
+  measures: Array<{ el: Element; childrenBefore: Node[] }>;
+  changedCount: number;
+}
+
 // The editable score model. Holds the parsed DOM and the ordered pitched-note handles. Edits
 // mutate the DOM through handles; serialize() re-emits MusicXML for Verovio.
 //
@@ -389,6 +453,24 @@ export interface ScoreModel {
   // toggleable only when the added x1.5 half fits before the barline (the same room test the dot ADD
   // uses). Returns a safe default ({ dotted:false, canToggle:false }) for an invalid id.
   dotState(id: number): { dotted: boolean; canToggle: boolean };
+  // SET-KEY (SIG-4): rewrite the INITIAL (piece-level) <key><fifths> to `newFifths` (clamped to
+  // -7..+7), PITCH-PRESERVING. The signature is OMR-corrected: the scan mislabeled the key but read
+  // the noteheads right, so every note keeps its exact sounding pitch (MIDI unchanged). For each note,
+  // if its actual alter equals the NEW key's default for its letter it prints BARE (any now-redundant
+  // <accidental>/<alter> is removed); otherwise it carries an EXPLICIT accidental (<alter> + matching
+  // <accidental>, including a NATURAL when the new key would sharp/flat that letter) pinning the pitch.
+  // <step>/<octave> are never touched; no note moves on the staff or changes MIDI. Only the INITIAL
+  // <key> is rewritten (mid-piece key changes are v2; a score with no <key> is a no-op). Returns the
+  // record needed to invert (the old fifths + a snapshot of every measure), or null when there is no
+  // initial <key> or `newFifths` already equals the current fifths (a no-op). Note handle ids are
+  // STABLE (no pitched note is added or removed), so the selection stays put.
+  setKeyFifths(newFifths: number): SetKeyRecord | null;
+  // Invert a set-key: restore the snapshotted measure children (the prior <fifths> + accidentals) and
+  // re-index, returning the score byte-for-byte to its pre-edit state.
+  restoreKey(record: SetKeyRecord): void;
+  // The current INITIAL (piece-level) key signature in fifths, for seeding the toolbar pill + the
+  // popover's checked row on entering edit mode. 0 (C major / A minor) when the score declares no key.
+  initialFifths(): number;
   fifthsForHandle(id: number): number;
   // The key signature (fifths) in effect at a REST handle, so the add can spell its accidental
   // diatonically (parallel to fifthsForHandle for note handles).
@@ -697,7 +779,16 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
           if (!isRest) {
             const pitchEl = child(node, "pitch");
             if (pitchEl) {
-              const pitch = readPitch(pitchEl);
+              const rawPitch = readPitch(pitchEl);
+              // The SOUNDING pitch is key-aware: a bare notehead takes the key signature's default
+              // accidental for its letter, so its MIDI matches what OSMD/Verovio sound (the (midi,
+              // onset) map then lines up in any key, not only C major). An explicit <alter> / printed
+              // <accidental> overrides. The handle carries this sounding pitch so spelling + MIDI are
+              // consistent with the staff.
+              const pitch: ModelPitch = {
+                ...rawPitch,
+                alter: effectiveAlter(node, rawPitch, fifths),
+              };
               // Tie continuation: a <tie type="stop"> with no "start" is folded into its start
               // note in the VisNote[] (score.ts), so it must not claim its own VisNote.
               const ties = Array.from(node.getElementsByTagName("tie"));
@@ -1479,11 +1570,154 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
         !blocked && next !== null && tieContinuationRoomDivs(next, voice, divisions) > 0;
       return { dotted: false, canToggle: canTie };
     },
+    initialFifths(): number {
+      const fifthsEl = initialFifthsEl(doc);
+      return fifthsEl ? num(fifthsEl, 0) : 0;
+    },
+    setKeyFifths(newFifths: number): SetKeyRecord | null {
+      const clamped = Math.max(-7, Math.min(7, Math.trunc(newFifths)));
+      const fifthsEl = initialFifthsEl(doc);
+      if (!fifthsEl) return null; // no initial <key> to rewrite (declaration-only edit, MVP)
+      const oldFifths = num(fifthsEl, 0);
+      if (clamped === oldFifths) return null; // no change: nothing to do, push no command
+
+      // Snapshot EVERY measure's child NODES BEFORE mutating, so the invert restores the prior
+      // <fifths> + every accidental byte-for-byte (the <key> lives in measure 1, the accidentals across
+      // all bars). We clone childNodes (NOT just element children) so the inter-element WHITESPACE text
+      // nodes are preserved too: restore is then a true byte-exact inverse (the pretty-print formatting
+      // survives undo, unlike the duration snapshot which keeps only element children).
+      const measures: Array<{ el: Element; childrenBefore: Node[] }> = [];
+      for (const part of Array.from(doc.getElementsByTagName("part"))) {
+        for (const m of Array.from(part.getElementsByTagName("measure"))) {
+          measures.push({
+            el: m,
+            childrenBefore: Array.from(m.childNodes).map((c) => c.cloneNode(true)),
+          });
+        }
+      }
+
+      // For EVERY pitched note, capture its ACTUAL (sounding) alter under the OLD key BEFORE rewriting
+      // <fifths>, keyed by the <note> element so the per-note mutation below can pin that pitch. A bare
+      // note's actual alter is the OLD key's default for its letter; an explicit <alter>/<accidental>
+      // overrides. This is the load-bearing correctness read (effectiveAlter), taken while the OLD key
+      // is still declared.
+      const actualAlterByEl = new Map<Element, number>();
+      for (const h of handles) {
+        actualAlterByEl.set(h.el, effectiveAlter(h.el, h.pitch, oldFifths));
+      }
+
+      // Rewrite the initial signature.
+      fifthsEl.textContent = String(clamped);
+
+      // Re-print each note's accidental for the NEW key, PRESERVING its actual alter: bare when the new
+      // key's default for the letter already equals the note's actual alter, else an explicit
+      // accidental (incl. a natural). <step>/<octave> are never touched, so no notehead moves + no MIDI
+      // changes; only the printed accidental toggles.
+      let changedCount = 0;
+      for (const h of handles) {
+        const noteEl = h.el;
+        const pitchEl = h.pitchEl;
+        const actualAlter = actualAlterByEl.get(noteEl) ?? 0;
+        const before = serializeNoteAccidental(noteEl, pitchEl);
+        applyKeyAwareAccidental(noteEl, pitchEl, h.pitch.step, actualAlter, clamped);
+        if (serializeNoteAccidental(noteEl, pitchEl) !== before) changedCount++;
+      }
+
+      // Re-index so each handle's cached pitch/MIDI reflect the new bare/explicit accidental under the
+      // new key (effectiveAlter in the walk keeps the SOUNDING pitch the same, so MIDI is unchanged).
+      reindexHandles();
+      return { oldFifths, newFifths: clamped, measures, changedCount };
+    },
+    restoreKey(record: SetKeyRecord): void {
+      // Restore every measure's children exactly (the prior <fifths> + accidentals). Each <measure>
+      // node is the same element (children replaced in place), so handles/reindex survive.
+      for (const { el, childrenBefore } of record.measures) {
+        while (el.firstChild) el.removeChild(el.firstChild);
+        for (const c of childrenBefore) el.appendChild(c.cloneNode(true));
+      }
+      reindexHandles();
+    },
     serialize(): string {
       return serializer.serializeToString(doc);
     },
   };
   return model;
+}
+
+// The initial (piece-level) <fifths> element: the <fifths> of the FIRST <key> in document order
+// (measure 1's <attributes><key>). MVP edits only this one declaration; mid-piece <key> changes are
+// v2. Null when the score declares no key (then setKeyFifths is a no-op and the pill reads C major).
+function initialFifthsEl(doc: Document): Element | null {
+  const key = doc.getElementsByTagName("key").item(0);
+  if (!key) return null;
+  return key.getElementsByTagName("fifths").item(0);
+}
+
+// A stable string of a note's printed accidental state (<alter> + <accidental>), so setKeyFifths can
+// count which notes actually changed. Cheap + order-stable; used only for the changed-count diagnostic.
+function serializeNoteAccidental(noteEl: Element, pitchEl: Element): string {
+  const alter = child(pitchEl, "alter")?.textContent ?? "";
+  const acc = child(noteEl, "accidental")?.textContent ?? "";
+  return `${alter}|${acc}`;
+}
+
+// Re-print ONE note's accidental for `newFifths`, preserving `actualAlter` (its sounding alter). When
+// the new key's default for the letter already equals actualAlter the note prints BARE: drop a now-
+// redundant <alter> and <accidental>. Otherwise pin the pitch with an EXPLICIT accidental: write
+// <alter> (omitted for a natural, alter 0) + a matching <accidental> token (incl. "natural"). Never
+// touches <step>/<octave>, so the sounding pitch + MIDI are unchanged; only the printed glyph toggles.
+function applyKeyAwareAccidental(
+  noteEl: Element,
+  pitchEl: Element,
+  step: NoteLetter,
+  actualAlter: number,
+  newFifths: number,
+): void {
+  const doc = noteEl.ownerDocument;
+  const keyDefault = keyAlterForLetter(step, newFifths);
+  const existingAlter = child(pitchEl, "alter");
+  const existingAcc = child(noteEl, "accidental");
+
+  if (actualAlter === keyDefault) {
+    // BARE: the new key already sounds this pitch, so remove any now-redundant printed accidental.
+    if (existingAlter) existingAlter.parentNode?.removeChild(existingAlter);
+    if (existingAcc) existingAcc.parentNode?.removeChild(existingAcc);
+    return;
+  }
+
+  // EXPLICIT: pin the pitch the new key would otherwise shift. <alter> carries the chromatic offset
+  // (omitted for a natural); the <accidental> glyph (incl. "natural") prints it.
+  if (actualAlter === 0) {
+    if (existingAlter) existingAlter.parentNode?.removeChild(existingAlter);
+  } else if (existingAlter) {
+    existingAlter.textContent = String(actualAlter);
+  } else {
+    const alterEl = doc.createElement("alter");
+    alterEl.textContent = String(actualAlter);
+    // <alter> follows <step> and precedes <octave> in a <pitch>.
+    const octave = child(pitchEl, "octave");
+    pitchEl.insertBefore(alterEl, octave);
+  }
+
+  const token = accidentalToken(actualAlter);
+  if (!token) {
+    // No standard token (out of -2..+2): drop the glyph but keep <alter> (already set) so the pitch
+    // is still pinned. Should not arise for real OMR (alters live within a double accidental).
+    if (existingAcc) existingAcc.parentNode?.removeChild(existingAcc);
+    return;
+  }
+  if (existingAcc) {
+    existingAcc.textContent = token;
+  } else {
+    const accEl = doc.createElement("accidental");
+    accEl.textContent = token;
+    // <accidental> follows <type> and any <dot>* (and precedes <time-modification>/<stem>/<notations>)
+    // in a <note>. Anchor after the LAST <dot> if present, else after <type>, else after <pitch>, so a
+    // dotted note that gains an accidental stays in valid DTD order (not just where Verovio is lenient).
+    const dots = Array.from(noteEl.getElementsByTagName("dot"));
+    const anchor = dots.length > 0 ? dots[dots.length - 1] : (child(noteEl, "type") ?? pitchEl);
+    anchor.parentNode?.insertBefore(accEl, anchor.nextSibling);
+  }
 }
 
 // The CHORD GROUP a <note> belongs to (Smart Edit P3 duration edit): the onset note + all its

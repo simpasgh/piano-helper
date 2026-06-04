@@ -16,6 +16,7 @@ import type {
   DeleteRecord,
   ModelPitch,
   ScoreModel,
+  SetKeyRecord,
 } from "./edit-model";
 
 // A pitch edit on one model note. `handleId` is the stable handle index; `before`/`after` are
@@ -81,11 +82,25 @@ export interface ChangeDurationCommand {
   record: ChangeDurationRecord | null; // filled by apply(); used by invert(). Re-filled on redo.
 }
 
+// A SET-KEY of the piece-level key signature (Smart Edit SIG-4): rewrite the initial <key><fifths>
+// to `after` (a fifths value, -7..+7), PITCH-PRESERVING (every note keeps its sounding pitch; only the
+// printed signature + per-note accidentals change). `before`/`after` are the fifths values, so a redo
+// re-applies and an undo restores; apply() runs model.setKeyFifths and stashes the SetKeyRecord (a
+// whole-score snapshot) for the invert. A no-op set (same fifths, or no initial <key>) yields a null
+// record and is never pushed by the caller, so the stack only holds real key changes.
+export interface SetKeyCommand {
+  kind: "setKey";
+  before: number; // the fifths in effect before the edit (for the announce + a safety fallback)
+  after: number; // the target fifths
+  record: SetKeyRecord | null; // filled by apply(); used by invert(). Re-filled on redo.
+}
+
 export type EditCommand =
   | SetPitchCommand
   | DeleteNoteCommand
   | AddNoteCommand
-  | ChangeDurationCommand;
+  | ChangeDurationCommand
+  | SetKeyCommand;
 
 export function applyCommand(model: ScoreModel, cmd: EditCommand): void {
   switch (cmd.kind) {
@@ -107,6 +122,11 @@ export function applyCommand(model: ScoreModel, cmd: EditCommand): void {
       // given the restored bar, so a redo reproduces the same shorten/lengthen.
       cmd.record = model.changeDuration(cmd.handleId, cmd.direction);
       break;
+    case "setKey":
+      // Re-derive the record on every apply (initial push AND redo): rewriting <fifths> to `after` is
+      // deterministic, so a redo reproduces the same pitch-preserving accidental rewrite.
+      cmd.record = model.setKeyFifths(cmd.after);
+      break;
   }
 }
 
@@ -123,6 +143,9 @@ export function invertCommand(model: ScoreModel, cmd: EditCommand): void {
       break;
     case "changeDuration":
       if (cmd.record) model.restoreDuration(cmd.record);
+      break;
+    case "setKey":
+      if (cmd.record) model.restoreKey(cmd.record);
       break;
   }
 }
