@@ -30,6 +30,29 @@ construction; tempo only changes playback speed, not sync.
 
 ## Decisions
 
+- **2026-06-04 - ADMIN feature-flag page: live OMR flag control via an R2-polled config, no restart.**
+  `/admin` (a SECOND Vite HTML entry; `vite.config.ts` now declares `index.html` + `admin.html`, which
+  Cloudflare Pages serves at `/` and `/admin`) lets the user toggle the 7 free OMR engine/delivery
+  flags. Mechanism: the page POSTs the desired flags to `functions/api/flags.ts`, which writes
+  `config/omr-flags.json` to R2; the always-on worker reads that object at the top of each poll cycle
+  (`omr-worker/flag_config.py apply_overrides`) and applies the known flags onto `os.environ`. EVERY
+  flag check in the worker stack already reads `os.environ` per job (`worker.*_enabled`,
+  `reconcile.referee_enabled`, `llm_omr.llm_enabled`), so mutating `os.environ` is picked up uniformly
+  with NO per-module change and NO restart. Original env captured once (`_ENV_DEFAULTS`) so a
+  dropped/absent config reverts cleanly to the box env. ARCHITECTURE: the flag-KEY allowlist +
+  validation + auth are ONE pure module `src/flags-server.ts` (`KNOWN_FLAGS`, `sanitizeFlagConfig`
+  drops unknown keys + coerces "0"/"1", `isAuthorized` constant-time Bearer compare, fail-closed on an
+  unset token); the UI METADATA (accuracy/latency/algorithm per flag, primitive->advanced tiers,
+  dependency cascade `withFlag`) is `src/admin-flags.ts`; the page is `src/admin.ts` + `src/admin.css`
+  (DOM glue, not unit-tested). `OMR_LLM` is EXCLUDED from the allowlist (paid), so it can never be
+  enabled from the web. The TS `KNOWN_FLAGS` and the Python `flag_config.KNOWN_FLAGS` are locked
+  together by a JS source-guard test (`flags-server.test.ts` reads the .py as text). Browser-verified
+  end-to-end (token gate -> cards seeded from a mocked GET -> toggle + dependency cascade -> Save POSTs
+  the full 7-flag config), 0 console errors. Tests: `flags-server.test.ts`, `admin-flags.test.ts`,
+  `test_flag_config.py`. MANUAL step: set the `ADMIN_TOKEN` Secret in the Cloudflare Pages dashboard
+  (infrastructure.md). DEFAULT-neutral: the page does nothing to prod until the token is set + a flag
+  toggled.
+
 - **2026-06-04 - PROGRESSIVE OMR (partial-result protocol + fast-then-refine + per-page streaming).**
   The worker writes the result key MULTIPLE times per job so the browser renders the first notes while
   the rest computes. In-progress writes carry `omr-status="partial"` + `omr-version` INSIDE the

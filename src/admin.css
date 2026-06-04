@@ -1,0 +1,297 @@
+/* Admin feature-flag page. Standalone Nocturne theme (warm ebony + brass) matching the player, but
+   not coupled to the player's CSS. */
+
+:root {
+  --bg: #0b0a0d;
+  --bg-2: #16130e;
+  --panel: #17140f;
+  --panel-2: #1d1913;
+  --line: #2a251c;
+  --ink: #f1ead9;
+  --ink-dim: #b9ad95;
+  --muted: #6b5c44;
+  --accent: #d8a23a;
+  --accent-soft: rgba(216, 162, 58, 0.16);
+  --on: #5fa463;
+  --danger: #d2603f;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: linear-gradient(180deg, var(--bg), var(--bg-2));
+  color: var(--ink);
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  min-height: 100vh;
+}
+
+.admin {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 28px 18px 120px;
+}
+
+.admin h1 {
+  font-size: 1.4rem;
+  margin: 0 0 4px;
+}
+
+.admin-sub {
+  color: var(--ink-dim);
+  margin: 0 0 20px;
+  font-size: 0.92rem;
+  line-height: 1.5;
+}
+
+/* Token gate */
+.token-bar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin-bottom: 18px;
+}
+
+.token-bar label {
+  font-size: 0.85rem;
+  color: var(--ink-dim);
+  width: 100%;
+}
+
+.token-bar input {
+  flex: 1 1 220px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  padding: 9px 11px;
+  font-size: 0.95rem;
+  font-family: inherit;
+}
+
+.btn {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  border-radius: 8px;
+  padding: 9px 16px;
+  font-size: 0.92rem;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.btn:hover {
+  border-color: var(--accent);
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #1a140d;
+  font-weight: 600;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.suggest {
+  background: var(--accent-soft);
+  border: 1px solid rgba(216, 162, 58, 0.4);
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: 0.9rem;
+  color: var(--ink);
+  margin-bottom: 20px;
+  line-height: 1.5;
+}
+
+.section-title {
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 22px 0 10px;
+}
+
+/* Flag cards */
+.flag-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin-bottom: 12px;
+}
+
+.flag-card.recommended {
+  border-color: rgba(216, 162, 58, 0.55);
+}
+
+.flag-card.is-on {
+  background: var(--panel-2);
+}
+
+.flag-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.flag-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: 1;
+}
+
+.flag-label {
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+.flag-key {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.badge {
+  font-size: 0.66rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--ink-dim);
+}
+
+.badge-tier {
+  border-color: var(--muted);
+}
+
+.badge-rec {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.flag-summary {
+  color: var(--ink-dim);
+  font-size: 0.9rem;
+  margin: 8px 0 2px;
+  line-height: 1.45;
+}
+
+.impacts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 12px;
+  margin-top: 10px;
+  font-size: 0.84rem;
+  line-height: 1.4;
+}
+
+.impact-label {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.impact-value {
+  color: var(--ink-dim);
+}
+
+.dep-note {
+  margin-top: 8px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+/* Toggle switch (a styled checkbox) */
+.switch {
+  position: relative;
+  width: 46px;
+  height: 26px;
+  flex: none;
+}
+
+.switch input {
+  position: absolute;
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: pointer;
+}
+
+.switch .track {
+  position: absolute;
+  inset: 0;
+  background: var(--line);
+  border-radius: 999px;
+  transition: background 0.15s;
+}
+
+.switch .thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--ink);
+  transition: transform 0.15s;
+}
+
+.switch input:checked + .track {
+  background: var(--on);
+}
+
+.switch input:checked + .track + .thumb {
+  transform: translateX(20px);
+}
+
+.switch input:focus-visible + .track {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Sticky save bar */
+.save-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(11, 10, 13, 0.94);
+  border-top: 1px solid var(--line);
+  padding: 12px 18px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  justify-content: center;
+}
+
+.save-status {
+  font-size: 0.88rem;
+  color: var(--ink-dim);
+  min-height: 1.2em;
+}
+
+.save-status.error {
+  color: var(--danger);
+}
+
+.save-status.ok {
+  color: var(--on);
+}
+
+.hidden {
+  display: none !important;
+}

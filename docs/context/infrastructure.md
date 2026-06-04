@@ -263,6 +263,28 @@ Repo **secrets**: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`.
 
 ### OMR (issue #5) setup status
 
+- **2026-06-04 - ADMIN feature-flag page (/admin) to toggle the OMR engine flags LIVE, no restart.**
+  A token-gated `/admin` page (second Vite HTML entry; `vite.config.ts` now lists `index.html` +
+  `admin.html`, Cloudflare Pages serves both) reads + writes an R2 config object `config/omr-flags.json`
+  via `functions/api/flags.ts` (GET + POST, `Authorization: Bearer <ADMIN_TOKEN>`). The worker reads
+  that object each ~5s poll (`omr-worker/flag_config.py apply_overrides`) and applies the known flags
+  onto `os.environ`, so a toggle takes effect with NO restart; the original box env is captured once so
+  a deleted/absent config reverts cleanly. Exposes the 7 FREE flags (ensemble/referee, geom/primary/
+  fusion, progressive/pages); `OMR_LLM` is deliberately excluded (paid) and can never be enabled from
+  the web (not in the allowlist). R2 cost: ~510k GET/mo for the poll (<< 10M free); writes only on a
+  Save.
+  - **MANUAL one-time step (user, in the Cloudflare Pages dashboard):** Settings -> Environment
+    variables -> add a **Secret** named `ADMIN_TOKEN` (Production) with a strong random value. Until it
+    is set, `/api/flags` returns 503 (fail closed) and the page is inert. I cannot set a Pages secret
+    without the CF API token. Once set, seed `config/omr-flags.json` from the box's current flags so
+    `/admin` shows the true state on first load (or just open `/admin`, enter the token, toggle, Save).
+  - Security: GET + POST both require the Bearer token (constant-time compare; unset token = closed).
+    POST is allowlisted to known flags with "0"/"1" only, so the R2 config can never be polluted and
+    the worker independently only applies allowlisted flags onto os.environ. The static `/admin` page
+    is public but shows nothing and changes nothing without the token. The flag KEY allowlist is one
+    source of truth shared by the Function + UI (`src/flags-server.ts`) and the worker
+    (`omr-worker/flag_config.py`); a JS source-guard test asserts the two lists never drift.
+
 - **2026-06-04 - PROGRESSIVE OMR shipped, default OFF (two env flags).** The worker can now write the
   result key MULTIPLE times per job so the browser renders the first notes while the rest computes.
   Gated; prod is byte-identical until a flag is flipped on the box:
