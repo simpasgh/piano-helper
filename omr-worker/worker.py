@@ -55,6 +55,7 @@ from reconcile import _clef_sign
 import llm_omr
 import fusion
 import progressive
+import flag_config
 
 # rhythm_repair is PURE stdlib (no boto3/torch), like reconcile/fusion, so importing it is free.
 # It is the final post-transform: a music-theory pass that makes each measure's note durations sum
@@ -1593,6 +1594,10 @@ def main():
     log("OMR worker started; bucket=%s interval=%ss" % (bucket, interval))
 
     while True:
+        # Apply any live feature-flag override from R2 (config/omr-flags.json, written by the admin
+        # page) onto os.environ BEFORE processing this cycle's jobs, so a toggle takes effect with no
+        # restart. NEVER raises; an absent/unreadable config leaves the box env in force.
+        flag_config.apply_overrides(client, bucket)
         try:
             poll_once(client, bucket)
         except Exception as err:  # list/credentials hiccup: log and keep going
