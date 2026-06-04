@@ -315,8 +315,9 @@ def fuse(geom_xml, clarity_xml) -> Optional[bytes]:
     capacity 16 at divisions=4) is normalised to 4/4, so a Clarity cut-time MISREAD of a genuine
     4/4 piece cannot relabel it (the borrow was already metric-neutral there: this fixes only the
     printed glyph). Genuinely-different meters (2/4, 3/4, 6/8, ...) still borrow Clarity's real one.
-    The key still comes from geom (a non-C key borrow is a deliberate later enhancement, validated
-    on a non-C piece first). Returns fused MusicXML bytes. NEVER raises: on any failure returns
+    The key comes from geom (_read_fifths), which the worker now re-decodes under Clarity's detected
+    key on non-C pieces UPSTREAM of fuse (worker._rekey_geom), so geom's key here is already correct.
+    Returns fused MusicXML bytes. NEVER raises: on any failure returns
     geom_xml (never worse than geom alone); returns clarity_xml if geom produced nothing, and None
     only if both are empty."""
     try:
