@@ -3,6 +3,283 @@
 UX, visual design, interaction decisions. Append durable learnings at the top of the
 relevant section, dated.
 
+## Smart Edit Mode P3 DURATION COMPLETION: DOTTED durations + CROSS-BARLINE ties (interaction + visual spec)
+
+- **2026-06-04 - Completes the duration editor specced below. The shipped v1 walks a PLAIN
+  ladder (16th..whole) with the `#dur-shorter-btn`/`#dur-longer-btn` steppers + comma/period,
+  fixed-bar: SHORTEN leaves a rest, LENGTHEN ripples + absorbs trailing rest + CLAMPS at the
+  barline. v1 deliberately deferred two things this entry now specs: (A) DOTTED values and (B)
+  cross-barline durations via TIES. Tech Lead builds DOTTED first, TIES second. The substrate is
+  ready for both: the model already parses + serializes dots and `noteValueName(type, dots)`
+  already speaks "dotted quarter"/"double dotted half" (`edit-model.ts`); `ChangeDurationRecord`
+  snapshots the WHOLE bar's children for undo, so a dot or a tie edit inverts with the same
+  machinery a plain step does; and `mergeTiedNotes` in `score.ts` ALREADY folds a tie chain into
+  ONE sustained VisNote (one onset, summed duration) for the normal playback path, so a
+  cross-barline tie plays as one held note for free if we emit the `<tie>`/`<tied>`. This entry is
+  interaction + visual only; Tech Lead owns the model mutation, the ripple, and the tie-pairing.**
+
+  ### DECISION DOT-1 (AFFORDANCE) - a dedicated DOT TOGGLE, not an interleaved dotted ladder.
+
+  RECOMMENDATION: keep the shorter/longer steppers walking PLAIN rungs exactly as they do now, and
+  add ONE toggle button that sets the selected note's value to dotted (x1.5) or back to plain, the
+  MuseScore "." idiom. New button in the `#note-edit` cluster:
+  - `#dur-dot-btn`, class `edit-tool-btn` (ghost style, same as the steppers), aria-label "Dotted
+    note", title "Dot this note (semicolon). Adds half its value again: quarter to dotted quarter."
+    Glyph: a filled notehead followed by a single augmentation dot (a small circle + a dot to its
+    right), or simplest, a bold centered dot `.` echoing the MuseScore control. It is a TOGGLE
+    (`aria-pressed`): pressed/lit when the selected note currently carries a dot, unpressed when
+    plain. Placement in the cluster: pitch-down | pitch-up | shorter | longer | **DOT** | delete,
+    i.e. the dot sits with the duration controls (after `#dur-longer-btn`) and before delete, so
+    the cluster reads pitch | duration (shorter, longer, dot) | delete. The dot is a MODIFIER on
+    the current value, so it belongs adjacent to the steppers it modifies.
+
+    Why a toggle over interleaving dotted rungs into the shorter/longer ladder: (1) it keeps the
+    stepper's one-sentence mental model intact ("each press halves or doubles") and the dot a
+    SEPARATE, orthogonal axis ("this value, but dotted"), which is exactly how musicians think
+    about a dot, instead of making "longer" ambiguous (does quarter step to dotted-quarter or to
+    half?); (2) it is the directly-learnable MuseScore gesture (a single dot key/button that
+    toggles), so it imports muscle memory for free; (3) it adds ONE button to a cluster that
+    already carries six controls, where interleaving would DOUBLE the ladder length and make every
+    stepper press land on a dotted value half the time, which most OMR corrections do not want; (4)
+    toggle state (lit/unlit) is a clean readout of "am I dotted right now", which an interleaved
+    ladder cannot show. The cluster is now seven controls on desktop; on phone it wraps within the
+    docked toolbar, acceptable since these are 44px tap targets and the toolbar already scrolls
+    (#33/#84). If width ever bites, the dot is the one most safely collapsed behind an overflow.
+
+  ### DECISION DOT-2 (KEYBOARD) - SEMICOLON toggles the dot, on both surfaces.
+
+  Comma/period (shorter/longer) are spent; arrows, Enter, Delete, +/-, Ctrl+Z are spent. CHOSEN:
+  **semicolon `;` toggles the dot** whenever a NOTE is selected in edit mode, on BOTH the staff and
+  the canvas (parity with comma/period). Rationale: (1) `;` sits immediately to the RIGHT of `,`
+  and `.` on a QWERTY row, so the three duration keys cluster physically (`, . ;` = shorter,
+  longer, dot), a learnable spatial group; (2) it is an unmodified single key, matching the
+  lightweight feel of comma/period/Enter/Delete; (3) it does not collide with anything bound today
+  and is free on the canvas. Rejected: the literal `.` key (already taken by "longer"); `d` for
+  "dot" (single letters are reserved for the future note-input value-arming idiom, the same reason
+  the number row is held back, and `n` is already an ADD alias, so burning `d` now risks a clash);
+  Shift+period (reads as a modified "longer", confusing). On a REST selection `;` is a no-op
+  (rests are not duration-editable in v1), `preventDefault` so it never types into the page.
+  Document `;` in BOTH surface aria-labels (DOT-5).
+
+  ### DECISION DOT-3 (MAX DOTS) - ONE dot only in v1 (single dot). Double-dot deferred.
+
+  RECOMMENDATION: **single dot only.** The toggle is binary: plain <-> dotted (x1.5). Pressing the
+  dot on an already-dotted note REMOVES the dot (back to plain), it does NOT add a second dot.
+  Reasons: (1) single dots cover essentially all real piano OMR corrections (a dotted quarter, a
+  dotted half); double-dotted values are rare and almost never what a scan-correction needs; (2) a
+  binary toggle is the simplest possible affordance and announce ("dotted" / "not dotted"), where a
+  three-state cycle (plain -> dotted -> double-dotted -> plain) muddies both the button's
+  `aria-pressed` semantics and the spoken state; (3) the bar-math for x1.5 is already the
+  interesting case (an odd, non-power-of-two span); x1.75 adds a second fractional case for little
+  user value. The model ALREADY renders an arriving double-dotted note (`noteValueName` speaks
+  "double dotted half", `noteTypeForDuration` infers two dots), so a scanned double-dot still
+  DISPLAYS correctly; v1 simply never lets the user PRODUCE one, and the dot toggle on a
+  double-dotted arrival snaps it to single-dotted-or-plain like any odd arrival snaps to the
+  ladder (DOT-4). Double-dot is the obvious v2 of this control (cycle, or Shift+`;`) once single
+  dots are proven.
+
+  ### DECISION DOT-4 (BAR SEMANTICS) - dot ON reuses LENGTHEN (x1.5); dot OFF reuses SHORTEN. No new reflow.
+
+  Confirmed: the dot is a duration change, so it routes through the SAME fixed-bar machinery the
+  steppers use, no new reflow path.
+  - **Adding a dot LENGTHENS the note to x1.5 of its current plain value** (quarter 4 divs ->
+    dotted quarter 6 divs; the added half-value = 2 divs). It reuses the lengthen engine exactly:
+    ripple the following same-voice events later, absorb trailing REST room, and (ties OFF) CLAMP
+    at the barline. If the half-value does not fit before the barline and ties are off, the add is
+    a no-op (the button does nothing, announce "No room to dot in this bar"); it must NEVER
+    overflow the bar or silently cross a barline. (When ties land, DOT-B changes this: an
+    overflowing dot AUTO-TIES the remainder into the next bar instead of clamping/no-op.) The note
+    the dot is applied to must be on a PLAIN rung first: a non-plain arrival (already dotted, or an
+    odd OMR span) SNAPS to its nearest plain rung as the dot is applied, announced, exactly the
+    snap the steppers already do (`nearestLadderIndex`).
+  - **Removing a dot SHORTENS the note back to its plain value** (dotted quarter 6 divs -> quarter
+    4 divs) and reuses the shorten engine: the freed third becomes a REST appended after the note,
+    following onsets unchanged. Always has room (it only frees time), so removing a dot never
+    no-ops for lack of space.
+  - **The lengthen-clamp's dotted output is unchanged and SEPARATE from this toggle.** Today a
+    lengthen that clamps at the barline can already emit a dotted value to fill the bar exactly
+    (the documented v1 exception); that stays. The new dot toggle is the user's EXPLICIT way to ask
+    for a dotted value; the clamp's dotted fill is an implicit byproduct of filling the bar. Both
+    set `<dot>` via the same `setNoteDuration(..., {keepDots})` path; they do not conflict.
+  - **State after the edit:** the note is selected, its value now reads dotted (or plain), and the
+    toggle's `aria-pressed` reflects the new state. The transient pulse (DECISION P3-4) fires on a
+    dot edit too (the notehead gains/loses an augmentation dot in place, a shape change the flash
+    draws the eye to), skipped under reduced motion.
+
+  ### DECISION DOT-5 (READOUT + ANNOUNCE + DISABLED) - "dotted quarter" everywhere; toggle reflects state; disabled only when x1.5 cannot fit and ties are off.
+
+  - **Readout:** `#note-edit-readout` already names the value via `durationValueName` (which calls
+    `noteValueName(type, dots)`), so a dotted note ALREADY reads "D5, dotted quarter" with no new
+    code, the moment the model carries the dot. Nothing to add; confirm it surfaces after a dot
+    edit (it re-renders on every commit).
+  - **Toggle visual state:** `#dur-dot-btn` carries `aria-pressed="true"` + a lit look (brass fill,
+    reuse the `.edit-tool-btn-primary` fill tokens OR a lighter `[aria-pressed=true]` variant: a
+    filled brass background `var(--accent)` at ~0.5 alpha with the brass-deep border) when the
+    selected note is dotted, `aria-pressed="false"` + the ghost look when plain. This is set on
+    every selection change + every duration edit, so the button always mirrors the current note.
+  - **Announcements (`#edit-live`, polite, value-named, current Names mode):**
+    - Add a dot: **"D5 quarter to dotted quarter"** (the from->to form, matching the steppers'
+      "D5 quarter to half").
+    - Remove a dot: **"D5 dotted quarter to quarter"**.
+    - A non-plain arrival snapped as the dot is applied: fold into one, **"Dotted quarter to dotted
+      half"** style is wrong here; instead announce the snap then the result, e.g. **"Double dotted
+      half to dotted half"** (snap a double-dot arrival to a single dot), reusing the steppers'
+      dotted-snap phrasing (`dottedSnap` already in the record).
+    - No room to add the dot (ties off): **"No room to dot in this bar"** (mirrors "No room to
+      lengthen in this bar").
+    - Undo of a dot edit: **"Undid dot on the quarter"** / **"Undid removing the dot"**, or simpler
+      and consistent with the steppers' undo, reuse the value form: **"Undid lengthen to dotted
+      quarter"** / **"Undid shorten to quarter"**. Prefer the latter (one undo phrasing for all
+      duration edits).
+  - **Disabled state:** `#dur-dot-btn` is disabled (`disabled` + `aria-disabled="true"`, the dim
+    ghost) ONLY when the selected note is currently PLAIN and there is NO room to add the x1.5
+    half-value before the barline AND ties are off, i.e. the dot literally cannot be applied. (When
+    ties are on per DOT-B, the dot is never disabled for room, since it can tie across.) On an
+    already-dotted note the toggle is always ENABLED (removing a dot always has room). When the
+    selected object is a rest the whole `#note-edit` cluster is hidden anyway, so the dot never
+    shows for a rest. When no note is selected the cluster is hidden.
+
+  ### DECISION TIE-A (TRIGGER) - LENGTHEN (and add-dot) that exceeds the bar AUTO-TIES across the barline. No separate tie control.
+
+  RECOMMENDATION: **the existing lengthen/dot gesture auto-creates the tie**; there is no separate
+  "add a tie" affordance in v1. When a lengthen step (or a dot's x1.5) wants more room than the bar
+  has left AND there is room in the FOLLOWING bar, the note fills the current bar to the barline
+  and a TIED CONTINUATION note of the remainder is created starting the next bar, joined by
+  `<tie>`/`<tied>`. This is the simplest predictable model for a "simplified MuseScore": the user
+  keeps pressing "longer" (or dots the note) and the value keeps growing past the barline the
+  natural way, the editor handles the notation plumbing. It CHANGES the shipped v1 "clamp at the
+  barline" rule precisely: clamp becomes **"tie across the barline when there is downstream room,
+  else clamp at the very end of available room."** Concretely the lengthen/dot resolution is now:
+  1. Grow within the current bar by absorbing trailing rest room (unchanged).
+  2. If the target value still exceeds the current bar AND the next bar has room, fill the current
+     bar to its barline and create a tied continuation of the remainder in the next bar (the new
+     behavior).
+  3. If there is no next bar (last bar of the part) or the next bar is already full in this voice,
+     CLAMP exactly as today (fill to the barline, no-op if already full), announce the clamp.
+
+  Why auto-tie over a separate explicit tie button: (1) it keeps ONE verb ("make this note
+  longer") doing the whole job, so the user never learns a second gesture or reasons about when a
+  tie is "needed"; the editor does what a musician means by "I want this note to last longer than
+  the bar"; (2) it preserves the stepper's existing flow (the same comma/period/dot the user
+  already knows) and only removes the wall they used to hit; (3) a separate tie tool would need its
+  own selection model (tie WHICH two notes?), which is heavier than the correction this serves. The
+  honest limitation (TIE-B) keeps it predictable.
+
+  ### DECISION TIE-B (SCOPE) - v1 ties span at most ONE barline (note + one tied continuation). Multi-bar deferred.
+
+  RECOMMENDATION, stated plainly: **v1 crosses at most ONE barline.** A lengthen/dot can produce a
+  note that fills its bar + ONE tied continuation note starting the next bar. It does NOT span two
+  or more barlines (no chain of three+ tied notes). If a single step's target would need to cross a
+  SECOND barline (the remainder is itself longer than the next bar), the continuation is CLAMPED to
+  fill the next bar to ITS barline and no third segment is created, announced as a clamp. The cap:
+  **one note + one tied continuation, one barline crossing.** Reasons: (1) one crossing covers the
+  overwhelmingly common case (a half note that starts on beat 3 of 4/4 and rings into the next bar);
+  (2) it keeps the tie-pairing logic a single pair, not an arbitrary chain, so undo/redo and the
+  VisNote merge stay a two-element relationship; (3) it bounds the reflow to exactly two adjacent
+  bars, never a cascade down the piece. Multi-bar ties (a note held across several bars, the chain)
+  are the explicit v2 follow-up; flag to PM for the help copy.
+
+  ### DECISION TIE-C (PLAYBACK + FALLING-NOTES, CRITICAL for Tech Lead) - a tie group renders as TWO notes joined, but PLAYS and FALLS as ONE held note. Do not double-attack.
+
+  This is the load-bearing correctness point. A cross-barline tie MUST:
+  - **On the STAFF (Verovio):** render as TWO `<note>` elements joined by a tie curve, the first
+    carrying `<tie type="start"/>` + `<notations><tied type="start"/></notations>`, the
+    continuation carrying `<tie type="stop"/>` + `<tied type="stop"/>`, the continuation having the
+    SAME pitch and NO new accidental. This is correct notation: the reader sees one sustained note
+    notated across the barline.
+  - **In PLAYBACK and the FALLING CANVAS:** the tie group is ONE held note, a SINGLE attack
+    sustained across the barline, summed duration, NOT two separate hits. The implication the Tech
+    Lead must honor: the VisNote derivation must MERGE the tie group into one held VisNote (one
+    onset = the start note's onset, duration = start + continuation summed), while the MusicXML
+    keeps the two `<note>`s joined by `<tie>`/`<tied>`. The GOOD NEWS: this merge ALREADY EXISTS,
+    `mergeTiedNotes` in `score.ts` folds a tie chain into one sustained VisNote for the normal
+    playback path (issue #123), and the edit model already flags `isTieContinuation` on a
+    `<tie type="stop">`-only note so it claims no VisNote of its own. So emitting a well-formed tie
+    in the MusicXML makes it play + fall as one held note FOR FREE through the existing re-derive;
+    the Tech Lead's job is to EMIT the tie correctly (start/stop, tied notations, shared pitch), not
+    to build new playback. State this explicitly so nobody re-implements a second attack: the
+    continuation note must NOT generate its own onset/keypress; it is absorbed into the start note's
+    held duration. Verify after build that a tied note triggers ONE attack (the easy regression is
+    two hits at the barline).
+
+  ### DECISION TIE-D (REVERSING) - shortening the note removes the continuation + the tie. One mental model.
+
+  Confirmed mental model: **a tie is the tail of a too-long note, not a separate object the user
+  manages.** So to remove a tie, the user SHORTENS the note (comma, or remove a dot): shortening a
+  tied note first reclaims the continuation (delete the continuation `<note>` in the next bar +
+  strip the `<tie>`/`<tied>` from the now-standalone note, leaving a rest of the freed time in the
+  next bar so that bar stays full), then continues shortening within the original bar as normal.
+  The user never deletes a tie directly; they make the note shorter and the tie evaporates when the
+  value no longer needs to cross the barline. This matches the auto-tie trigger (TIE-A): a tie
+  EXISTS only because the value exceeds the bar, so reducing the value below the bar's room removes
+  it. Undo of a tie-creating lengthen restores BOTH bars exactly (the `ChangeDurationRecord` must
+  now snapshot both the current and the next measure's children, since a tie edit mutates two bars,
+  see the Tech Lead note below). After undo the note returns selected at its prior (untied) value.
+
+  ### DECISION TIE-E (READOUT + ANNOUNCE + ACCESSIBILITY) - "tied across the bar"; aria/help additions, no em dashes.
+
+  - **Readout:** a tied note's `#note-edit-readout` names its SOUNDING value (the summed value) plus
+    that it is tied, e.g. **"D5, half tied across the bar"** (a half note's worth of sound, notated
+    as quarter-tied-to-quarter across the barline). If the summed value is not a single clean note
+    name (e.g. a quarter tied to an eighth = a dotted-quarter's worth), read the dotted name:
+    "D5, dotted quarter tied across the bar". The "tied across the bar" suffix tells the user the
+    note crosses the barline even though the staff shows two noteheads.
+  - **Announcements (`#edit-live`, polite):**
+    - A lengthen/dot that creates a tie: **"D5 lengthened across the bar to half"** (it grew past
+      the barline; names the resulting sounding value). Distinct from the in-bar clamp's "D5
+      lengthened to fill the bar" so the user hears that it crossed rather than stopped.
+    - A lengthen/dot that wanted to cross but had no downstream room (clamped at the last barline):
+      reuse **"D5 lengthened to fill the bar"** (it filled what it could; no tie made).
+    - Shortening that removes a tie: **"D5 half to quarter, tie removed"** (the from->to value plus
+      that the continuation went away), or simpler **"D5 shortened, tie removed"**.
+    - Undo of a tie-creating edit: **"Undid lengthen to half"** (the steppers' undo form; the tie's
+      removal is implied by returning to the shorter value).
+  - **Surface aria/help additions (no em dashes):** extend the staff help/aria string (currently at
+    `main.ts` ~line 676) so the lengthen clause states the cross-bar behavior. Replace the comma/
+    period clause "comma makes a note shorter and period makes it longer" with: **"comma makes a
+    note shorter and period makes it longer, crossing into the next bar with a tie when it must;
+    semicolon dots the note"**. The canvas string (~line 588) likewise: replace "comma and period
+    change its length" with **"comma and period change its length, tying across the next bar when
+    needed; semicolon dots it"**. (Apply the `;` clause when DOTTED ships even before TIES, and add
+    the tie clause when TIES ship; until ties ship the lengthen clause keeps the v1 "stops at the
+    barline" reading.) Keep both strings free of em dashes.
+
+  ### DECISION TIE-F (LIMITATION, stated plainly for PM + help copy)
+
+  - **v1 ties span AT MOST ONE barline.** A note can be held across one barline (note + one tied
+    continuation). A note that would need to span two or more bars is CLAMPED at the second barline
+    in v1 (it fills the current bar + the whole next bar and stops). Holding a note across several
+    bars (a multi-bar tie chain) is DEFERRED to a later version.
+  - **The tie is created and removed by lengthening / shortening the note**, never by a direct tie
+    tool. There is no way in v1 to tie two ARBITRARY existing notes together (that is a different,
+    composition-style gesture); v1 ties are strictly "this note is longer than its bar". Deferred:
+    a free tie tool, slurs (a tie joins same-pitch notes; a slur is a phrase mark over different
+    pitches and is out of scope), and tying into a bar whose target slot is occupied by a note
+    rather than rest room (v1 only ties into available room in the next bar; if the next bar's
+    downbeat is already a note in this voice, the lengthen clamps instead of overwriting, never
+    destroying data, consistent with the shipped no-overwrite rule).
+
+  ### TECH LEAD NOTES (carried from the substrate read, 2026-06-04)
+
+  - **Dots need no new model surface.** `noteValueName(type, dots)`, `noteTypeForDuration` (infers
+    dots), `durationValueName`, and `setNoteDuration(..., {keepDots})` already exist; the dot toggle
+    is a `changeDuration`-style edit that targets the x1.5 value and writes one `<dot>`. The readout
+    speaks dots already.
+  - **Ties widen the undo snapshot from one bar to two.** `ChangeDurationRecord` today snapshots a
+    SINGLE `measureEl`'s children; a tie edit mutates the current bar AND the next bar (adds the
+    continuation, leaves a rest on shorten). The record must snapshot BOTH measures' children (or
+    generalize to "the affected measures") so `restoreDuration` inverts both. Everything else
+    (clear + re-append cloned children, re-index) is unchanged.
+  - **The playback merge is already built.** `mergeTiedNotes` (`score.ts`) + the model's
+    `isTieContinuation` flag mean a correctly-emitted `<tie>`/`<tied>` plays + falls as one held
+    note with no new code. Do NOT add a second attack path; emit the tie and let the re-derive fold
+    it. Verify one attack at the barline as the key regression.
+  - **Decisions to confirm with the main agent / product owner:** (1) DOT = a toggle button +
+    semicolon, SINGLE dot only in v1 (double-dot deferred). (2) Lengthen/dot AUTO-TIES across one
+    barline when it overflows and there is downstream room, else clamps; no separate tie tool; v1
+    crosses at most one barline. (3) Shortening removes the tie (no direct tie deletion). (4) The
+    continuation must merge into one held VisNote (one attack) via the existing `mergeTiedNotes`.
+
 ## Smart Edit Mode P3 CHANGE-DURATION v1: shorten/lengthen a selected note along a note-value ladder (interaction + visual spec)
 
 - **2026-06-04 - The last leg of the stated vision ("move notes, change their duration, add

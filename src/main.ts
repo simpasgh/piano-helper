@@ -150,6 +150,9 @@ const pitchUpBtn = document.getElementById("pitch-up-btn") as HTMLButtonElement;
 // pitch and delete in the note cluster, disabled at the ladder ends (same idiom as undo/redo).
 const durShorterBtn = document.getElementById("dur-shorter-btn") as HTMLButtonElement;
 const durLongerBtn = document.getElementById("dur-longer-btn") as HTMLButtonElement;
+// Dot TOGGLE (DOTTED v1): plain <-> dotted. aria-pressed + a lit look track whether the selected
+// note is dotted; disabled only when a PLAIN note has no room for the x1.5 half before the barline.
+const durDotBtn = document.getElementById("dur-dot-btn") as HTMLButtonElement;
 const deleteNoteBtn = document.getElementById("delete-note-btn") as HTMLButtonElement;
 // ADD-a-note v1 cluster: shown when a REST is selected (swaps with the note cluster). One primary
 // "Add a note" button + a readout naming the rest.
@@ -585,7 +588,7 @@ async function enterEditMode(): Promise<void> {
     canvas.setAttribute("role", "application");
     canvas.setAttribute(
       "aria-label",
-      "Falling notes editor. Up and down select a note; plus and minus change its pitch by a semitone; Shift with plus or minus moves an octave; comma and period change its length; Delete removes it; Control Z undoes.",
+      "Falling notes editor. Up and down select a note; plus and minus change its pitch by a semitone; Shift with plus or minus moves an octave; comma and period change its length; semicolon dots it; Delete removes it; Control Z undoes.",
     );
     reflectUndoRedoButtons();
     reflectSharedSelection();
@@ -673,7 +676,7 @@ function renderVerovio(): void {
   verovioHost.setAttribute("role", "application");
   verovioHost.setAttribute(
     "aria-label",
-    "Staff editor. Left and right select a note or a rest; up and down change a note's pitch by a step; Control with up or down changes by a semitone; Shift with up or down by an octave; comma makes a note shorter and period makes it longer; on a rest, press Enter to add a note of the same duration; Delete removes a note; Control Z undoes.",
+    "Staff editor. Left and right select a note or a rest; up and down change a note's pitch by a step; Control with up or down changes by a semitone; Shift with up or down by an octave; comma makes a note shorter and period makes it longer; semicolon dots the note; on a rest, press Enter to add a note of the same duration; Delete removes a note; Control Z undoes.",
   );
   // Always (re)attach the host to #sheet. OSMD owns #sheet and an osmd.load/render between edit
   // sessions can detach our node, so re-appending here keeps the render going into the live DOM
@@ -812,10 +815,14 @@ function reflectSharedSelection(announce?: string): void {
 // disabled + aria-disabled at the ladder ends, the same idiom as undo/redo). Shorter is disabled at
 // the shortest rung (16th), longer at the longest (whole). A dotted/odd ARRIVAL is off the ladder
 // (index -1): both stay enabled because the first edit snaps it onto a rung. No selected note (or no
-// model) leaves them disabled; the cluster is hidden then anyway.
+// model) leaves them disabled; the cluster is hidden then anyway. Also reflects the DOT toggle (v1):
+// aria-pressed + a lit look when the note is dotted, ghost when plain; disabled only when a PLAIN
+// note has no room for the x1.5 half before the barline (an already-dotted note is always enabled).
 function reflectDurationButtons(): void {
   let canShorter = false;
   let canLonger = false;
+  let dotted = false;
+  let canDot = false;
   if (editMode && selectedHandle !== null && scoreModel) {
     const h = scoreModel.handles[selectedHandle];
     if (h) {
@@ -828,12 +835,20 @@ function reflectDurationButtons(): void {
         canShorter = idx > 0;
         canLonger = idx < DURATION_LADDER.length - 1;
       }
+      const ds = scoreModel.dotState(selectedHandle);
+      dotted = ds.dotted;
+      canDot = ds.canToggle;
     }
   }
   durShorterBtn.disabled = !canShorter;
   durShorterBtn.setAttribute("aria-disabled", String(!canShorter));
   durLongerBtn.disabled = !canLonger;
   durLongerBtn.setAttribute("aria-disabled", String(!canLonger));
+  // The dot button is a TOGGLE: aria-pressed (the lit CSS keys off it) tracks dotted; it is disabled
+  // only when a plain note cannot fit the added half (a dotted note's remove always has room).
+  durDotBtn.setAttribute("aria-pressed", String(dotted));
+  durDotBtn.disabled = !canDot;
+  durDotBtn.setAttribute("aria-disabled", String(!canDot));
 }
 
 // Capitalize the first letter of a label for the cluster readout (announcements use the lowercase
@@ -1247,6 +1262,46 @@ function changeDurationEdit(direction: "shorter" | "longer"): void {
   pulseSelection();
 }
 
+// Toggle the dot on the shared-selected NOTE (DOTTED v1), routed through the SAME command stack +
+// re-derive path as the steppers so it is undoable and both surfaces re-render. The model ADDS a dot
+// (grow to x1.5, the lengthen path) on a plain note or REMOVES it (shrink back, the shorten path) on a
+// dotted note; an add that does not fit before the barline is a REFUSED no-op announced "No room to
+// dot in this bar". No-op without a selected note (the cluster is hidden for a rest / no selection).
+// The selection stays on the same handle (ids are stable across a duration edit) and the note pulses.
+function dotSelectedNote(): void {
+  if (!scoreModel || !commandStack || selectedHandle === null || !score) return;
+  const handleId = selectedHandle;
+  const handle = scoreModel.handles[handleId];
+  if (!handle) return;
+  const handToVisBefore = handleToVisIndex;
+  const fromValue = durationValueName(handle.durationDivs, handle.divisions);
+
+  // Run the model edit DIRECTLY (not through the stack) so a NO-OP (no room) does not push a command
+  // and wipe the redo branch; only a real edit is recorded, via pushApplied (the model is mutated).
+  const rec = scoreModel.changeDuration(handleId, "dot");
+  if (!rec || rec.outcome === "noRoom" || rec.outcome === "atEnd") {
+    // No room to add the dotted half before the barline (ties are a later increment, so a crossing dot
+    // is refused, not split). Announce so a keyboard/SR user knows the press registered.
+    editLive.textContent = "No room to dot in this bar";
+    return;
+  }
+
+  const cmd: ChangeDurationCommand = {
+    kind: "changeDuration",
+    handleId,
+    direction: "dot",
+    record: rec,
+  };
+  commandStack.pushApplied(cmd);
+  const notes = rederiveVisNotesFromModel(handToVisBefore);
+  selectedHandle = handleId;
+  // Same announce builder as the steppers: an add reads "D5 quarter to dotted quarter", a remove
+  // "D5 dotted quarter to quarter", a non-plain snap folds in ("Double dotted half to dotted half").
+  const announce = durationAnnounce(rec, fromValue);
+  finishEdit(announce, notes);
+  pulseSelection();
+}
+
 // The polite-region announce for a committed duration edit (Designer P3-6), value-named in the
 // current Names mode for the pitch token. Step: "D5 quarter to half"; clamp: "D5 lengthened to fill
 // the bar"; a dotted arrival folds into the from->to ("Dotted quarter to quarter"). `fromValue` is
@@ -1558,7 +1613,14 @@ function undoOrRedoDuration(cmd: ChangeDurationCommand, mode: "undo" | "redo"): 
   if (!scoreModel) return;
   const notes = rederiveVisNotesFromModel(handleToVisIndex);
   selectedHandle = cmd.handleId;
-  const verb = cmd.direction === "longer" ? "lengthen" : "shorten";
+  // A dot edit reuses the stepper phrasing via its recorded verb (add = lengthen, remove = shorten),
+  // so undo reads "Undid lengthen to dotted quarter" / "Undid shorten to quarter".
+  const verb =
+    cmd.direction === "dot"
+      ? (cmd.record?.dotVerb ?? "lengthen")
+      : cmd.direction === "longer"
+        ? "lengthen"
+        : "shorten";
   // The value the edit landed on (record.toName); for a CLAMP fill there is no plain ladder name, so
   // fall back to the post-edit value name on redo / "fill the bar" phrasing.
   const landed = cmd.record?.toName || "fill the bar";
@@ -2532,6 +2594,10 @@ pitchDownBtn.addEventListener("click", () => staffPitchStep("diatonic", -1));
 // ends (reflectDurationButtons), so a click only ever fires for a legal step.
 durShorterBtn.addEventListener("click", () => changeDurationEdit("shorter"));
 durLongerBtn.addEventListener("click", () => changeDurationEdit("longer"));
+// Dot TOGGLE (DOTTED v1): add a dot on a plain note, remove it on a dotted one. Disabled
+// (reflectDurationButtons) only when a plain note has no room for the added half, so a click only
+// ever fires for a legal toggle.
+durDotBtn.addEventListener("click", () => dotSelectedNote());
 // Trash button: delete the shared-selected note (model-level, fixed-bar, undoable).
 deleteNoteBtn.addEventListener("click", () => deleteSelectedNote());
 // "Add a note" button (ADD-a-note v1): fill the selected rest. A button press following a MOUSE
@@ -2627,6 +2693,16 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "," || e.key === ".") {
     e.preventDefault();
     if (selectedHandle !== null) changeDurationEdit(e.key === "," ? "shorter" : "longer");
+    return;
+  }
+
+  // Semicolon toggles the DOT on the selected NOTE on BOTH surfaces (DOTTED v1): add on a plain note,
+  // remove on a dotted one. preventDefault so it never types into the page; a no-op on a rest
+  // selection (selectedHandle is null then). Handled before the selectedHandle guard so preventDefault
+  // still fires on a rest (a clean no-op), exactly like comma/period.
+  if (e.key === ";") {
+    e.preventDefault();
+    if (selectedHandle !== null) dotSelectedNote();
     return;
   }
 

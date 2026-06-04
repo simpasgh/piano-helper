@@ -83,6 +83,7 @@ describe("edit toolbar lives OUTSIDE the OSMD-owned #sheet", () => {
       "pitch-up-btn",
       "dur-shorter-btn",
       "dur-longer-btn",
+      "dur-dot-btn",
       "delete-note-btn",
       "add-note",
       "add-note-btn",
@@ -123,5 +124,30 @@ describe("duration steppers (Smart Edit P3 v1) live in the note cluster, not in 
     expect(ids.indexOf("dur-shorter-btn")).toBeGreaterThan(ids.indexOf("pitch-up-btn"));
     expect(ids.indexOf("dur-longer-btn")).toBeGreaterThan(ids.indexOf("dur-shorter-btn"));
     expect(ids.indexOf("delete-note-btn")).toBeGreaterThan(ids.indexOf("dur-longer-btn"));
+  });
+});
+
+describe("dot TOGGLE button (DOTTED v1) lives in the note cluster as a pressed-state toggle", () => {
+  it("exists INSIDE #note-edit, not in #sheet (an OSMD re-render can never detach it)", () => {
+    const noteEdit = doc.getElementById("note-edit") as HTMLElement;
+    const dot = doc.getElementById("dur-dot-btn");
+    expect(dot, "#dur-dot-btn should exist").not.toBeNull();
+    expect(noteEdit.contains(dot!), "#dur-dot-btn inside #note-edit").toBe(true);
+    expect(sheet.contains(dot)).toBe(false);
+  });
+
+  it("has the Dotted note aria-label (the screen-reader name)", () => {
+    expect(doc.getElementById("dur-dot-btn")?.getAttribute("aria-label")).toBe("Dotted note");
+  });
+
+  it("starts as an UNPRESSED toggle (aria-pressed=false: a fresh selection is plain)", () => {
+    expect(doc.getElementById("dur-dot-btn")?.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("sits AFTER longer and BEFORE delete (pitch | shorter | longer | DOT | delete)", () => {
+    const noteEdit = doc.getElementById("note-edit") as HTMLElement;
+    const ids = Array.from(noteEdit.querySelectorAll("button")).map((b) => b.id);
+    expect(ids.indexOf("dur-dot-btn")).toBeGreaterThan(ids.indexOf("dur-longer-btn"));
+    expect(ids.indexOf("delete-note-btn")).toBeGreaterThan(ids.indexOf("dur-dot-btn"));
   });
 });

@@ -36,7 +36,7 @@ function stubModel(): ScoreModel & {
   restored: DeleteRecord[];
   added: { restId: number; pitch: ModelPitch }[];
   removed: AddRecord[];
-  durationChanges: { id: number; direction: "shorter" | "longer" }[];
+  durationChanges: { id: number; direction: "shorter" | "longer" | "dot" }[];
   durationRestores: ChangeDurationRecord[];
 } {
   const pitches = new Map<number, ModelPitch>();
@@ -44,7 +44,7 @@ function stubModel(): ScoreModel & {
   const restored: DeleteRecord[] = [];
   const added: { restId: number; pitch: ModelPitch }[] = [];
   const removed: AddRecord[] = [];
-  const durationChanges: { id: number; direction: "shorter" | "longer" }[] = [];
+  const durationChanges: { id: number; direction: "shorter" | "longer" | "dot" }[] = [];
   const durationRestores: ChangeDurationRecord[] = [];
   return {
     pitches,
@@ -85,7 +85,10 @@ function stubModel(): ScoreModel & {
     removeNote: (record: AddRecord) => {
       removed.push(record);
     },
-    changeDuration: (id: number, direction: "shorter" | "longer"): ChangeDurationRecord => {
+    changeDuration: (
+      id: number,
+      direction: "shorter" | "longer" | "dot",
+    ): ChangeDurationRecord => {
       durationChanges.push({ id, direction });
       // A stub record: the real DOM snapshot is exercised in edit-model.test.ts. `measureEl` is a
       // sentinel; childrenBefore non-empty so it reads as a real (non-no-op) edit.
@@ -94,14 +97,16 @@ function stubModel(): ScoreModel & {
         childrenBefore: [{ tag: "child" } as unknown as Node],
         outcome: "stepped",
         fromName: "quarter",
-        toName: direction === "shorter" ? "eighth" : "half",
+        toName: direction === "shorter" ? "eighth" : direction === "longer" ? "half" : "dotted quarter",
         dottedSnap: false,
         direction,
+        ...(direction === "dot" ? { dotVerb: "lengthen" as const } : {}),
       };
     },
     restoreDuration: (record: ChangeDurationRecord) => {
       durationRestores.push(record);
     },
+    dotState: () => ({ dotted: false, canToggle: true }),
     serialize: () => "",
   };
 }
@@ -131,7 +136,7 @@ const addNote = (restId: number, pitch: ModelPitch): AddNoteCommand => ({
 
 const changeDuration = (
   handleId: number,
-  direction: "shorter" | "longer",
+  direction: "shorter" | "longer" | "dot",
 ): ChangeDurationCommand => ({
   kind: "changeDuration",
   handleId,
@@ -373,6 +378,34 @@ describe("ChangeDurationCommand (apply / invert / stack)", () => {
     ]); // applied on push AND on redo
     expect(cmd.record).not.toBeNull();
     expect(cmd.record).not.toBe(recordAfterPush); // a fresh record, not the stale one
+  });
+});
+
+describe("ChangeDurationCommand with the DOT direction (toggle, same apply/invert path)", () => {
+  it("apply routes a dot toggle through model.changeDuration; invert restores the record", () => {
+    const model = stubModel();
+    const cmd = changeDuration(3, "dot");
+    applyCommand(model, cmd);
+    expect(model.durationChanges).toEqual([{ id: 3, direction: "dot" }]);
+    expect(cmd.record).not.toBeNull();
+    expect(cmd.record?.direction).toBe("dot");
+    const captured = cmd.record;
+    invertCommand(model, cmd);
+    expect(model.durationRestores).toEqual([captured]); // dot undo flows through restoreDuration
+  });
+
+  it("undo/redo a dot toggle round-trips through the stack (re-applying the dot on redo)", () => {
+    const model = stubModel();
+    const stack = new CommandStack(model);
+    stack.push(changeDuration(0, "dot"));
+    expect(stack.canUndo()).toBe(true);
+    stack.undo();
+    expect(model.durationRestores.length).toBe(1);
+    stack.redo();
+    expect(model.durationChanges).toEqual([
+      { id: 0, direction: "dot" },
+      { id: 0, direction: "dot" }, // applied on push AND on redo
+    ]);
   });
 });
 

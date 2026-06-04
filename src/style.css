@@ -1462,6 +1462,19 @@ button:focus-visible,
   color: #fff;
 }
 
+/* Toggled-on (DOTTED v1): the dot button reads as LIT when the selected note is dotted, reusing the
+   accent fill so it matches the primary action's brass look without becoming a second primary. The
+   ghost (aria-pressed="false") look is just the base .edit-tool-btn. */
+.edit-tool-btn[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: var(--accent-deep);
+  color: #3a2a0c; /* dark brass ink on the accent fill, for contrast */
+}
+.edit-tool-btn[aria-pressed="true"]:hover:not(:disabled) {
+  background: var(--accent-deep);
+  color: #fff;
+}
+
 /* Ghost-disabled: dimmed so the user can see there is no history to move through. */
 .edit-tool-btn:disabled,
 .edit-tool-btn[aria-disabled="true"] {

@@ -372,6 +372,14 @@
                 <path d="M3 12h18" />
               </svg>
             </button>
+            <!-- DOTTED v1: a TOGGLE. aria-pressed reflects whether the selected note is dotted (main.ts
+                 keeps it in sync). The glyph is a notehead + a single augmentation dot. -->
+            <button id="dur-dot-btn" class="edit-tool-btn" type="button" aria-pressed="false" title="Dot this note (semicolon). Adds half its value again: quarter to dotted quarter." aria-label="Dotted note">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" stroke="none" aria-hidden="true" focusable="false">
+                <ellipse cx="10" cy="14" rx="5" ry="3.6" transform="rotate(-20 10 14)" />
+                <circle cx="19" cy="14" r="1.8" />
+              </svg>
+            </button>
             <button id="delete-note-btn" class="edit-tool-btn" type="button" title="Delete this note (Delete or Backspace). It becomes a rest; the bar still adds up." aria-label="Delete this note">
               <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
                 <path d="M4 7h16M10 11v6M14 11v6M5 7l1 13a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1l1-13M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3" />

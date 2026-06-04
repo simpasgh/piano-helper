@@ -296,8 +296,15 @@ export interface ChangeDurationRecord {
   // A dotted/odd arrival was snapped to the nearest plain rung as part of this edit (folds into the
   // announce, e.g. "Dotted quarter to quarter"). False for a plain-to-plain step.
   dottedSnap: boolean;
-  // The direction the user asked for, so the announce/undo can say "lengthen"/"shorten".
-  direction: "shorter" | "longer";
+  // The direction the user asked for, so the announce/undo can say "lengthen"/"shorten"/"dot". The
+  // DOT toggle (v1) reuses the lengthen path to ADD a dot (x1.5) and the shorten path to REMOVE it
+  // (back to the plain value), so its undo/redo flows through the same restoreDuration + command.
+  direction: "shorter" | "longer" | "dot";
+  // For a "dot" edit, whether it GREW (added a dot, a lengthen) or SHRANK (removed/normalized a dot, a
+  // shorten), so the undo/redo announce reuses the stepper phrasing ("Undid lengthen to dotted
+  // quarter" / "Undid shorten to quarter"). Undefined for a shorter/longer step (its own direction
+  // already names the verb).
+  dotVerb?: "lengthen" | "shorten";
 }
 
 // The editable score model. Holds the parsed DOM and the ordered pitched-note handles. Edits
@@ -341,9 +348,28 @@ export interface ScoreModel {
   // an invalid id, a rest end-clamp no-op, or a no-room no-op (the record's `outcome` distinguishes
   // them so the caller can announce). Note handle ids are STABLE (no pitched note is added/removed),
   // so the selection stays on the same handle; rest ids may shift, so the caller rebuilds the maps.
-  changeDuration(id: number, direction: "shorter" | "longer"): ChangeDurationRecord | null;
+  //
+  // The "dot" DIRECTION (DOTTED v1) is a binary toggle on the SAME machinery: on a PLAIN note it
+  // ADDS a single dot (grow to x1.5 of the plain value, exactly one <dot>) via the lengthen ripple /
+  // absorb path, but it never CLAMPS - if the added half does not fit before the barline it REFUSES
+  // (a noRoom no-op, "No room to dot in this bar"); on an already-DOTTED note it REMOVES the dot
+  // (shrink back to the plain value, the freed third becomes a rest after the note) via the shorten
+  // path. An off-ladder arrival SNAPS to its nearest plain rung first, then the dot applies to that
+  // rung. It NEVER produces a second dot. divisions stays load-bearing 4; the whole chord shares the
+  // one dotted duration.
+  changeDuration(
+    id: number,
+    direction: "shorter" | "longer" | "dot",
+  ): ChangeDurationRecord | null;
   // Invert a change-duration: restore the snapshotted measure children and re-index.
   restoreDuration(record: ChangeDurationRecord): void;
+  // DOTTED v1: the dot TOGGLE's UI state for note `id`, so the toolbar can show aria-pressed + a lit
+  // look and disable the toggle when it cannot act. `dotted` is whether the note currently carries a
+  // dot (inferred from its <duration>). `canToggle` is whether pressing dot would do something: an
+  // already-dotted note is always toggleable (removing a dot frees time, always room); a PLAIN note is
+  // toggleable only when the added x1.5 half fits before the barline (the same room test the dot ADD
+  // uses). Returns a safe default ({ dotted:false, canToggle:false }) for an invalid id.
+  dotState(id: number): { dotted: boolean; canToggle: boolean };
   fifthsForHandle(id: number): number;
   // The key signature (fifths) in effect at a REST handle, so the add can spell its accidental
   // diatonically (parallel to fifthsForHandle for note handles).
@@ -714,6 +740,133 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
 
   reindexHandles();
 
+  // DOTTED v1: the dot TOGGLE edit, a closure so it can reindex after mutating (like the inline
+  // shorten/lengthen). Binary plain <-> dotted, fixed-bar, returning the SAME ChangeDurationRecord so
+  // undo flows through restoreDuration. It never produces a second dot and never overflows a bar.
+  //
+  // The note's inferred (base, dots) drives the toggle:
+  //  - dots == 0 (PLAIN, possibly off-ladder odd): ADD a dot. Snap an off-ladder value to its nearest
+  //    plain rung first, then the target is that rung x1.5. Grow via the lengthen ripple/absorb path,
+  //    but REFUSE (noRoom) if the added half does not fit before the barline (no clamp - ties later).
+  //  - dots >= 1 (already DOTTED): step DOWN one dot level. A single dot -> the PLAIN base; a double
+  //    dot -> the single-dotted base (the canonical value v1 keeps). Either way the value SHRINKS, so
+  //    the freed time becomes a rest after the chord (always room).
+  function toggleDotEdit(
+    chordGroup: Element[],
+    noteEl: Element,
+    measureEl: Element,
+    divisions: number,
+    oldDivs: number,
+    fromName: string,
+  ): ChangeDurationRecord {
+    const { type: baseType, dots } = noteTypeForDuration(oldDivs, divisions);
+    const baseEntry = NOTE_VALUE_QUARTERS.find((v) => v.type === baseType);
+    const baseDivs = baseEntry ? baseEntry.quarters * divisions : oldDivs;
+    // Snapshot the bar BEFORE mutating, for an exact invert (mirrors the shorten/lengthen snapshot).
+    const snapshot = (): Node[] => Array.from(measureEl.children).map((c) => c.cloneNode(true));
+
+    if (dots === 0) {
+      // ADD a dot. An off-ladder PLAIN arrival (a tuplet/odd duration noteTypeForDuration approximated
+      // to 0 dots) is SNAPPED to its nearest plain rung first; the dot then applies to that rung.
+      const onLadder = ladderIndexForDuration(oldDivs, divisions) >= 0;
+      const snapIndex = nearestLadderIndex(oldDivs, divisions);
+      const plainDivs = onLadder ? oldDivs : DURATION_LADDER[snapIndex].quarters * divisions;
+      const plainType = onLadder ? baseType : DURATION_LADDER[snapIndex].type;
+      const dottedSnap = !onLadder;
+      // The dotted target is x1.5 of the plain rung; the added half is half the plain rung.
+      const targetDivs = plainDivs + plainDivs / 2;
+      const wanted = targetDivs - oldDivs; // divisions to grow by (from the ARRIVAL, snap-aware)
+      // Room to grow: trailing same-voice REST divisions + any slack to the barline (the lengthen rule).
+      const voice = num(child(noteEl, "voice"), 1);
+      const following = followingVoiceEvents(measureEl, noteEl, voice);
+      const room = growRoomDivs(measureEl, noteEl, divisions);
+      // A dot NEVER clamps: if the full added half does not fit before the barline, REFUSE (noRoom).
+      if (wanted > room + 1e-9) {
+        return {
+          measureEl,
+          childrenBefore: [],
+          outcome: "noRoom",
+          fromName,
+          toName: fromName,
+          dottedSnap: false,
+          direction: "dot",
+        };
+      }
+      const childrenBefore = snapshot();
+      // Consume `wanted` divisions of trailing rest, first rest onward: shrink a larger rest, remove a
+      // fully consumed one (the lengthen absorb). Following NOTES ripple right via the cursor (untouched).
+      let toConsume = wanted;
+      for (const e of following) {
+        if (toConsume <= 0) break;
+        if (child(e, "rest") === null) continue;
+        const restDur = num(child(e, "duration"), 0);
+        if (restDur <= toConsume) {
+          e.parentNode?.removeChild(e);
+          toConsume -= restDur;
+        } else {
+          setNoteDuration(e, restDur - toConsume, divisions, { keepDots: false });
+          toConsume = 0;
+        }
+      }
+      // Write the dotted duration to EVERY chord member (one shared value); keepDots:true so the single
+      // inferred <dot> is emitted (x1.5 infers exactly one dot for a plain base).
+      for (const m of chordGroup) setNoteDuration(m, targetDivs, divisions, { keepDots: true });
+      reindexHandles();
+      return {
+        measureEl,
+        childrenBefore,
+        outcome: "stepped",
+        fromName,
+        // "dotted {plain}" (e.g. "dotted quarter"); on a snap, named from the SNAPPED rung.
+        toName: noteValueName(plainType, 1),
+        dottedSnap,
+        direction: "dot",
+        dotVerb: "lengthen", // adding a dot grows the note
+      };
+    }
+
+    // REMOVE / normalize a dot (dots >= 1): step down one dot level. A single dot -> plain base; a
+    // double dot -> single-dotted base. The value shrinks, so the freed time becomes a rest after the
+    // chord (the shorten idiom; always has room since we are getting SHORTER).
+    const targetDots = dots - 1; // 1 -> 0 (plain), 2 -> 1 (dotted)
+    // base * (2 - 2^-dots) quarters: a base with `targetDots` dots.
+    const targetDivs = baseDivs * (2 - Math.pow(2, -targetDots));
+    const freed = oldDivs - targetDivs;
+    if (freed <= 1e-9) {
+      // Defensive: a dotted value is always longer than its lower-dot form, so freed > 0 here.
+      return {
+        measureEl,
+        childrenBefore: [],
+        outcome: "atEnd",
+        fromName,
+        toName: fromName,
+        dottedSnap: false,
+        direction: "dot",
+      };
+    }
+    const childrenBefore = snapshot();
+    // Shrink EVERY chord member to the target value. keepDots:true so a double->single normalize keeps
+    // the remaining single dot (targetDots==1); a single->plain remove infers 0 dots so none is written.
+    for (const m of chordGroup) setNoteDuration(m, targetDivs, divisions, { keepDots: true });
+    const lastInChord = chordGroup[chordGroup.length - 1];
+    const freedRest = makeRestFrom(noteEl);
+    setNoteDuration(freedRest, freed, divisions, { keepDots: false });
+    lastInChord.parentNode?.insertBefore(freedRest, lastInChord.nextSibling);
+    reindexHandles();
+    return {
+      measureEl,
+      childrenBefore,
+      outcome: "stepped",
+      fromName,
+      toName: noteValueName(baseType, targetDots),
+      // A double-dotted arrival is a NON-PLAIN value; folding the snap phrasing in reads
+      // "Double dotted half to dotted half". A plain single-dot remove uses the normal from->to.
+      dottedSnap: dots >= 2,
+      direction: "dot",
+      dotVerb: "shorten", // removing/normalizing a dot shrinks the note
+    };
+  }
+
   const serializer = new XMLSerializer();
 
   const model: ScoreModel = {
@@ -864,7 +1017,10 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
       }
       reindexHandles();
     },
-    changeDuration(id: number, direction: "shorter" | "longer"): ChangeDurationRecord | null {
+    changeDuration(
+      id: number,
+      direction: "shorter" | "longer" | "dot",
+    ): ChangeDurationRecord | null {
       const handle = handles[id];
       if (!handle) return null;
       // A duration edit acts on the whole CHORD: members share one onset + one duration, so editing
@@ -884,6 +1040,21 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
       // Current value name (for the announce), computed BEFORE any mutation (covers a dotted
       // arrival, e.g. "dotted quarter").
       const fromName = durationValueName(oldDivs, divisions);
+
+      // DOTTED v1: a binary plain <-> dotted toggle on the SAME fixed-bar machinery. Handled before the
+      // shorter/longer ladder stepping because its target value is x1.5 / x(2/3) of the PLAIN rung, not
+      // an adjacent rung. Reuses the lengthen ripple/absorb (to ADD) and the shorten freed-rest (to
+      // REMOVE), but ADD never CLAMPS: a dot that does not fit before the barline is REFUSED.
+      if (direction === "dot") {
+        return toggleDotEdit(
+          chordGroup,
+          noteEl,
+          measureEl,
+          divisions,
+          oldDivs,
+          fromName,
+        );
+      }
 
       // Is the note already on a plain ladder rung? If not (a dotted/odd arrival), SNAP to the
       // nearest rung first; that snap is folded into this edit (Designer P3-3).
@@ -1039,6 +1210,28 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
       }
       reindexHandles();
     },
+    dotState(id: number): { dotted: boolean; canToggle: boolean } {
+      const handle = handles[id];
+      if (!handle) return { dotted: false, canToggle: false };
+      const chordGroup = chordGroupFor(handle.el);
+      const noteEl = chordGroup[0];
+      const measureEl = ancestorNamed(noteEl, "measure");
+      if (!measureEl) return { dotted: false, canToggle: false };
+      const divisions = handle.divisions > 0 ? handle.divisions : 1;
+      const oldDivs = num(child(noteEl, "duration"), handle.durationDivs);
+      const { dots } = noteTypeForDuration(oldDivs, divisions);
+      // An already-dotted note is always toggleable (removing a dot frees time; always room).
+      if (dots >= 1) return { dotted: true, canToggle: true };
+      // PLAIN: the dot ADD needs room for the added half. Compute the same x1.5 target the ADD uses
+      // (snapping an off-ladder value to its nearest rung first), then compare the needed grow to room.
+      const onLadder = ladderIndexForDuration(oldDivs, divisions) >= 0;
+      const plainDivs = onLadder
+        ? oldDivs
+        : DURATION_LADDER[nearestLadderIndex(oldDivs, divisions)].quarters * divisions;
+      const wanted = plainDivs + plainDivs / 2 - oldDivs;
+      const room = growRoomDivs(measureEl, noteEl, divisions);
+      return { dotted: false, canToggle: wanted <= room + 1e-9 };
+    },
     serialize(): string {
       return serializer.serializeToString(doc);
     },
@@ -1120,6 +1313,22 @@ function followingVoiceEvents(measureEl: Element, noteEl: Element, voice: number
     out.push(node);
   }
   return out;
+}
+
+// The divisions a note could GROW by within its bar: the trailing same-voice REST space plus any
+// slack to the barline. This is the room a lengthen (and the dot ADD) may consume without overflowing
+// the bar. Shared by the dot ADD edit and the dot button's enabled-state probe so both agree exactly.
+function growRoomDivs(measureEl: Element, noteEl: Element, divisions: number): number {
+  const voice = num(child(noteEl, "voice"), 1);
+  const following = followingVoiceEvents(measureEl, noteEl, voice);
+  const restRoom = following
+    .filter((e) => child(e, "rest") !== null)
+    .reduce((sum, e) => sum + num(child(e, "duration"), 0), 0);
+  const slack = Math.max(
+    0,
+    measureCapacityDivs(measureEl, divisions) - voiceFilledDivs(measureEl, voice),
+  );
+  return restRoom + slack;
 }
 
 // The bar's capacity in divisions from its <time> signature (beats * divisions * 4 / beat-type), or
