@@ -8,6 +8,7 @@ import { midiToBarLabel } from "./piano";
 import {
   parseScoreModel,
   buildHandleToVisIndex,
+  deriveVisNotesFromModel,
   diatonicStep,
   chromaticStep,
   octaveStep,
@@ -22,6 +23,7 @@ import {
   FIRST_MIDI,
   type ScoreModel,
   type ModelPitch,
+  type NoteHandle,
 } from "./edit-model";
 import {
   CommandStack,
@@ -606,7 +608,7 @@ async function enterEditMode(): Promise<void> {
     canvas.setAttribute("role", "application");
     canvas.setAttribute(
       "aria-label",
-      "Falling notes editor. Up and down select a note; plus and minus change its pitch by a semitone; Shift with plus or minus moves an octave; comma and period change its length; semicolon dots it; Delete removes it; Control Z undoes.",
+      "Falling notes editor. Up and down select a note; plus and minus change its pitch by a semitone; Shift with plus or minus moves an octave; comma and period change its length, tying across the next bar when needed; semicolon dots it; Delete removes it; Control Z undoes.",
     );
     reflectUndoRedoButtons();
     reflectSharedSelection();
@@ -739,7 +741,7 @@ function renderVerovio(): void {
   verovioHost.setAttribute("role", "application");
   verovioHost.setAttribute(
     "aria-label",
-    "Staff editor. Left and right select a note or a rest; up and down change a note's pitch by a step; Control with up or down changes by a semitone; Shift with up or down by an octave; comma makes a note shorter and period makes it longer; semicolon dots the note; on a rest, press Enter to add a note of the same duration; Delete removes a note; Control Z undoes.",
+    "Staff editor. Left and right select a note or a rest; up and down change a note's pitch by a step; Control with up or down changes by a semitone; Shift with up or down by an octave; comma makes a note shorter and period makes it longer, crossing into the next bar with a tie when it must; semicolon dots the note; on a rest, press Enter to add a note of the same duration; Delete removes a note; Control Z undoes.",
   );
   // Always (re)attach the host to #sheet. OSMD owns #sheet and an osmd.load/render between edit
   // sessions can detach our node, so re-appending here keeps the render going into the live DOM
@@ -825,13 +827,39 @@ function selectedNoteLabel(): string {
   return "note";
 }
 
+// The continuation handle of a CROSS-BARLINE TIE whose START is `h`, or null if `h` is not a tie
+// start. A tie start carries <tie type="start"/> (no stop); its continuation is the same-pitch
+// handle flagged isTieContinuation whose onset begins exactly where the start ends. Used so a tied
+// note's readout can name its SOUNDING (summed) value (TIE-E).
+function tieContinuationOf(h: NoteHandle): NoteHandle | null {
+  if (!scoreModel) return null;
+  const ties = Array.from(h.el.getElementsByTagName("tie"));
+  const hasStart = ties.some((t) => t.getAttribute("type") === "start");
+  const hasStop = ties.some((t) => t.getAttribute("type") === "stop");
+  if (!hasStart || hasStop) return null; // not a pure cross-barline tie start
+  const end = h.onsetSec + h.durationSec;
+  return (
+    scoreModel.handles.find(
+      (c) => c.isTieContinuation && c.midi === h.midi && Math.abs(c.onsetSec - end) < 1e-3,
+    ) ?? null
+  );
+}
+
 // The current value NAME of the shared-selected note (Smart Edit P3 readout/announce), e.g.
-// "quarter" or (for an OMR-inferred dotted arrival) "dotted quarter". Empty when no note is
-// selected or its handle is gone. Read straight from the model handle's duration + divisions.
+// "quarter" or (for an OMR-inferred dotted arrival) "dotted quarter". A CROSS-BARLINE TIE START
+// reads its SOUNDING (summed) value + " tied across the bar" (TIE-E), e.g. "half tied across the
+// bar" (a quarter-tied-to-quarter), since the staff shows two noteheads but it sounds as one held
+// note. Empty when no note is selected or its handle is gone.
 function selectedNoteValueName(): string {
   if (selectedHandle === null || !scoreModel) return "";
   const h = scoreModel.handles[selectedHandle];
   if (!h) return "";
+  const cont = tieContinuationOf(h);
+  if (cont) {
+    // Sum the start + continuation divisions for the held sounding value (named, possibly dotted).
+    const sumDivs = h.durationDivs + cont.durationDivs * (h.divisions / cont.divisions);
+    return `${durationValueName(sumDivs, h.divisions)} tied across the bar`;
+  }
   return durationValueName(h.durationDivs, h.divisions);
 }
 
@@ -1098,6 +1126,10 @@ function doUndo(): void {
     editLive.textContent = "Nothing to undo";
     return;
   }
+  // Snapshot per-note hand by element BEFORE the model mutates: commandStack.undo() applies the
+  // reversal (which reindexes handles for a duration edit), so a later capture would be too late.
+  // Only the duration path consumes it; capturing it for the others is a cheap discard.
+  const elementToHand = captureElementToHand();
   const cmd = commandStack.undo();
   if (!cmd) return;
   if (cmd.kind === "deleteNote") {
@@ -1118,7 +1150,7 @@ function doUndo(): void {
     // notes from the restored model (onsets/durations are back), re-select the same handle (stable
     // across a duration edit), and announce the reversal. The changed note returns selected at its
     // prior value, which the readout reflects. A pulse marks the restored note.
-    undoOrRedoDuration(cmd, "undo");
+    undoOrRedoDuration(cmd, "undo", elementToHand);
     return;
   }
   // Re-select the affected note (it now shows its prior pitch) and announce what reversed. Do
@@ -1138,6 +1170,9 @@ function doRedo(): void {
     editLive.textContent = "Nothing to redo";
     return;
   }
+  // Snapshot per-note hand by element BEFORE the model mutates (see doUndo). Only the duration path
+  // consumes it; capturing it for the others is a cheap discard.
+  const elementToHand = captureElementToHand();
   const cmd = commandStack.redo();
   if (!cmd) return;
   if (cmd.kind === "deleteNote") {
@@ -1155,7 +1190,7 @@ function doRedo(): void {
   if (cmd.kind === "changeDuration") {
     // Redo of a duration edit: applyCommand re-ran model.changeDuration against the restored bar
     // (deterministic), so the bar is edited again. Re-derive + re-select + announce like the undo.
-    undoOrRedoDuration(cmd, "redo");
+    undoOrRedoDuration(cmd, "redo", elementToHand);
     return;
   }
   // Same map ordering as doUndo: project with the existing map, then rebuild in finishEdit.
@@ -1279,29 +1314,40 @@ function canvasPitchStep(octaveMod: boolean, dir: 1 | -1): void {
   commitPitchEdit(next);
 }
 
-// Re-derive the FULL falling-notes array from the model after a structural-but-id-stable edit (a
-// duration change). A duration edit never adds or removes a pitched note, so handle ids are stable
-// and the OLD handle->VisNote map still tells us each note's HAND (which the model does not carry);
-// midi/time/duration come fresh from the model (a lengthen ripples following onsets and changes
-// durations, so the index-stable pitch projection in finishEdit would be wrong here). Tie
-// continuations have no VisNote and are skipped. The result is in onset order for tidy indexing.
-function rederiveVisNotesFromModel(handToVisBefore: Map<number, number>): VisNote[] {
-  if (!scoreModel || !score) return score ? score.notes.slice() : [];
-  const out: VisNote[] = [];
+// Capture a pre-edit ELEMENT -> hand map so a re-derive after a duration edit can copy each note's
+// hand back onto it. Keyed on the <note> DOM element (h.el), NOT the handle id and NOT the <staff>:
+//
+//   - id is UNSTABLE across a CROSS-BARLINE TIE (the continuation <note> insert reindexes every
+//     handle past it), which is why the old id-keyed lookup broke and was (wrongly) replaced by a
+//     per-STAFF lookup.
+//   - <staff> is TOO COARSE: the issue-#87 collapsed-single-staff class (e.g. icarus.pdf, where the
+//     OMR flattens a grand staff onto ONE <staff> that switches treble->bass mid-piece) has notes on
+//     the SAME staff with DIFFERENT hands (score.ts tags hand PER MEASURE from the clef in effect),
+//     so a per-staff rule collapses the whole bass section to the first note's hand after any edit.
+//
+// h.el is STABLE across BOTH the onset ripple AND the continuation insert (the DOM <note> nodes for
+// surviving notes are mutated in place, never recreated), so an element-keyed map survives the id
+// shift WITHOUT losing per-note hand. Must be captured BEFORE the model mutates, while
+// handleToVisIndex + score.notes + the handle ids still line up.
+function captureElementToHand(): Map<Element, VisNote["hand"]> {
+  const map = new Map<Element, VisNote["hand"]>();
+  if (!scoreModel || !score) return map;
   for (const h of scoreModel.handles) {
-    if (h.isTieContinuation) continue;
-    const prevIndex = handToVisBefore.get(h.id);
-    const prev = prevIndex !== undefined ? score.notes[prevIndex] : undefined;
-    out.push({
-      midi: h.midi,
-      time: h.onsetSec,
-      duration: h.durationSec,
-      hand: prev?.hand,
-      spelling: spellingFromPitch(h.pitch),
-    });
+    const vi = handleToVisIndex.get(h.id);
+    if (vi !== undefined) map.set(h.el, score.notes[vi]?.hand);
   }
-  out.sort((a, b) => a.time - b.time || a.midi - b.midi);
-  return out;
+  return map;
+}
+
+// Re-derive the FULL falling-notes array from the model after a duration edit. Thin DOM-guard over
+// the pure deriveVisNotesFromModel (edit-model.ts), which owns the logic + its rationale: midi/time/
+// duration come fresh from the handles, each note's HAND is restored by its <note> ELEMENT from the
+// pre-edit `elementToHand` snapshot (see captureElementToHand), and a cross-barline tie continuation
+// folds into its start's held VisNote. Element-keyed hand survives both the tie's id shift AND a
+// collapsed single staff whose clef/hand changes mid-piece (issue #87).
+function rederiveVisNotesFromModel(elementToHand: Map<Element, VisNote["hand"]>): VisNote[] {
+  if (!scoreModel || !score) return score ? score.notes.slice() : [];
+  return deriveVisNotesFromModel(scoreModel.handles, elementToHand);
 }
 
 // Step the shared-selected note one notch SHORTER or LONGER along the value ladder (Smart Edit P3
@@ -1315,9 +1361,10 @@ function changeDurationEdit(direction: "shorter" | "longer"): void {
   const handleId = selectedHandle;
   const handle = scoreModel.handles[handleId];
   if (!handle) return;
-  // Capture the pre-edit handle->VisNote map so the re-derive can carry each note's hand.
-  const handToVisBefore = handleToVisIndex;
   const fromValue = durationValueName(handle.durationDivs, handle.divisions);
+  // Snapshot per-note hand by element BEFORE the model mutates (the edit reindexes handles, so this
+  // must be captured while handleToVisIndex + score.notes + ids still line up). See rederive below.
+  const elementToHand = captureElementToHand();
 
   // Run the model edit DIRECTLY (not through the stack) so a NO-OP outcome (ladder end / no room)
   // does not push a command and therefore cannot wipe the redo branch. Only a real edit is recorded,
@@ -1341,8 +1388,11 @@ function changeDurationEdit(direction: "shorter" | "longer"): void {
   // on the same handle, announce the value change (folding a dotted snap in), and pulse the note.
   const cmd: ChangeDurationCommand = { kind: "changeDuration", handleId, direction, record: rec };
   commandStack.pushApplied(cmd);
-  const notes = rederiveVisNotesFromModel(handToVisBefore);
-  selectedHandle = handleId;
+  const notes = rederiveVisNotesFromModel(elementToHand);
+  // The selection stays on the edited note. A duration STEP/DOT keeps the handle id (no pitched note
+  // is added before it). A CROSS-BARLINE TIE inserts a continuation AFTER the start, so the start's
+  // id is also unchanged; re-find by element defensively so selection is robust to any id shift.
+  selectedHandle = scoreModel.handles.find((h) => h.el === handle.el)?.id ?? handleId;
   const announce = durationAnnounce(rec, fromValue);
   finishEdit(announce, notes);
   pulseSelection();
@@ -1359,8 +1409,9 @@ function dotSelectedNote(): void {
   const handleId = selectedHandle;
   const handle = scoreModel.handles[handleId];
   if (!handle) return;
-  const handToVisBefore = handleToVisIndex;
   const fromValue = durationValueName(handle.durationDivs, handle.divisions);
+  // Snapshot per-note hand by element BEFORE the model mutates (see captureElementToHand / rederive).
+  const elementToHand = captureElementToHand();
 
   // Run the model edit DIRECTLY (not through the stack) so a NO-OP (no room) does not push a command
   // and wipe the redo branch; only a real edit is recorded, via pushApplied (the model is mutated).
@@ -1379,8 +1430,10 @@ function dotSelectedNote(): void {
     record: rec,
   };
   commandStack.pushApplied(cmd);
-  const notes = rederiveVisNotesFromModel(handToVisBefore);
-  selectedHandle = handleId;
+  const notes = rederiveVisNotesFromModel(elementToHand);
+  // Keep the selection on the edited note (re-find by element so a tie's inserted continuation, which
+  // re-indexes, cannot misplace it; the start's id is in fact stable).
+  selectedHandle = scoreModel.handles.find((h) => h.el === handle.el)?.id ?? handleId;
   // Same announce builder as the steppers: an add reads "D5 quarter to dotted quarter", a remove
   // "D5 dotted quarter to quarter", a non-plain snap folds in ("Double dotted half to dotted half").
   const announce = durationAnnounce(rec, fromValue);
@@ -1388,15 +1441,20 @@ function dotSelectedNote(): void {
   pulseSelection();
 }
 
-// The polite-region announce for a committed duration edit (Designer P3-6), value-named in the
-// current Names mode for the pitch token. Step: "D5 quarter to half"; clamp: "D5 lengthened to fill
-// the bar"; a dotted arrival folds into the from->to ("Dotted quarter to quarter"). `fromValue` is
-// the pre-edit value name (used for the dotted-arrival phrasing).
+// The polite-region announce for a committed duration edit (Designer P3-6 / TIE-E), value-named in
+// the current Names mode for the pitch token. Step: "D5 quarter to half"; clamp: "D5 lengthened to
+// fill the bar"; CROSS-BARLINE TIE create: "D5 lengthened across the bar to half" (distinct from the
+// in-bar clamp so the user hears it CROSSED); tie remove: "D5 half to quarter, tie removed"; a dotted
+// arrival folds into the from->to ("Dotted quarter to quarter"). `fromValue` is the pre-edit value.
 function durationAnnounce(
   rec: { outcome: string; fromName: string; toName: string; dottedSnap: boolean },
   fromValue: string,
 ): string {
   const pitch = selectedNoteLabel();
+  // A lengthen/dot that grew the note PAST the barline with a tie: name the resulting SOUNDING value.
+  if (rec.outcome === "tied") return `${pitch} lengthened across the bar to ${rec.toName}`;
+  // A shorten that REMOVED a cross-barline tie: from the sounding value down, plus that the tie went.
+  if (rec.outcome === "untied") return `${pitch} ${rec.fromName} to ${rec.toName}, tie removed`;
   if (rec.outcome === "clamped") return `${pitch} lengthened to fill the bar`;
   // A dotted/odd arrival snapped to plain: phrase it from the arrival value ("Dotted quarter to
   // quarter"), capitalized as it leads the sentence.
@@ -1695,9 +1753,15 @@ function restIndexAtOnsetStaff(cmd: AddNoteCommand): number | null {
 // pitched-note handle ids stable, so we re-derive the falling notes from the model, re-select the
 // same handle, announce the reversal/redo, and pulse the changed note. The announce uses the
 // command's recorded value + direction (Designer P3-6: "Undid lengthen to half" / mirror for redo).
-function undoOrRedoDuration(cmd: ChangeDurationCommand, mode: "undo" | "redo"): void {
+function undoOrRedoDuration(
+  cmd: ChangeDurationCommand,
+  mode: "undo" | "redo",
+  elementToHand: Map<Element, VisNote["hand"]>,
+): void {
   if (!scoreModel) return;
-  const notes = rederiveVisNotesFromModel(handleToVisIndex);
+  const notes = rederiveVisNotesFromModel(elementToHand);
+  // The edited note keeps its handle id across a duration edit (a cross-barline tie inserts the
+  // continuation AFTER the start, so the start id is stable too), so re-select by the recorded id.
   selectedHandle = cmd.handleId;
   // A dot edit reuses the stepper phrasing via its recorded verb (add = lengthen, remove = shorten),
   // so undo reads "Undid lengthen to dotted quarter" / "Undid shorten to quarter".

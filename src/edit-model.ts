@@ -26,7 +26,10 @@
 // after each edit (reusing the proven keying in verovio-view.ts), so selection follows a note
 // across re-renders even though its MIDI changed.
 
-import { FIRST_MIDI, LAST_MIDI, type NoteLetter, type NoteSpelling } from "./piano";
+import { FIRST_MIDI, LAST_MIDI, type Hand, type NoteLetter, type NoteSpelling } from "./piano";
+// Type-only: the falling-note shape the model re-derives into. Erased at build time (no runtime
+// edge to the canvas-heavy visualizer module), so importing it here is free.
+import type { VisNote } from "./visualizer";
 
 // Re-export the 88-key clamp bounds so callers that key on the model's range (e.g. the edit
 // orchestrator's boundary announce) have one import site alongside pitchInRange / the stepping.
@@ -284,13 +287,29 @@ export interface AddRecord {
 // bar exactly (durations, onsets, rests, order), then re-indexes. The measure ELEMENT itself is
 // never replaced (only its children), so this reference survives undo/redo. Model-internal (live
 // DOM refs). `outcome`/`from`/`to`/`dottedSnap` describe the edit for the orchestrator's announce.
+//
+// CROSS-BARLINE TIES (TIE-A..F) widen this to TWO measures: a tie-creating lengthen/dot fills the
+// current bar AND adds a tied continuation to the NEXT bar (and a shorten that removes a tie deletes
+// that continuation + leaves a rest), so the record snapshots BOTH affected measures. `measureEl` /
+// `childrenBefore` remain the PRIMARY (edited) bar (every existing edit + every existing test reads
+// them, and `childrenBefore.length === 0` is still the no-op signal); `extraMeasures` carries any
+// OTHER bar a tie edit mutated (the next bar), each as { el (stable, never replaced), childrenBefore
+// }. restoreDuration restores the primary then every extra, so it inverts a two-bar tie edit exactly.
 export interface ChangeDurationRecord {
   measureEl: Element; // the <measure> whose children were mutated (stable node, never replaced)
   childrenBefore: Node[]; // deep clones of measureEl's children at edit time, for invert
-  outcome: "stepped" | "clamped" | "noRoom" | "atEnd";
+  // Additional measures this edit mutated (cross-barline tie: the NEXT bar). Empty for an in-bar
+  // edit. Each element's `el` is a stable <measure> node (children replaced in place, never the node)
+  // so re-index/handles survive undo/redo; `childrenBefore` is its deep-cloned children at edit time.
+  extraMeasures?: Array<{ el: Element; childrenBefore: Node[] }>;
+  // "tied" is a lengthen/dot that CROSSED the barline (the note fills its bar + a tied continuation in
+  // the next bar). "untied" is a shorten that REMOVED a tie (deleted the continuation, left a rest).
+  // Both are normal, recorded edits; the orchestrator announces the crossing / removal distinctly.
+  outcome: "stepped" | "clamped" | "noRoom" | "atEnd" | "tied" | "untied";
   // The value NAMES for the announce (current Names mode is applied by the orchestrator's pitch
   // label, but the value words come from here). `fromName` is the pre-edit value (possibly dotted);
-  // `toName` is the new value ("" when clamped to a fill duration that has no plain ladder name).
+  // `toName` is the new value ("" when clamped to a fill duration that has no plain ladder name). For
+  // a "tied" outcome `toName` is the SOUNDING (summed) value the note now holds across the barline.
   fromName: string;
   toName: string;
   // A dotted/odd arrival was snapped to the nearest plain rung as part of this edit (folds into the
@@ -780,8 +799,23 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
       const voice = num(child(noteEl, "voice"), 1);
       const following = followingVoiceEvents(measureEl, noteEl, voice);
       const room = growRoomDivs(measureEl, noteEl, divisions);
-      // A dot NEVER clamps: if the full added half does not fit before the barline, REFUSE (noRoom).
+      // A dot that OVERFLOWS the bar AUTO-TIES the remainder into the next bar (DOT-B / TIE-A), filling
+      // the bar with the dotted value and tying its overflow across the barline. If a tie is not
+      // possible (last bar, occupied downbeat, or a following note blocks the barline) the dot REFUSES
+      // (noRoom) - it never CLAMPS to a non-dotted fill, keeping the dot's value exact (DOT-4).
       if (wanted > room + 1e-9) {
+        const tieRec = tryCrossBarlineTie(
+          chordGroup,
+          noteEl,
+          measureEl,
+          divisions,
+          oldDivs,
+          targetDivs,
+          following,
+          room,
+          { dotted: true, fromName, dottedSnap, direction: "dot" },
+        );
+        if (tieRec) return tieRec;
         return {
           measureEl,
           childrenBefore: [],
@@ -864,6 +898,172 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
       dottedSnap: dots >= 2,
       direction: "dot",
       dotVerb: "shorten", // removing/normalizing a dot shrinks the note
+    };
+  }
+
+  // CROSS-BARLINE TIE (TIE-A..C): the load-bearing tie emitter, shared by the lengthen overflow and
+  // the dot-ADD overflow so both auto-tie identically. Returns a ChangeDurationRecord that snapshots
+  // BOTH bars (so undo inverts both, TIE-D), or null when NO tie is possible (last bar, the next bar's
+  // downbeat in this voice is occupied by a note, or the note cannot reach the barline because a
+  // following same-voice note blocks it) - the caller then clamps/refuses in the current bar.
+  //
+  // On success: the start note (every chord member) fills its bar to the barline (absorbing all in-bar
+  // rest room) and gets <tie type="start"/> + <tied type="start"/>; a CONTINUATION note of the
+  // remainder (same pitch, no new accidental, <tie type="stop"/> + <tied type="stop"/>) is created at
+  // the next bar's downbeat, consuming that bar's leading rest. The continuation is flagged (a stop
+  // tie with no start) so isTieContinuation folds it into the start note's ONE held VisNote
+  // (mergeTiedNotes) - one attack, summed duration. TIE-B caps it at ONE barline: a remainder longer
+  // than the next bar clamps the continuation to fill the next bar (no third segment).
+  //
+  // `chordGroup` ties EACH member to its OWN continuation (a chord crosses the barline as a tied
+  // chord), keeping it consistent with the in-bar chord rule (one shared duration, every member moves
+  // together). `room` is the in-bar grow room (rest + slack) already computed by the caller.
+  function tryCrossBarlineTie(
+    chordGroup: Element[],
+    noteEl: Element,
+    measureEl: Element,
+    divisions: number,
+    oldDivs: number,
+    targetDivs: number,
+    following: Element[],
+    room: number,
+    opts: {
+      dotted: boolean; // keep the start fill's <dot> (the dot-ADD path); a lengthen fill computes it
+      fromName: string;
+      dottedSnap: boolean;
+      direction: "shorter" | "longer" | "dot";
+    },
+  ): ChangeDurationRecord | null {
+    // The note can reach the barline only if NO following same-voice NOTE blocks it (a tie must be
+    // contiguous to the barline; an intervening note makes the start non-adjacent to the next bar).
+    // The edited note's OWN chord members are not blockers (they are parallel at the same onset), so
+    // exclude the chordGroup before testing for a following note.
+    const blockers = following.filter(
+      (e) => child(e, "rest") === null && !chordGroup.includes(e),
+    );
+    if (blockers.length > 0) return null;
+    const nextMeasure = nextMeasureOf(measureEl);
+    if (!nextMeasure) return null; // last bar of the part: clamp at the final barline (TIE-A step 3)
+    const voice = num(child(noteEl, "voice"), 1);
+    const contRoom = tieContinuationRoomDivs(nextMeasure, voice, divisions);
+    if (contRoom <= 0) return null; // the next bar's downbeat is occupied by a note: clamp, no overwrite
+
+    // The start note fills its bar to the barline by absorbing ALL in-bar rest room; the remainder is
+    // what overflows. With no following note, oldDivs + room reaches the barline exactly.
+    const barFillDivs = oldDivs + room;
+    const remainder = targetDivs - barFillDivs;
+    if (remainder <= 1e-9) return null; // defensive: it actually fit in-bar (caller handles it)
+    const contDivs = Math.min(remainder, contRoom); // TIE-B: cap the continuation to one barline
+
+    // Snapshot BOTH bars BEFORE mutating, for an exact two-bar invert (TIE-D / the widened record).
+    const childrenBefore = Array.from(measureEl.children).map((c) => c.cloneNode(true));
+    const nextBefore = Array.from(nextMeasure.children).map((c) => c.cloneNode(true));
+
+    // Fill the current bar: consume every following rest (the note reaches the barline), then set each
+    // chord member to barFillDivs + a tie START. keepDots so a dotted fill value (e.g. dotted half)
+    // engraves validly; the dot-ADD path always keeps dots, a lengthen fill keeps whatever the value
+    // needs. The members share one duration, and each gets its OWN tie start (a tied chord).
+    for (const e of following) {
+      if (child(e, "rest") === null) continue;
+      e.parentNode?.removeChild(e);
+    }
+    for (const m of chordGroup) {
+      setNoteDuration(m, barFillDivs, divisions, { keepDots: true });
+      markTieStart(m);
+    }
+
+    // Build the next bar: a tied continuation per chord member at the downbeat, then shrink/remove the
+    // leading rest by contDivs. Insert the continuations at the position of the first leading rest (so
+    // they land on the downbeat, in document order matching the start chord), then trim the rest.
+    const leadingRests = voiceLeadingRestEls(nextMeasure, voice);
+    const firstRest = leadingRests[0];
+    const insertBeforeNode: Node | null = firstRest;
+    for (const m of chordGroup) {
+      const cont = makeTieContinuation(m, contDivs, divisions);
+      // Chord MEMBERS carry a <chord/> so the continuation chord stacks at one onset. The onset note
+      // (first member) does not. chordGroup[0] is the onset; the rest are members.
+      if (m !== chordGroup[0]) {
+        const chordEl = cont.ownerDocument.createElement("chord");
+        cont.insertBefore(chordEl, cont.firstChild);
+      }
+      firstRest?.parentNode?.insertBefore(cont, insertBeforeNode);
+    }
+    // Consume contDivs from the leading rest run (shrink the first, remove fully-consumed ones).
+    let toTrim = contDivs;
+    for (const r of leadingRests) {
+      if (toTrim <= 1e-9) break;
+      const restDur = num(child(r, "duration"), 0);
+      if (restDur <= toTrim + 1e-9) {
+        r.parentNode?.removeChild(r);
+        toTrim -= restDur;
+      } else {
+        setNoteDuration(r, restDur - toTrim, divisions, { keepDots: false });
+        toTrim = 0;
+      }
+    }
+
+    reindexHandles();
+    // The SOUNDING (summed) value the held note now spans across the barline (TIE-E readout/announce).
+    const soundingDivs = barFillDivs + contDivs;
+    return {
+      measureEl,
+      childrenBefore,
+      extraMeasures: [{ el: nextMeasure, childrenBefore: nextBefore }],
+      outcome: "tied",
+      fromName: opts.fromName,
+      toName: durationValueName(soundingDivs, divisions),
+      dottedSnap: opts.dottedSnap,
+      direction: opts.direction,
+      dotVerb: opts.dotted ? "lengthen" : undefined,
+    };
+  }
+
+  // CROSS-BARLINE TIE REVERSAL (TIE-D): remove the tie a tie-START note carries. Deletes the
+  // continuation chord at the next bar's downbeat, replaces it with a rest of its duration (the next
+  // bar stays full), strips the <tie>/<tied> from every member of the start chord, and returns the
+  // start chord to a plain note (its bar-fill value stays; the SOUNDING value drops by the continuation
+  // - the shorten step). Snapshots BOTH bars for an exact two-bar undo. Returns null if the
+  // continuation cannot be located (defensive: then the caller shortens the bar-fill note normally).
+  function removeCrossBarlineTie(
+    chordGroup: Element[],
+    noteEl: Element,
+    measureEl: Element,
+    divisions: number,
+    oldDivs: number,
+  ): ChangeDurationRecord | null {
+    const nextMeasure = nextMeasureOf(measureEl);
+    if (!nextMeasure) return null;
+    const voice = num(child(noteEl, "voice"), 1);
+    const conts = leadingTieStopNotes(nextMeasure, voice);
+    if (conts.length === 0) return null; // no continuation found: not a tie we can reverse here
+    const contDivs = num(child(conts[0], "duration"), 0);
+    const soundingDivs = oldDivs + contDivs; // the held value BEFORE removing the tie (for the announce)
+
+    // Snapshot BOTH bars before mutating (two-bar undo).
+    const childrenBefore = Array.from(measureEl.children).map((c) => c.cloneNode(true));
+    const nextBefore = Array.from(nextMeasure.children).map((c) => c.cloneNode(true));
+
+    // Strip the tie markup from the start chord (it is now standalone at its bar-fill value).
+    for (const m of chordGroup) stripTies(m);
+
+    // Replace the continuation chord with a single rest of its duration at the downbeat (keeps the next
+    // bar full). The continuation members all share contDivs; remove them, insert one rest in their place.
+    const firstCont = conts[0];
+    const restEl = makeRestFrom(firstCont);
+    setNoteDuration(restEl, contDivs, divisions, { keepDots: false });
+    firstCont.parentNode?.insertBefore(restEl, firstCont);
+    for (const c of conts) c.parentNode?.removeChild(c);
+
+    reindexHandles();
+    return {
+      measureEl,
+      childrenBefore,
+      extraMeasures: [{ el: nextMeasure, childrenBefore: nextBefore }],
+      outcome: "untied",
+      fromName: durationValueName(soundingDivs, divisions),
+      toName: durationValueName(oldDivs, divisions),
+      dottedSnap: false,
+      direction: "shorter",
     };
   }
 
@@ -1056,6 +1256,20 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
         );
       }
 
+      // CROSS-BARLINE TIE REVERSAL (TIE-D): shortening (or removing a dot from) a note that is a TIE
+      // START removes the tie. The continuation in the next bar is deleted and replaced by a rest of
+      // its duration (the next bar stays full), the tie markup is stripped from the now-standalone
+      // note, and the note returns to its in-bar (bar-fill) value. That reclaim IS the shorten step:
+      // the SOUNDING value drops by exactly the continuation (e.g. a quarter-tied-to-quarter half
+      // becomes a plain quarter). Subsequent shortens then act on the standalone note as normal. Only
+      // the START is selectable (the continuation has no VisNote), so this is the only shorten a tied
+      // note sees. A dot REMOVE on a tied note routes through toggleDotEdit above (a tied note is on a
+      // bar-fill value, typically not dotted), so this reversal is the "shorter" path.
+      if (direction === "shorter" && isCrossBarlineTieStart(noteEl)) {
+        const rec = removeCrossBarlineTie(chordGroup, noteEl, measureEl, divisions, oldDivs);
+        if (rec) return rec;
+      }
+
       // Is the note already on a plain ladder rung? If not (a dotted/odd arrival), SNAP to the
       // nearest rung first; that snap is folded into this edit (Designer P3-3).
       let curIndex = ladderIndexForDuration(oldDivs, divisions);
@@ -1109,8 +1323,28 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
         const room = restRoom + slack;
         const wanted = targetDivs - oldDivs; // divisions the next rung would add
         const grow = Math.min(wanted, room);
+        // CROSS-BARLINE TIE (TIE-A): the next rung overflows the bar. Before clamping, try to fill the
+        // bar to the barline and TIE the remainder into the next bar. A tie is possible only when the
+        // note can REACH the barline (no following same-voice NOTE blocks it; only rests/slack remain)
+        // and the next bar has downbeat room in this voice. The summed sounding value is targetDivs
+        // (or less when the one-barline cap clamps the continuation, TIE-B).
+        if (wanted > grow + 1e-9) {
+          const tieRec = tryCrossBarlineTie(
+            chordGroup,
+            noteEl,
+            measureEl,
+            divisions,
+            oldDivs,
+            targetDivs,
+            following,
+            room,
+            { dotted: false, fromName, dottedSnap, direction },
+          );
+          if (tieRec) return tieRec;
+        }
         if (grow <= 0) {
-          // No rest room to grow into: a no-op at the bar boundary (announce "No room ...").
+          // No rest room to grow into AND no tie possible (last bar, or the downbeat is occupied): a
+          // no-op at the bar boundary (announce "No room ...").
           return {
             measureEl,
             childrenBefore: [],
@@ -1199,15 +1433,17 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
     restoreDuration(record: ChangeDurationRecord): void {
       // A no-op edit (ladder-end / no-room) snapshotted nothing: invert is also a no-op.
       if (record.childrenBefore.length === 0) return;
-      // Restore the bar exactly: drop the live children, re-append the deep-cloned snapshot. The
-      // measure element is the same node, so this reverses every surgical change (the note's
-      // duration/type/dots, an inserted freed rest, shrunk/removed trailing rests) in one move.
-      while (record.measureEl.firstChild) {
-        record.measureEl.removeChild(record.measureEl.firstChild);
-      }
-      for (const c of record.childrenBefore) {
-        record.measureEl.appendChild(c.cloneNode(true));
-      }
+      // Restore each affected bar exactly: drop the live children, re-append the deep-cloned snapshot.
+      // The measure element is the same node, so this reverses every surgical change (the note's
+      // duration/type/dots, an inserted freed rest, shrunk/removed trailing rests, and on a tie edit
+      // the next bar's continuation note + rest) in one move. The PRIMARY (edited) bar first, then any
+      // EXTRA bar a tie edit mutated (the next bar), so a two-bar tie edit inverts completely.
+      const restoreBar = (el: Element, children: Node[]): void => {
+        while (el.firstChild) el.removeChild(el.firstChild);
+        for (const c of children) el.appendChild(c.cloneNode(true));
+      };
+      restoreBar(record.measureEl, record.childrenBefore);
+      for (const extra of record.extraMeasures ?? []) restoreBar(extra.el, extra.childrenBefore);
       reindexHandles();
     },
     dotState(id: number): { dotted: boolean; canToggle: boolean } {
@@ -1230,7 +1466,18 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
         : DURATION_LADDER[nearestLadderIndex(oldDivs, divisions)].quarters * divisions;
       const wanted = plainDivs + plainDivs / 2 - oldDivs;
       const room = growRoomDivs(measureEl, noteEl, divisions);
-      return { dotted: false, canToggle: wanted <= room + 1e-9 };
+      if (wanted <= room + 1e-9) return { dotted: false, canToggle: true };
+      // The half does not fit in-bar, but with CROSS-BARLINE TIES on a dot can AUTO-TIE the overflow
+      // across the barline (DOT-5: with ties the dot is never disabled for room) - PROVIDED a tie is
+      // actually makeable (a next bar exists, its downbeat in this voice has room, and no following
+      // note blocks the barline). Probe the same conditions tryCrossBarlineTie checks, without mutating.
+      const voice = num(child(noteEl, "voice"), 1);
+      const following = followingVoiceEvents(measureEl, noteEl, voice);
+      const blocked = following.some((e) => child(e, "rest") === null);
+      const next = nextMeasureOf(measureEl);
+      const canTie =
+        !blocked && next !== null && tieContinuationRoomDivs(next, voice, divisions) > 0;
+      return { dotted: false, canToggle: canTie };
     },
     serialize(): string {
       return serializer.serializeToString(doc);
@@ -1329,6 +1576,103 @@ function growRoomDivs(measureEl: Element, noteEl: Element, divisions: number): n
     measureCapacityDivs(measureEl, divisions) - voiceFilledDivs(measureEl, voice),
   );
   return restRoom + slack;
+}
+
+// The <measure> immediately AFTER `measureEl` in the same <part> (document order), or null at the
+// last bar. A cross-barline tie places its continuation at the start of this bar (TIE-A step 2).
+function nextMeasureOf(measureEl: Element): Element | null {
+  const part = ancestorNamed(measureEl, "part");
+  if (!part) return null;
+  const measures = Array.from(part.getElementsByTagName("measure"));
+  const i = measures.indexOf(measureEl);
+  return i >= 0 && i + 1 < measures.length ? measures[i + 1] : null;
+}
+
+// The LEADING consecutive rests of `voice` at the START of `measureEl`'s run for that voice, in
+// document order: the rest room available at the bar's downbeat BEFORE the first note. Walking from
+// the bar start, we skip <attributes>; cross a <backup>/<forward> only while we have not yet entered
+// this voice's leading run (so we can reach a voice that begins after a backup); once we are in the
+// run, a same-voice NOTE (non-rest) STOPS it (the downbeat slot is then occupied past that point) and
+// a boundary ends it. This is the no-overwrite room a tied continuation may fill at the downbeat: an
+// empty list means the downbeat is a note (occupied) and the tie must clamp in the current bar.
+function voiceLeadingRestEls(measureEl: Element, voice: number): Element[] {
+  const rests: Element[] = [];
+  let entered = false; // have we reached an event of this voice yet?
+  for (const node of Array.from(measureEl.children)) {
+    const tag = node.tagName.toLowerCase();
+    if (tag === "attributes" || tag === "direction" || tag === "barline" || tag === "print") continue;
+    if (tag === "backup" || tag === "forward") {
+      if (entered) break; // a boundary after our run ends the leading rests
+      continue; // before our run: step over to reach this voice's events
+    }
+    if (tag !== "note") continue;
+    if (num(child(node, "voice"), 1) !== voice) {
+      if (entered) break; // another voice interleaved after our run: stop
+      continue; // a different voice before our run: skip it
+    }
+    // An event of our voice.
+    if (child(node, "chord") !== null) continue; // chord member: parallel, not a leading slot
+    entered = true;
+    if (child(node, "rest") === null) break; // the first NOTE: the leading rest run ends here
+    rests.push(node);
+  }
+  return rests;
+}
+
+// The room (divisions) a tied continuation may occupy at the START of `nextMeasure` in `voice`:
+// the leading-rest run's summed duration, CAPPED at the bar capacity (TIE-B: one barline only, so a
+// continuation never spans past this bar). Zero when the downbeat is a note (occupied) - the caller
+// then clamps in the current bar instead of overwriting (the shipped no-overwrite rule, TIE-F).
+function tieContinuationRoomDivs(
+  nextMeasure: Element,
+  voice: number,
+  divisions: number,
+): number {
+  const leadingRest = voiceLeadingRestEls(nextMeasure, voice).reduce(
+    (sum, e) => sum + num(child(e, "duration"), 0),
+    0,
+  );
+  return Math.min(leadingRest, measureCapacityDivs(nextMeasure, divisions));
+}
+
+// Whether `noteEl` is the START of a cross-barline tie this editor created: it carries a
+// <tie type="start"/> and is NOT itself a continuation (no <tie type="stop"/>). Used by the shorten
+// path to decide whether a press should REMOVE a tie (TIE-D) versus shorten a plain note. A chord's
+// onset note carries the start; testing the onset note (chordGroup[0]) is sufficient.
+function isCrossBarlineTieStart(noteEl: Element): boolean {
+  const ties = Array.from(noteEl.getElementsByTagName("tie"));
+  const hasStart = ties.some((t) => t.getAttribute("type") === "start");
+  const hasStop = ties.some((t) => t.getAttribute("type") === "stop");
+  return hasStart && !hasStop;
+}
+
+// The CONTINUATION notes at the downbeat of `nextMeasure` in `voice`: the leading same-voice notes
+// carrying a <tie type="stop"/> (a pure stop, the cross-barline continuation we created), including
+// chord members. Walks from the bar start, skipping non-note prologue and stepping over earlier
+// voices to reach this voice's run; collects the contiguous leading stop-tie notes (onset + its chord
+// members) and stops at the first non-stop note. Empty when the downbeat is not a tie stop.
+function leadingTieStopNotes(nextMeasure: Element, voice: number): Element[] {
+  const out: Element[] = [];
+  let entered = false;
+  for (const node of Array.from(nextMeasure.children)) {
+    const tag = node.tagName.toLowerCase();
+    if (tag === "attributes" || tag === "direction" || tag === "barline" || tag === "print") continue;
+    if (tag === "backup" || tag === "forward") {
+      if (entered) break;
+      continue;
+    }
+    if (tag !== "note") continue;
+    if (num(child(node, "voice"), 1) !== voice) {
+      if (entered) break;
+      continue;
+    }
+    const ties = Array.from(node.getElementsByTagName("tie"));
+    const isStop = ties.some((t) => t.getAttribute("type") === "stop");
+    if (!isStop) break; // the first non-continuation note ends the leading continuation run
+    entered = true;
+    out.push(node);
+  }
+  return out;
 }
 
 // The bar's capacity in divisions from its <time> signature (beats * divisions * 4 / beat-type), or
@@ -1487,6 +1831,102 @@ function nextElementNamed(el: Element, tag: string): Element | null {
   return null;
 }
 
+// ----- CROSS-BARLINE TIE plumbing (TIE-C: emit start/stop <tie> + <tied> notations correctly) -----
+//
+// MusicXML spells a tie with TWO elements per joined note: <tie type="..."/> (the SOUNDED tie, what
+// score.ts/the model read to fold playback) and a <notations><tied type="..."/></notations> (the
+// drawn slur, what OSMD/Verovio render as the curve). Both are needed: the model's isTieContinuation
+// keys on <tie>, and the engravers + OSMD's NoteTie key on <tied>. We always emit the matched pair.
+
+// Add a <tie type={type}/> to a note in valid DTD order: <tie> follows <duration> and precedes
+// <voice>/<type>. Idempotent for a given type (never duplicates the same start/stop on a note).
+function addTieElement(noteEl: Element, type: "start" | "stop"): void {
+  const ties = Array.from(noteEl.getElementsByTagName("tie"));
+  if (ties.some((t) => t.getAttribute("type") === type)) return;
+  const doc = noteEl.ownerDocument;
+  const tie = doc.createElement("tie");
+  tie.setAttribute("type", type);
+  // <tie> sits after <duration> (and after any earlier <tie>), before <voice>/<type>/<notations>.
+  const anchor = child(noteEl, "voice") ?? child(noteEl, "type") ?? null;
+  noteEl.insertBefore(tie, anchor);
+}
+
+// Add a <tied type={type}/> inside the note's <notations> (creating <notations> if absent), in valid
+// DTD order: <notations> follows <accidental>/<dot>/<type> and precedes <beam>/<lyric>. The drawn tie.
+function addTiedNotation(noteEl: Element, type: "start" | "stop"): void {
+  const doc = noteEl.ownerDocument;
+  let notations = child(noteEl, "notations");
+  if (!notations) {
+    notations = doc.createElement("notations");
+    // <notations> comes after <accidental>/<dot>/<type>/<stem> and before <beam>/<lyric>.
+    const AFTER_NOTATIONS = new Set(["beam", "lyric"]);
+    let anchor: Node | null = null;
+    for (const c of Array.from(noteEl.children)) {
+      if (AFTER_NOTATIONS.has(c.tagName.toLowerCase())) {
+        anchor = c;
+        break;
+      }
+    }
+    noteEl.insertBefore(notations, anchor);
+  }
+  const existing = Array.from(notations.getElementsByTagName("tied"));
+  if (existing.some((t) => t.getAttribute("type") === type)) return;
+  const tied = doc.createElement("tied");
+  tied.setAttribute("type", type);
+  notations.appendChild(tied);
+}
+
+// Mark `noteEl` as the START of a tie: emit <tie type="start"/> + <notations><tied type="start"/>.
+function markTieStart(noteEl: Element): void {
+  addTieElement(noteEl, "start");
+  addTiedNotation(noteEl, "start");
+}
+
+// Strip EVERY <tie>/<tied> from a note (and an emptied <notations>), returning it to a standalone
+// note. Used when a shorten REMOVES a cross-barline tie (TIE-D): the now-in-bar note loses its tie.
+function stripTies(noteEl: Element): void {
+  for (const tie of Array.from(noteEl.getElementsByTagName("tie"))) {
+    tie.parentNode?.removeChild(tie);
+  }
+  const notations = child(noteEl, "notations");
+  if (notations) {
+    for (const tied of Array.from(notations.getElementsByTagName("tied"))) {
+      tied.parentNode?.removeChild(tied);
+    }
+    // Drop a now-empty <notations> so the note serializes clean (no stray container).
+    if (notations.children.length === 0) notations.parentNode?.removeChild(notations);
+  }
+}
+
+// Build the tied CONTINUATION <note> for a cross-barline tie (TIE-C): same pitch as the start note
+// `fromEl` (cloned, so the spelling/octave/alter match exactly), NO new <accidental> (a tie does not
+// re-state the accidental), the continuation `<duration>`+`<type>`(+`<dot>`), and the stop tie
+// (<tie type="stop"/> + <tied type="stop"/>). It carries the start note's <voice>/<staff> so it lands
+// in the same voice/staff and the tie connects. The continuation is what isTieContinuation folds into
+// the start's held VisNote (mergeTiedNotes), so it must claim no VisNote: a <tie type="stop"> WITHOUT
+// a start is exactly that flag. divisions is the next bar's (== the current bar's, load-bearing 4).
+function makeTieContinuation(fromEl: Element, durDivs: number, divisions: number): Element {
+  const doc = fromEl.ownerDocument;
+  const note = doc.createElement("note");
+  // Same pitch (clone keeps step/alter/octave verbatim; no accidental restated).
+  const pitchEl = child(fromEl, "pitch");
+  if (pitchEl) note.appendChild(pitchEl.cloneNode(true));
+  // <duration> then <tie type="stop"/> then <voice> then <type>(+<dot>) then <notations><tied stop>.
+  const durEl = doc.createElement("duration");
+  durEl.textContent = String(durDivs);
+  note.appendChild(durEl);
+  const voice = child(fromEl, "voice");
+  if (voice) note.appendChild(voice.cloneNode(true));
+  const staff = child(fromEl, "staff");
+  // setNoteDuration fills <type>(+dots) in valid order; do it before staff/notations are appended so
+  // the anchor logic sees a bare note, then append <staff> last (it sits late in the content model).
+  setNoteDuration(note, durDivs, divisions, { keepDots: true });
+  if (staff) note.appendChild(staff.cloneNode(true));
+  addTieElement(note, "stop");
+  addTiedNotation(note, "stop");
+  return note;
+}
+
 // Build a <rest> <note> from a pitched <note>, preserving the time-structural children so the rest
 // occupies the SAME slot (fixed-bar) and stays in the right voice/staff, and dropping the
 // pitch-bound children (<pitch>, <accidental>, <tie>, <beam>, <notations>, <stem>, ...). Children
@@ -1589,4 +2029,70 @@ export function buildHandleToVisIndex(
 // follows the edit (e.g. a diatonic move to F# shows "F#"/"Fa#"). Mirrors NoteSpelling.
 export function spellingFromPitch(p: ModelPitch): NoteSpelling {
   return { letter: p.step, alter: p.alter };
+}
+
+// Re-derive the FULL falling-notes array from the (possibly just-mutated) model after a duration
+// edit. The pure core of main.ts's rederiveVisNotesFromModel, extracted so the hand-preservation
+// invariant is unit-testable without the DOM glue. midi/time/duration come fresh from each handle.
+//
+// HAND (which the model does not carry) is looked up by each note's <note> ELEMENT in
+// `elementToHand`, a snapshot taken BEFORE the edit (h.el -> the hand score.ts tagged its VisNote).
+// Element identity is the right key for two reasons that defeat the simpler alternatives:
+//   - handle id is UNSTABLE across a CROSS-BARLINE TIE (inserting the continuation <note> reindexes
+//     every later handle), so the old id-keyed lookup broke past the insertion point.
+//   - <staff> is TOO COARSE: the issue-#87 collapsed-single-staff class (an OMR-flattened grand
+//     staff on ONE <staff> that switches treble->bass mid-piece) puts notes with DIFFERENT hands on
+//     the SAME staff (score.ts tags hand PER MEASURE from the clef in effect), so a per-staff rule
+//     collapses a whole bass section to the first note's hand after any edit.
+// h.el is stable across BOTH the onset ripple AND the continuation insert, so it preserves per-note
+// hand without reintroducing the id-shift bug.
+//
+// CROSS-BARLINE TIE folding (TIE-C): a tie continuation has NO VisNote of its own; its duration is
+// SUMMED into its tie-start's held VisNote (one attack, summed duration, single onset) - the same
+// fold mergeTiedNotes does on the initial extractScore path. The continuation is matched to the most
+// recent preceding non-continuation note of the SAME pitch (a tie joins same pitches and the
+// continuation follows its start in document order). Result in onset order.
+export function deriveVisNotesFromModel(
+  handles: readonly NoteHandle[],
+  elementToHand: Map<Element, Hand | undefined>,
+): VisNote[] {
+  // Fall back to the grand-staff convention only for an element with NO pre-edit hand (a new tie
+  // continuation that defensively became its own note, or a never-seen element), else undefined.
+  const hasStaff2 = handles.some((h) => num(child(h.el, "staff"), 1) === 2);
+  const handFor = (h: NoteHandle): Hand | undefined => {
+    if (elementToHand.has(h.el)) return elementToHand.get(h.el);
+    if (!hasStaff2) return undefined;
+    return num(child(h.el, "staff"), 1) === 2 ? "left" : "right";
+  };
+
+  const out: VisNote[] = [];
+  // The index in `out` of the last-seen tie START per pitch, so a continuation folds into it.
+  const lastStartIndexByMidi = new Map<number, number>();
+  // Process in document (handle) order so a continuation is seen AFTER its start.
+  for (const h of handles) {
+    if (h.isTieContinuation) {
+      const startIndex = lastStartIndexByMidi.get(h.midi);
+      if (startIndex !== undefined) {
+        // Fold: extend the held note by the continuation's duration (one attack, summed length). The
+        // continuation has no VisNote of its own, so it inherits the start's hand (already on out[i]).
+        out[startIndex] = { ...out[startIndex], duration: out[startIndex].duration + h.durationSec };
+        continue;
+      }
+      // Defensive: a continuation with no recorded start (malformed) becomes its own note rather than
+      // vanishing, matching mergeTiedNotes' never-drop fallback. handFor falls it back to the staff.
+    }
+    out.push({
+      midi: h.midi,
+      time: h.onsetSec,
+      duration: h.durationSec,
+      hand: handFor(h),
+      spelling: spellingFromPitch(h.pitch),
+    });
+    // A non-continuation note may be a tie START (it carries the held value); record it so a following
+    // same-pitch continuation folds into it. (A later same-pitch start overwrites, which is correct:
+    // the most recent start owns the next continuation.)
+    lastStartIndexByMidi.set(h.midi, out.length - 1);
+  }
+  out.sort((a, b) => a.time - b.time || a.midi - b.midi);
+  return out;
 }

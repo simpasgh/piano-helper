@@ -512,3 +512,134 @@ function round3(x: number): number {
 function uniqueSorted(xs: number[]): number[] {
   return [...new Set(xs)].sort((a, b) => a - b);
 }
+
+// ----- CROSS-BARLINE TIES through the REAL engine -----
+//
+// A tie-creating duration edit emits <tie>/<tied> start/stop pairs across two bars; Verovio must
+// engrave them WITHOUT a "unsupported note-type-value" warning (the continuation note carries a
+// <type>, same as every other note) and render BOTH the start notehead and the continuation notehead
+// joined by a tie. This is the in-engine proof of TIE-C's notation half (the playback fold is proven
+// against OSMD in score.test.ts). The reverie case proves a tie on a real OMR file keeps the engine
+// consistent (no warning, every note still typed).
+
+// A 4/4 two-bar fixture: bar 1 = dotted-half rest + a beat-4 quarter D5; bar 2 = a whole rest. The
+// canonical cross-barline tie (a half starting on beat 4 = quarter tied to quarter over the barline).
+const TIE_TWO_BAR = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><rest/><duration>12</duration><voice>1</voice><type>half</type><dot/></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+    </measure>
+    <measure number="2">
+      <note><rest/><duration>16</duration><voice>1</voice><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+describe("CROSS-BARLINE TIE: an editor-created tie engraves through real Verovio with no warning", () => {
+  let toolkit: VerovioToolkit;
+  beforeAll(async () => {
+    toolkit = await loadVerovioToolkit();
+  }, 60000);
+
+  it("renders a tie (two D5 noteheads + a tie/tied) with NO unsupported note-type-value warning", () => {
+    const model = parseScoreModel(TIE_TWO_BAR);
+    const rec = model.changeDuration(0, "longer"); // D5 quarter -> half: overflows beat 4, ties
+    expect(rec?.outcome).toBe("tied");
+    const xml = model.serialize();
+    // The serialized MusicXML carries the matched tie markup the spec requires (TIE-C).
+    expect(xml).toContain('<tie type="start"');
+    expect(xml).toContain('<tie type="stop"');
+    expect(xml).toContain('<tied type="start"');
+    expect(xml).toContain('<tied type="stop"');
+
+    // The falling notes the app would derive: ONE held D5 (the tie folds), so render with that note.
+    const tiedVis: VisNote[] = [{ midi: 74, time: 1.5, duration: 1.0, hand: "right" }];
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let render;
+    try {
+      render = renderMusicXml(toolkit, xml, tiedVis, 800);
+    } finally {
+      const allOutput = [...logSpy.mock.calls, ...warnSpy.mock.calls]
+        .flat()
+        .map((a) => String(a))
+        .join("\n");
+      logSpy.mockRestore();
+      warnSpy.mockRestore();
+      // The whole point: the continuation carries a <type>, so no blank/unsupported note-type warning.
+      expect(allOutput).not.toContain("note-type-value");
+    }
+
+    // Verovio lays out TWO D5 noteheads (the start in bar 1 + the continuation in bar 2)...
+    expect(render!.notes.filter((n) => n.midi === 74)).toHaveLength(2);
+    // ...and the rendered SVG contains a tie element (Verovio draws <tie> for the engraved curve).
+    expect(render!.svg).toMatch(/class="[^"]*\btie\b/);
+  });
+});
+
+describe("CROSS-BARLINE TIE: the ties refactor keeps the real reverie engine path consistent", () => {
+  let toolkit: VerovioToolkit;
+  beforeAll(async () => {
+    toolkit = await loadVerovioToolkit();
+  }, 60000);
+
+  it("reverie's dense texture produces NO spurious tie on a one-rung lengthen (conservative trigger)", () => {
+    // The tie trigger is conservative: it fires only when the note reaches the barline (no following
+    // same-voice note blocks it) AND the next bar's downbeat in this voice has room. Reverie is dense,
+    // so a single one-rung lengthen never ties (it clamps / no-ops in-bar). This guards that the tie
+    // path does not over-fire and silently restructure a real OMR score's bars.
+    const model = parseScoreModel(REVERIE_XML);
+    let ties = 0;
+    for (const h of model.handles) {
+      if (h.isTieContinuation || h.isChordMember) continue;
+      const probe = parseScoreModel(REVERIE_XML);
+      if (probe.changeDuration(h.id, "longer")?.outcome === "tied") ties++;
+    }
+    expect(ties).toBe(0); // no note ties on a single lengthen; the structure blocks every candidate
+    // And the unedited reverie has no tie markup of its own (precondition for the count above).
+    expect(REVERIE_XML.includes("<tie")).toBe(false);
+  });
+
+  it("a reverie SHORTEN still renders 185/185 with a <type> on every note and NO engine warning (refactor intact)", () => {
+    // The ties increment refactored rederiveVisNotesFromModel (hand-by-element + tie folding); this
+    // re-affirms the no-<type> contract still holds for the EXISTING reverie edit path through real
+    // Verovio after that refactor: 185/185 click map, every note typed, no note-type-value warning.
+    const model = parseScoreModel(REVERIE_XML);
+    expect(model.handles.length).toBe(185);
+    const eighth = model.handles.find(
+      (h) => h.durationDivs === 2 && !h.isTieContinuation && !h.isChordMember,
+    )!;
+    const rec = model.changeDuration(eighth.id, "shorter");
+    expect(rec?.outcome).toBe("stepped");
+
+    const vis = model.handles
+      .filter((h) => !h.isTieContinuation)
+      .map((h) => ({ midi: h.midi, time: h.onsetSec, duration: 0.5, hand: "right" as const }));
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let render;
+    try {
+      render = renderMusicXml(toolkit, model.serialize(), vis, 800);
+    } finally {
+      const allOutput = [...logSpy.mock.calls, ...warnSpy.mock.calls]
+        .flat()
+        .map((a) => String(a))
+        .join("\n");
+      logSpy.mockRestore();
+      warnSpy.mockRestore();
+      expect(allOutput).not.toContain("note-type-value");
+    }
+    expect(render!.idToVisIndex.size).toBe(render!.notes.length); // complete click map
+    const doc = new DOMParser().parseFromString(model.serialize(), "application/xml");
+    const pitched = Array.from(doc.getElementsByTagName("note")).filter(
+      (n) => n.getElementsByTagName("rest").length === 0,
+    );
+    for (const n of pitched) {
+      expect(n.getElementsByTagName("type").item(0)?.textContent ?? "").not.toBe("");
+    }
+  });
+});
