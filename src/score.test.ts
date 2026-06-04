@@ -27,6 +27,7 @@ beforeAll(() => {
   HTMLCanvasElement.prototype.getContext = () => null as unknown as null;
 });
 import { readClefDeclarations, readSpelling, mergeTiedNotes, type RawNote } from "./score";
+import { parseScoreModel } from "./edit-model";
 import {
   buildStaffClefMap,
   buildStaffClefTimeline,
@@ -308,5 +309,71 @@ describe("OSMD exposes tie data extractScore reads (issue #123)", () => {
     // Only the first segment is the chain start: the merge keeps one note, drops the rest.
     const isStart = notes.map((n) => n.NoteTie?.StartNote === n);
     expect(isStart).toEqual([true, false, false]);
+  });
+});
+
+// CROSS-BARLINE TIES (Smart Edit, TIE-C): the load-bearing playback claim. A tie the EDITOR emits
+// (via the model's auto-tie) must, when re-parsed by OSMD (the read-only/playback path), produce ONE
+// Tie object with the start segment as StartNote, exactly the #123 shape mergeTiedNotes folds into a
+// single sustained note. This closes the loop: emit the tie in MusicXML -> OSMD sees one held note ->
+// the falling notes + audio play ONE attack across the barline, not two. The render path is unchanged
+// (no new attack code); this proves the emitted markup drives the EXISTING merge.
+const FOUR_FOUR_BEAT4 = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1">
+<measure number="1">
+  <attributes><divisions>4</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><rest/><duration>12</duration><voice>1</voice><type>half</type><dot/></note>
+  <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+</measure>
+<measure number="2"><note><rest/><duration>16</duration><voice>1</voice><type>whole</type></note></measure>
+</part></score-partwise>`;
+
+describe("CROSS-BARLINE TIE (Smart Edit): an editor-emitted tie folds to ONE held note via OSMD", () => {
+  it("a lengthen-created tie re-parses as ONE OSMD Tie (start as StartNote), so mergeTiedNotes folds it", async () => {
+    // The editor lengthens a beat-4 quarter D5 into a half: it overflows and ties into the next bar.
+    const model = parseScoreModel(FOUR_FOUR_BEAT4);
+    const rec = model.changeDuration(0, "longer");
+    expect(rec?.outcome).toBe("tied");
+
+    // Re-parse the editor's serialized MusicXML with OSMD (the playback/read path) and collect the
+    // two sounding D5 segments (start in bar 1, continuation in bar 2). The serializer omits the XML
+    // declaration; OSMD's string-vs-URL sniff wants it, so prepend it (the app feeds OSMD the original
+    // declared document; only Verovio gets the bare serialize()).
+    const serialized = model.serialize();
+    const withDecl = serialized.startsWith("<?xml")
+      ? serialized
+      : `<?xml version="1.0" encoding="UTF-8"?>\n${serialized}`;
+    const osmd = await parse(withDecl);
+    const notes = [];
+    for (const measure of osmd.Sheet.SourceMeasures) {
+      for (const container of measure.VerticalSourceStaffEntryContainers) {
+        for (const staffEntry of container.StaffEntries) {
+          if (!staffEntry) continue;
+          for (const voiceEntry of staffEntry.VoiceEntries) {
+            for (const note of voiceEntry.Notes) {
+              if (note.isRest()) continue;
+              notes.push(note);
+            }
+          }
+        }
+      }
+    }
+    // Two D5 segments, both sharing ONE Tie object with the FIRST as StartNote (the #123 contract).
+    expect(notes).toHaveLength(2);
+    const tie = notes[0].NoteTie;
+    expect(tie).toBeTruthy();
+    expect(tie.StartNote).toBe(notes[0]);
+    expect(notes[1].NoteTie.StartNote).toBe(notes[0]);
+    // Only the first is the chain start, so mergeTiedNotes keeps ONE note (one attack) and sums the
+    // durations: simulate the exact merge the app runs on the cursor-extracted RawNotes.
+    const tieId = 0;
+    const { notes: merged, duration } = mergeTiedNotes([
+      { midi: 74, time: 1.5, duration: 0.5, hand: "right", tieId, isTieStart: true },
+      { midi: 74, time: 2.0, duration: 0.5, hand: "right", tieId },
+    ]);
+    expect(merged).toHaveLength(1); // ONE held note, not two restruck attacks
+    expect(merged[0]).toMatchObject({ midi: 74, time: 1.5, duration: 1.0 }); // single onset, summed
+    expect(duration).toBe(2.5); // the held note ends at 1.5 + 1.0 (the score's end)
   });
 });

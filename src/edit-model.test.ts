@@ -19,6 +19,7 @@ import {
   octaveStep,
   pitchFromMidi,
   buildHandleToVisIndex,
+  deriveVisNotesFromModel,
   spellingFromPitch,
   restDurationName,
   noteTypeForDuration,
@@ -29,8 +30,15 @@ import {
   DURATION_LADDER,
   NOTE_VALUE_QUARTERS,
   type ModelPitch,
+  type NoteHandle,
 } from "./edit-model";
-import { FIRST_MIDI, LAST_MIDI } from "./piano";
+import {
+  FIRST_MIDI,
+  LAST_MIDI,
+  handFromClefInEffect,
+  type Hand,
+  type StaffClefKind,
+} from "./piano";
 
 // A 1-part / 2-staff grand staff (the omr-worker shape): 4 RH quarters (C5 D5 E5 F5) over a
 // 3-note LH whole chord (C3 E3 G3), default 120bpm so a quarter = 0.5s. Mirrors the committed
@@ -1920,5 +1928,626 @@ describe("DOTTED edit-OFF no-op: parsing without a dot edit never mutates the do
       }));
     };
     expect(reparse(model.serialize())).toEqual(reparse(DOTTED));
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------
+// CROSS-BARLINE TIES (TIE-A..F): a lengthen/dot that overflows the bar fills it to the barline and
+// TIES the remainder into the next bar (one barline only); shortening a tied note removes the tie.
+// The model emits <tie>/<tied> start/stop pairs; the continuation is flagged isTieContinuation so it
+// claims no VisNote (mergeTiedNotes folds the group into ONE held note). The record snapshots BOTH
+// bars for an exact two-bar undo. divisions stays load-bearing 4.
+// ---------------------------------------------------------------------------------------------------
+
+// The events {rest, dur} of the Nth measure (0-based) in document order (single voice), for two-bar
+// fixtures where measureEvents (first-measure-only) is insufficient.
+function eventsOfMeasure(xml: string, measureIndex: number): { rest: boolean; dur: number }[] {
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  const measure = Array.from(doc.getElementsByTagName("measure"))[measureIndex];
+  if (!measure) return [];
+  return Array.from(measure.getElementsByTagName("note")).map((n) => ({
+    rest: n.getElementsByTagName("rest").length > 0,
+    dur: Number(n.getElementsByTagName("duration").item(0)?.textContent ?? "0"),
+  }));
+}
+
+// The filled divisions of the Nth measure (0-based), mirroring measureFilledDivs but bar-indexable.
+function measureFilledDivsAt(xml: string, measureIndex: number): number {
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  const measure = Array.from(doc.getElementsByTagName("measure"))[measureIndex];
+  if (!measure) return 0;
+  let cursor = 0;
+  let extent = 0;
+  for (const node of Array.from(measure.children)) {
+    const tag = node.tagName.toLowerCase();
+    const dur = Number(node.getElementsByTagName("duration").item(0)?.textContent ?? "0");
+    if (tag === "backup") cursor -= dur;
+    else if (tag === "forward") cursor += dur;
+    else if (tag === "note") {
+      if (node.getElementsByTagName("chord").item(0)) continue;
+      cursor += dur;
+    }
+    extent = Math.max(extent, cursor);
+  }
+  return extent;
+}
+
+// All notes of a given pitch in the serialized score (a tie produces TWO same-pitch notes), as
+// {dur, measure} pairs, so a test can assert the start (bar 1) + the continuation (bar 2) durations.
+function notesOfPitch(xml: string, step: string, octave = "5"): { dur: number; measure: number }[] {
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  const out: { dur: number; measure: number }[] = [];
+  const measures = Array.from(doc.getElementsByTagName("measure"));
+  measures.forEach((m, mi) => {
+    for (const n of Array.from(m.getElementsByTagName("note"))) {
+      if (n.getElementsByTagName("rest").length > 0) continue;
+      if (
+        n.getElementsByTagName("step").item(0)?.textContent === step &&
+        n.getElementsByTagName("octave").item(0)?.textContent === octave
+      ) {
+        out.push({ dur: Number(n.getElementsByTagName("duration").item(0)?.textContent ?? "0"), measure: mi });
+      }
+    }
+  });
+  return out;
+}
+
+// A 4/4 two-bar fixture: bar 1 = a dotted-half rest (beats 1-3) + a QUARTER D5 on beat 4; bar 2 = a
+// whole rest. D5 (handle 0) is the only pitched note. Lengthening it (quarter -> half) overflows the
+// bar with downbeat room in bar 2, the canonical cross-barline tie (a half starting on beat 4).
+const BEAT4_QUARTER = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1">
+<measure number="1">
+  <attributes><divisions>4</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><rest/><duration>12</duration><voice>1</voice><type>half</type><dot/></note>
+  <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+</measure>
+<measure number="2">
+  <note><rest/><duration>16</duration><voice>1</voice><type>whole</type></note>
+</measure>
+</part></score-partwise>`;
+
+describe("CROSS-BARLINE TIE: a lengthen that overflows ties into the next bar (TIE-A/B/C)", () => {
+  it("emits a correct tie (two notes, start/stop <tie>+<tied>, same pitch, both bars full)", () => {
+    const model = parseScoreModel(BEAT4_QUARTER);
+    const rec = model.changeDuration(0, "longer"); // D5 quarter -> half, overflows beat 4
+    expect(rec?.outcome).toBe("tied");
+    const xml = model.serialize();
+
+    // TWO D5 notes now: a quarter in bar 1 (the start) + a quarter in bar 2 (the continuation).
+    const d5 = notesOfPitch(xml, "D");
+    expect(d5).toEqual([
+      { dur: 4, measure: 0 },
+      { dur: 4, measure: 1 },
+    ]);
+    // Bar 1's D5 carries the START tie + tied; the continuation note carries the STOP (matched pair).
+    const doc = new DOMParser().parseFromString(xml, "application/xml");
+    const d5Notes = Array.from(doc.getElementsByTagName("note")).filter(
+      (n) => n.getElementsByTagName("step").item(0)?.textContent === "D" && n.getElementsByTagName("rest").length === 0,
+    );
+    const tieTypes = (n: Element) =>
+      Array.from(n.getElementsByTagName("tie")).map((t) => t.getAttribute("type")).sort();
+    const tiedTypes = (n: Element) =>
+      Array.from(n.getElementsByTagName("tied")).map((t) => t.getAttribute("type")).sort();
+    expect(tieTypes(d5Notes[0])).toEqual(["start"]);
+    expect(tiedTypes(d5Notes[0])).toEqual(["start"]);
+    expect(tieTypes(d5Notes[1])).toEqual(["stop"]);
+    expect(tiedTypes(d5Notes[1])).toEqual(["stop"]);
+    // The continuation has the SAME pitch and NO new accidental.
+    expect(d5Notes[1].getElementsByTagName("accidental").length).toBe(0);
+    expect(d5Notes[1].getElementsByTagName("octave").item(0)?.textContent).toBe("5");
+
+    // BOTH bars stay exactly full (the tie is the only thing crossing the barline; no overflow).
+    expect(measureFilledDivsAt(xml, 0)).toBe(16);
+    expect(measureFilledDivsAt(xml, 1)).toBe(16);
+    // Bar 2: the continuation quarter (beat 1) + the remaining dotted-half rest (beats 2-4).
+    expect(eventsOfMeasure(xml, 1)).toEqual([
+      { rest: false, dur: 4 },
+      { rest: true, dur: 12 },
+    ]);
+    // The announce names the SOUNDING (summed) value across the barline: a half.
+    expect(rec?.toName).toBe("half");
+    expect(rec?.fromName).toBe("quarter");
+  });
+
+  it("flags the continuation as a tie continuation so it claims NO VisNote (one held note)", () => {
+    const model = parseScoreModel(BEAT4_QUARTER);
+    model.changeDuration(0, "longer");
+    // Two D5 handles now exist: the start (mappable) + the continuation (isTieContinuation).
+    const d5Handles = model.handles.filter((h) => h.midi === 74);
+    expect(d5Handles).toHaveLength(2);
+    const starts = d5Handles.filter((h) => !h.isTieContinuation);
+    const conts = d5Handles.filter((h) => h.isTieContinuation);
+    expect(starts).toHaveLength(1);
+    expect(conts).toHaveLength(1);
+    // buildHandleToVisIndex maps ONLY the start (the continuation is skipped), so one VisNote, single
+    // onset at the start note's onset = beat 4 of bar 1 = 3 quarters = 1.5s at 120bpm.
+    const vis = model.handles
+      .filter((h) => !h.isTieContinuation)
+      .map((h) => ({ midi: h.midi, time: h.onsetSec }));
+    const map = buildHandleToVisIndex(model.handles, vis);
+    // The start handle maps; the continuation handle does not.
+    expect(map.has(starts[0].id)).toBe(true);
+    expect(map.has(conts[0].id)).toBe(false);
+    expect(starts[0].onsetSec).toBeCloseTo(1.5, 6); // single attack at the barline-adjacent beat 4
+  });
+});
+
+describe("CROSS-BARLINE TIE: add-dot that overflows auto-ties the same way (DOT-B)", () => {
+  it("a dot on a beat-4 quarter fills the bar + ties the remainder, summing to a dotted quarter", () => {
+    const model = parseScoreModel(BEAT4_QUARTER);
+    const rec = model.changeDuration(0, "dot"); // quarter -> dotted quarter (6), overflows beat 4 by 2
+    expect(rec?.outcome).toBe("tied");
+    expect(rec?.dotVerb).toBe("lengthen");
+    const xml = model.serialize();
+    // Bar 1 keeps the quarter D5 (it already filled to the barline); bar 2 gets an EIGHTH continuation
+    // (the 2 overflow divisions), summing to a dotted quarter (6) of sound.
+    const d5 = notesOfPitch(xml, "D");
+    expect(d5).toEqual([
+      { dur: 4, measure: 0 },
+      { dur: 2, measure: 1 },
+    ]);
+    expect(rec?.toName).toBe("dotted quarter");
+    // Both bars full; the continuation eighth (beat 1) + the rest of bar 2.
+    expect(measureFilledDivsAt(xml, 0)).toBe(16);
+    expect(measureFilledDivsAt(xml, 1)).toBe(16);
+    expect(eventsOfMeasure(xml, 1)).toEqual([
+      { rest: false, dur: 2 },
+      { rest: true, dur: 14 },
+    ]);
+  });
+});
+
+describe("CROSS-BARLINE TIE: CLAMP when no tie is possible (TIE-A step 3, no overwrite)", () => {
+  it("CLAMPS at the final barline when there is NO next bar (single-bar score)", () => {
+    const LAST_BAR = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><rest/><duration>8</duration><voice>1</voice><type>half</type></note>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+  <note><rest/><duration>4</duration><voice>1</voice><type>quarter</type></note>
+</measure></part></score-partwise>`;
+    const model = parseScoreModel(LAST_BAR);
+    // C5 quarter on beat 3 (handle 0, the only pitched note), a quarter rest after it (beat 4).
+    // Lengthen quarter -> half grows IN-BAR (consumes the rest), filling to the barline; no overflow.
+    const rec = model.changeDuration(0, "longer");
+    expect(rec?.outcome).toBe("stepped"); // it fit exactly in-bar
+    // Now C5 is a half filling beats 3-4. Lengthen AGAIN (half -> whole): overflow, but NO next bar.
+    const rec2 = model.changeDuration(0, "longer");
+    expect(rec2?.outcome).toBe("noRoom"); // clamped at the final barline (no room, no tie)
+    // No tie markup was emitted (the score has no continuation).
+    expect(model.serialize().includes("<tie")).toBe(false);
+  });
+
+  it("CLAMPS (no tie) when the next bar's downbeat in this voice is a NOTE (occupied)", () => {
+    const OCCUPIED = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1">
+<measure number="1">
+  <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><rest/><duration>12</duration><voice>1</voice><type>half</type><dot/></note>
+  <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+</measure>
+<measure number="2">
+  <note><pitch><step>E</step><octave>5</octave></pitch><duration>16</duration><voice>1</voice><type>whole</type></note>
+</measure>
+</part></score-partwise>`;
+    const model = parseScoreModel(OCCUPIED);
+    const before = model.serialize();
+    // D5 on beat 4 wants to grow to a half, but bar 2's downbeat is an E5 NOTE: no room to tie into.
+    const rec = model.changeDuration(0, "longer");
+    expect(rec?.outcome).toBe("noRoom"); // clamped (already fills its bar), no overwrite of E5
+    expect(model.serialize()).toBe(before); // DOM unchanged: no tie, no overwrite
+  });
+});
+
+describe("CROSS-BARLINE TIE: ONE-barline cap (TIE-B) clamps the continuation to fill the next bar", () => {
+  it("a remainder longer than the next bar's downbeat room clamps the continuation, no third segment", () => {
+    // Bar 1: half rest (beats 1-2) + half C5 (beats 3-4, tie start). Lengthen half -> whole (wanted 8).
+    // Bar 2's downbeat room is only a QUARTER rest (then a dotted-half note), so the continuation is
+    // CLAMPED to a quarter (4), not the full remaining half (8). One barline, one continuation.
+    const CAP = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1">
+<measure number="1">
+  <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><rest/><duration>8</duration><voice>1</voice><type>half</type></note>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>8</duration><voice>1</voice><type>half</type></note>
+</measure>
+<measure number="2">
+  <note><rest/><duration>4</duration><voice>1</voice><type>quarter</type></note>
+  <note><pitch><step>G</step><octave>4</octave></pitch><duration>12</duration><voice>1</voice><type>half</type><dot/></note>
+</measure>
+</part></score-partwise>`;
+    const model = parseScoreModel(CAP);
+    const rec = model.changeDuration(0, "longer"); // C5 (handle 0) half -> whole, overflows by a half
+    expect(rec?.outcome).toBe("tied");
+    const xml = model.serialize();
+    // Bar 1: the half C5 stays a half (start). Bar 2: a QUARTER C5 continuation (clamped, not a half).
+    const c5 = notesOfPitch(xml, "C");
+    expect(c5).toEqual([
+      { dur: 8, measure: 0 },
+      { dur: 4, measure: 1 },
+    ]);
+    // The G4 dotted-half is untouched (not overwritten); both bars full; exactly ONE continuation.
+    expect(notesOfPitch(xml, "G", "4")).toEqual([{ dur: 12, measure: 1 }]);
+    expect(measureFilledDivsAt(xml, 0)).toBe(16);
+    expect(measureFilledDivsAt(xml, 1)).toBe(16);
+    // The summed sounding value is a dotted half (half + quarter = 12), NOT the whole the rung wanted.
+    expect(rec?.toName).toBe("dotted half");
+  });
+});
+
+describe("CROSS-BARLINE TIE: a following NOTE in-bar blocks a tie (existing clamp behavior intact)", () => {
+  it("clamps in-bar (no tie) when a following same-voice NOTE sits before the barline", () => {
+    // Bar 1: half C5 (beats 1-2) + quarter rest (beat 3) + quarter G4 (beat 4). Lengthen the half ->
+    // whole: it cannot reach the barline (the G4 note blocks beat 4), so it CLAMPS in-bar to a dotted
+    // half (the shipped behavior), never a tie - a tie would be non-contiguous across the G4.
+    const BLOCKED = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1">
+<measure number="1">
+  <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>8</duration><voice>1</voice><type>half</type></note>
+  <note><rest/><duration>4</duration><voice>1</voice><type>quarter</type></note>
+  <note><pitch><step>G</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+</measure>
+<measure number="2">
+  <note><rest/><duration>16</duration><voice>1</voice><type>whole</type></note>
+</measure>
+</part></score-partwise>`;
+    const model = parseScoreModel(BLOCKED);
+    const rec = model.changeDuration(0, "longer");
+    expect(rec?.outcome).toBe("clamped"); // in-bar clamp, not a tie
+    expect(model.serialize().includes("<tie")).toBe(false); // no tie emitted
+    expect(noteInfo(model.serialize(), "C")).toMatchObject({ dur: 12 }); // dotted half, fills to the G4
+  });
+});
+
+describe("CROSS-BARLINE TIE: shortening a tied note REMOVES the tie (TIE-D)", () => {
+  it("shorten deletes the continuation + strips the tie, leaving a rest, following onsets coherent", () => {
+    const model = parseScoreModel(BEAT4_QUARTER);
+    model.changeDuration(0, "longer"); // create the tie (D5 quarter-tied-to-quarter = a half)
+    expect(model.serialize().includes("<tie")).toBe(true);
+    // The selectable handle is the START (the continuation has no VisNote). Shorten it: remove the tie.
+    const start = model.handles.find((h) => h.midi === 74 && !h.isTieContinuation)!;
+    const rec = model.changeDuration(start.id, "shorter");
+    expect(rec?.outcome).toBe("untied");
+    expect(rec?.fromName).toBe("half"); // the sounding value before removal
+    expect(rec?.toName).toBe("quarter"); // the in-bar value after removal
+    const xml = model.serialize();
+    // No tie markup remains; ONE D5 (the standalone quarter in bar 1); bar 2 is a whole rest again.
+    expect(xml.includes("<tie")).toBe(false);
+    expect(xml.includes("<tied")).toBe(false);
+    expect(notesOfPitch(xml, "D")).toEqual([{ dur: 4, measure: 0 }]);
+    // Bar 2 is ALL rests now (the continuation's quarter slot became a rest, beside the existing rest)
+    // and stays exactly full; the continuation no longer sounds.
+    const bar2 = eventsOfMeasure(xml, 1);
+    expect(bar2.every((e) => e.rest)).toBe(true);
+    expect(bar2.reduce((s, e) => s + e.dur, 0)).toBe(16);
+    expect(measureFilledDivsAt(xml, 0)).toBe(16);
+    expect(measureFilledDivsAt(xml, 1)).toBe(16);
+    // The model has no continuation handle anymore; D5 maps to one VisNote.
+    expect(model.handles.filter((h) => h.midi === 74)).toHaveLength(1);
+    expect(model.handles.find((h) => h.midi === 74)!.isTieContinuation).toBe(false);
+  });
+});
+
+describe("CROSS-BARLINE TIE: undo/redo restores BOTH bars exactly (the widened snapshot, TIE-D)", () => {
+  it("undo of a tie-creating lengthen restores both bars to the exact untied state", () => {
+    const model = parseScoreModel(BEAT4_QUARTER);
+    const beforeBar0 = eventsOfMeasure(model.serialize(), 0);
+    const beforeBar1 = eventsOfMeasure(model.serialize(), 1);
+    const beforeOnsets = model.handles.map((h) => Number(h.onsetSec.toFixed(6)));
+    const rec = model.changeDuration(0, "longer");
+    expect(rec?.outcome).toBe("tied");
+    expect(model.serialize().includes("<tie")).toBe(true);
+    expect(rec?.extraMeasures).toHaveLength(1); // the next bar was snapshotted too
+
+    model.restoreDuration(rec!);
+    const xml = model.serialize();
+    // BOTH bars are back to the pre-edit state, no tie, the original single D5 handle + onsets.
+    expect(xml.includes("<tie")).toBe(false);
+    expect(eventsOfMeasure(xml, 0)).toEqual(beforeBar0);
+    expect(eventsOfMeasure(xml, 1)).toEqual(beforeBar1);
+    expect(model.handles.filter((h) => h.midi === 74)).toHaveLength(1);
+    expect(model.handles.map((h) => Number(h.onsetSec.toFixed(6)))).toEqual(beforeOnsets);
+  });
+
+  it("redo (re-apply) reproduces the same tie deterministically", () => {
+    const model = parseScoreModel(BEAT4_QUARTER);
+    const rec1 = model.changeDuration(0, "longer");
+    const tiedXml = model.serialize();
+    model.restoreDuration(rec1!);
+    // Re-applying changeDuration on the restored bar reproduces the identical tie (deterministic).
+    const rec2 = model.changeDuration(0, "longer");
+    expect(rec2?.outcome).toBe("tied");
+    expect(notesOfPitch(model.serialize(), "D")).toEqual(notesOfPitch(tiedXml, "D"));
+    expect(model.serialize().includes('<tie type="start"')).toBe(true);
+  });
+});
+
+describe("CROSS-BARLINE TIE: a CHORD crosses the barline as a tied chord (each member tied)", () => {
+  // Bar 1: dotted-half rest (beats 1-3) + a quarter chord C5+E5+G5 on beat 4. Bar 2: whole rest.
+  // Lengthening the chord (quarter -> half) ties EACH member to its own continuation in bar 2.
+  const CHORD_TIE = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1">
+<measure number="1">
+  <attributes><divisions>4</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><rest/><duration>12</duration><voice>1</voice><type>half</type><dot/></note>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+  <note><chord/><pitch><step>E</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+  <note><chord/><pitch><step>G</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+</measure>
+<measure number="2">
+  <note><rest/><duration>16</duration><voice>1</voice><type>whole</type></note>
+</measure>
+</part></score-partwise>`;
+
+  it("ties every chord member to its own same-pitch continuation (a tied chord, not a clamp)", () => {
+    const model = parseScoreModel(CHORD_TIE);
+    const rec = model.changeDuration(0, "longer"); // lengthen the chord onset C5
+    expect(rec?.outcome).toBe("tied");
+    const xml = model.serialize();
+    // Each member has a quarter start in bar 1 + a quarter continuation in bar 2.
+    for (const step of ["C", "E", "G"]) {
+      expect(notesOfPitch(xml, step)).toEqual([
+        { dur: 4, measure: 0 },
+        { dur: 4, measure: 1 },
+      ]);
+      // The bar-1 note carries START, the bar-2 continuation carries STOP (matched pair per member).
+      const doc = new DOMParser().parseFromString(xml, "application/xml");
+      const notes = Array.from(doc.getElementsByTagName("note")).filter(
+        (n) => n.getElementsByTagName("step").item(0)?.textContent === step && n.getElementsByTagName("rest").length === 0,
+      );
+      expect(Array.from(notes[0].getElementsByTagName("tie")).map((t) => t.getAttribute("type"))).toEqual(["start"]);
+      expect(Array.from(notes[1].getElementsByTagName("tie")).map((t) => t.getAttribute("type"))).toEqual(["stop"]);
+    }
+    // The continuation chord stacks: the 2nd + 3rd continuation notes carry <chord/> (one onset).
+    const doc = new DOMParser().parseFromString(xml, "application/xml");
+    const bar2 = Array.from(doc.getElementsByTagName("measure"))[1];
+    const bar2Notes = Array.from(bar2.getElementsByTagName("note")).filter(
+      (n) => n.getElementsByTagName("rest").length === 0,
+    );
+    expect(bar2Notes).toHaveLength(3); // C5, E5, G5 continuations
+    expect(bar2Notes[0].getElementsByTagName("chord").length).toBe(0); // onset
+    expect(bar2Notes[1].getElementsByTagName("chord").length).toBe(1); // member
+    expect(bar2Notes[2].getElementsByTagName("chord").length).toBe(1); // member
+    expect(measureFilledDivsAt(xml, 0)).toBe(16);
+    expect(measureFilledDivsAt(xml, 1)).toBe(16);
+  });
+
+  it("shortening the tied chord removes every member's tie and restores the bars", () => {
+    const model = parseScoreModel(CHORD_TIE);
+    model.changeDuration(0, "longer"); // tie the chord
+    const start = model.handles.find((h) => h.midi === 72 && !h.isTieContinuation)!; // C5 onset start
+    const rec = model.changeDuration(start.id, "shorter");
+    expect(rec?.outcome).toBe("untied");
+    const xml = model.serialize();
+    expect(xml.includes("<tie")).toBe(false);
+    // One note per chord member again (the quarter chord), bar 2 all rests summing to a full bar.
+    for (const step of ["C", "E", "G"]) {
+      expect(notesOfPitch(xml, step)).toEqual([{ dur: 4, measure: 0 }]);
+    }
+    const bar2 = eventsOfMeasure(xml, 1);
+    expect(bar2.every((e) => e.rest)).toBe(true);
+    expect(bar2.reduce((s, e) => s + e.dur, 0)).toBe(16);
+  });
+});
+
+describe("CROSS-BARLINE TIE: edit-OFF byte-identical (no tie machinery runs without an edit)", () => {
+  it("serialize() of a parsed-but-UNEDITED two-bar score is structurally identical (no stray tie)", () => {
+    const model = parseScoreModel(BEAT4_QUARTER);
+    const reparse = (x: string) => {
+      const doc = new DOMParser().parseFromString(x, "application/xml");
+      return Array.from(doc.getElementsByTagName("note")).map((n) => ({
+        step: n.getElementsByTagName("step").item(0)?.textContent ?? "",
+        rest: n.getElementsByTagName("rest").length > 0,
+        dur: n.getElementsByTagName("duration").item(0)?.textContent ?? "",
+        type: n.getElementsByTagName("type").item(0)?.textContent ?? "",
+        ties: n.getElementsByTagName("tie").length,
+      }));
+    };
+    expect(reparse(model.serialize())).toEqual(reparse(BEAT4_QUARTER));
+    expect(model.serialize().includes("<tie")).toBe(false); // no tie added without an edit
+  });
+});
+
+describe("CROSS-BARLINE TIE: dotState reflects tie-ability (DOT-5 with ties on)", () => {
+  it("a plain note with NO in-bar room is still toggleable when it can tie across the barline", () => {
+    const model = parseScoreModel(BEAT4_QUARTER); // D5 quarter on beat 4, bar 2 a whole rest
+    // No in-bar room (the quarter fills to the barline), but a tie into bar 2 is possible -> toggleable.
+    expect(model.dotState(0)).toEqual({ dotted: false, canToggle: true });
+  });
+
+  it("a plain note with no room AND no tie target (last bar full) is NOT toggleable", () => {
+    const LAST = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><rest/><duration>12</duration><voice>1</voice><type>half</type><dot/></note>
+  <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+</measure></part></score-partwise>`;
+    expect(parseScoreModel(LAST).dotState(0)).toEqual({ dotted: false, canToggle: false });
+  });
+});
+
+// Regression for the cross-barline-ties hand fix: deriveVisNotesFromModel must preserve each
+// falling note's HAND across a duration edit by keying on the <note> ELEMENT, NOT on the <staff>.
+// The ties change had (wrongly) keyed hand per <staff>: that is correct for a true grand staff but
+// REGRESSED the issue-#87 COLLAPSED single-staff class, where the OMR flattens both hands onto ONE
+// <staff> that switches treble->bass mid-piece and score.ts tags hand PER MEASURE from the clef in
+// effect. With the per-staff rule, ANY duration edit collapsed the whole bass section from "left"
+// to the first note's "right" (recoloring those bars + breaking the left-hand mute). These pin the
+// per-element fix and guard the grand-staff + tie-continuation shapes against re-introducing it.
+describe("deriveVisNotesFromModel preserves per-note hand across a duration edit (ties fix)", () => {
+  // A COLLAPSED single staff (issue #87 / icarus.pdf shape): one part, NO <staves>, notes carry NO
+  // <staff>, treble clef for measures 1-2 then a clef CHANGE to bass (F clef) for measures 3-4. So
+  // score.ts tags the early notes "right" and the later notes "left" on the SAME (defaulted) staff.
+  // divisions=4 (load-bearing), 4/4. Each bass measure leaves a trailing rest so a lengthen has room.
+  const COLLAPSED_TREBLE_TO_BASS = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>F</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>G</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>A</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><rest/><duration>8</duration><voice>1</voice><type>half</type></note>
+    </measure>
+    <measure number="3">
+      <attributes><clef><sign>F</sign><line>4</line></clef></attributes>
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><rest/><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><rest/><duration>8</duration><voice>1</voice><type>half</type></note>
+    </measure>
+    <measure number="4">
+      <note><pitch><step>E</step><octave>3</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>G</step><octave>3</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><rest/><duration>8</duration><voice>1</voice><type>half</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+  // The pre-edit hand for each pitched <note> ELEMENT, the way score.ts derives it for a SINGLE
+  // staff: carry the clef in effect forward across measures (treble => right, bass => left) and tag
+  // each note by the clef of its measure. This is the snapshot main.ts captures (captureElementToHand)
+  // from the pre-edit score.notes, keyed by the handle's element, and hands to the rederive.
+  function preEditElementToHand(model: { handles: readonly NoteHandle[] }): Map<Element, Hand | undefined> {
+    const xmlDoc = model.handles[0].el.ownerDocument!;
+    const measures = Array.from(xmlDoc.getElementsByTagName("measure"));
+    // measure element -> clef in effect (carried forward), reduced to a clef KIND.
+    const clefByMeasure = new Map<Element, StaffClefKind | undefined>();
+    let current: StaffClefKind | undefined;
+    for (const m of measures) {
+      const sign = m.getElementsByTagName("clef").item(0)?.getElementsByTagName("sign").item(0)
+        ?.textContent?.trim();
+      if (sign === "G") current = "treble";
+      else if (sign === "F") current = "bass";
+      clefByMeasure.set(m, current);
+    }
+    const map = new Map<Element, Hand | undefined>();
+    for (const h of model.handles) {
+      let m: Element | null = h.el.parentElement;
+      while (m && m.tagName !== "measure") m = m.parentElement;
+      map.set(h.el, m ? handFromClefInEffect(clefByMeasure.get(m)) : undefined);
+    }
+    return map;
+  }
+
+  it("the collapsed fixture really puts both hands on ONE defaulted staff (the per-staff trap)", () => {
+    const model = parseScoreModel(COLLAPSED_TREBLE_TO_BASS);
+    // Every note defaults to <staff>1 (none declare a <staff>), yet they split into two hands by
+    // clef. A per-STAFF hand rule therefore HAS to collapse them; only a per-ELEMENT rule survives.
+    for (const h of model.handles) {
+      expect(h.el.getElementsByTagName("staff").item(0)).toBeNull();
+    }
+    const hands = preEditElementToHand(model);
+    const byPitch = (midi: number) =>
+      hands.get(model.handles.find((h) => h.midi === midi)!.el);
+    expect(byPitch(72)).toBe("right"); // C5 (treble, measure 1)
+    expect(byPitch(48)).toBe("left"); // C3 (bass, measure 3)
+  });
+
+  it("a LENGTHEN of a bass note keeps the bass notes left and the treble notes right", () => {
+    const model = parseScoreModel(COLLAPSED_TREBLE_TO_BASS);
+    const elementToHand = preEditElementToHand(model); // captured BEFORE the edit, as main.ts does
+
+    // Lengthen the bass C3 in measure 3 (quarter -> half, absorbing the following quarter rest).
+    const c3 = model.handles.find((h) => h.midi === 48)!;
+    const rec = model.changeDuration(c3.id, "longer");
+    expect(rec?.outcome).toBe("stepped"); // grew in-bar; no tie, no clamp
+
+    const notes = deriveVisNotesFromModel(model.handles, elementToHand);
+    const handOf = (midi: number) => notes.find((n) => n.midi === midi)?.hand;
+    // The edited bass note AND its bass neighbours stay LEFT (the regression collapsed them to right).
+    expect(handOf(48)).toBe("left"); // C3, the lengthened note
+    expect(handOf(52)).toBe("left"); // E3
+    expect(handOf(55)).toBe("left"); // G3
+    // The treble notes are untouched and stay RIGHT.
+    expect(handOf(72)).toBe("right"); // C5
+    expect(handOf(74)).toBe("right"); // D5
+    expect(handOf(81)).toBe("right"); // A5
+    // The lengthened note really grew (quarter 0.5s -> half 1.0s at 120bpm/divisions 4).
+    expect(notes.find((n) => n.midi === 48)?.duration).toBeCloseTo(1.0, 5);
+  });
+
+  it("a DOT of a bass note also keeps hands correct (the shared rederive path)", () => {
+    const model = parseScoreModel(COLLAPSED_TREBLE_TO_BASS);
+    const elementToHand = preEditElementToHand(model);
+
+    const c3 = model.handles.find((h) => h.midi === 48)!;
+    const rec = model.changeDuration(c3.id, "dot"); // quarter -> dotted quarter (room: the rest)
+    expect(rec?.outcome).toBe("stepped");
+
+    const notes = deriveVisNotesFromModel(model.handles, elementToHand);
+    const handOf = (midi: number) => notes.find((n) => n.midi === midi)?.hand;
+    expect(handOf(48)).toBe("left");
+    expect(handOf(52)).toBe("left");
+    expect(handOf(72)).toBe("right");
+  });
+
+  it("a true GRAND staff keeps staff 2 LEFT and staff 1 RIGHT across a duration edit (no regression)", () => {
+    // Reverie-shaped: 4 RH quarters on <staff>1 over a LH whole chord on <staff>2. Hand is tagged by
+    // staff/clef on the real path; capture it by staff here (staff 1 -> right, staff 2 -> left).
+    const model = parseScoreModel(GRAND_STAFF_XML);
+    const elementToHand = new Map<Element, Hand | undefined>();
+    for (const h of model.handles) {
+      const staff = h.el.getElementsByTagName("staff").item(0)?.textContent?.trim();
+      elementToHand.set(h.el, staff === "2" ? "left" : "right");
+    }
+    // Lengthen the FIRST RH quarter (C5). The LH chord must not move hands.
+    const c5 = model.handles.find((h) => h.midi === 72)!;
+    model.changeDuration(c5.id, "longer");
+
+    const notes = deriveVisNotesFromModel(model.handles, elementToHand);
+    const handOf = (midi: number) => notes.find((n) => n.midi === midi)?.hand;
+    expect(handOf(72)).toBe("right"); // RH C5
+    expect(handOf(76)).toBe("right"); // RH E5
+    expect(handOf(48)).toBe("left"); // LH C3
+    expect(handOf(52)).toBe("left"); // LH E3
+    expect(handOf(55)).toBe("left"); // LH G3
+  });
+
+  it("a tie CONTINUATION created by the edit inherits its tie-start's hand (folded into one bar)", () => {
+    // A LH (bass) D5-on-beat-4 in bar 1, bar 2 a whole rest: lengthening the quarter overflows the
+    // barline and TIES into bar 2. The continuation is a NEW <note> with no pre-edit hand entry; the
+    // fold sums it into the start's held VisNote, which carries the start's (left) hand.
+    const TIE_BASS = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1">
+  <measure number="1">
+    <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>F</sign><line>4</line></clef></attributes>
+    <note><rest/><duration>12</duration><voice>1</voice><type>half</type><dot/></note>
+    <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+  </measure>
+  <measure number="2">
+    <note><rest/><duration>16</duration><voice>1</voice><type>whole</type></note>
+  </measure>
+</part></score-partwise>`;
+    const model = parseScoreModel(TIE_BASS);
+    // Pre-edit: the lone D5 is bass => left. (No continuation exists yet.)
+    const d5 = model.handles.find((h) => h.midi === 74 && !h.isTieContinuation)!;
+    const elementToHand = new Map<Element, Hand | undefined>([[d5.el, "left"]]);
+
+    const rec = model.changeDuration(d5.id, "longer");
+    expect(rec?.outcome).toBe("tied"); // crossed the barline with a tie
+    // The model now has a continuation handle with NO entry in elementToHand.
+    expect(model.handles.some((h) => h.isTieContinuation && h.midi === 74)).toBe(true);
+
+    const notes = deriveVisNotesFromModel(model.handles, elementToHand);
+    const d5Notes = notes.filter((n) => n.midi === 74);
+    expect(d5Notes).toHaveLength(1); // folded into ONE held bar (one attack), not two
+    expect(d5Notes[0].hand).toBe("left"); // inherits the start's hand, not a staff fallback
+    expect(d5Notes[0].duration).toBeCloseTo(1.0, 5); // quarter (0.5s) + tied quarter (0.5s) = half
   });
 });
