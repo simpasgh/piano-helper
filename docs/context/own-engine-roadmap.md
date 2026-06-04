@@ -4,6 +4,29 @@ Self-contained plan so any session (esp. the one on the GPU PC) can pick up and 
 without the prior machine's local memory. Newest status at the top. NO em dashes in generated
 text (project rule). Ship every code change through the gated flow (see "Constraints" below).
 
+## STATUS: OTTAVA bass over-extension FIXED -- a far stray dash no longer chains the 8va span across unbracketed measures (reverie pitch up, never-worse) (2026-06-04)
+
+Tightened `detect_ottavas`: `_scan_dashed_rule` now keeps only the LARGEST CONTIGUOUS dash cluster
+(`_largest_dash_cluster`, split on a gap > `_OTT_CLUSTER_GAP_IL` = 30 interlines), so a lone stray dash
+far from the real bracket can no longer extend the [first, last] x-span across unbracketed measures and
+shift correct notes an octave. ROOT CAUSE (reverie, found by instrumenting the scan): a SINGLE stray dash
+at a system's far left (x182) pulled the bass 8va span back over m6-8 (3 unbracketed measures), reading
+their bass triads +12 (an octave high).
+
+GATE (box `real_eval`, oracle key, BEFORE deployed vs AFTER `GEOM_SRC`): reverie note_f1 0.865 -> 0.881,
+chord_recall 0.824 -> 0.882 (the m6-8 bass triads now read at the written octave); liminality 0.946,
+tctab 0.995, icarus 0.990 ALL UNCHANGED (never-worse), and the non-C icarus_emaj/ebmaj IDENTICAL. The
+30-interline gate is deliberately LARGE: an 8-interline gate REGRESSED tctab (0.995 -> 0.934) because
+clustering a sparse-clutter row CONCENTRATES its dashes enough to pass the fill gate (a fabricated 8va);
+tctab's clutter gaps are <=~20 interlines, so the large gate leaves it untouched while still splitting
+reverie's ~68-interline stray. geom runs as a SUBPROCESS, so this needs NO worker restart (reset only).
+
+RESIDUAL (NOT fixed, harder): reverie's m16-17 TREBLE 8va continuation (system 4) is still MISSED (pred
+-12) because that short segment's bracket shares the above-band with the very high notes' (B6/C7) ledger
+lines, which fail the vertical-isolation gate; recovering it risks false positives, so it is left as the
+conservative tradeoff. That continuation is reverie's remaining ~0.12 gap. Tests: test_geom_ottava.py +2
+(the `_largest_dash_cluster` unit + a far-stray raster); full omr-worker suite 525 passed / 15 skipped.
+
 ## STATUS: KEY FIX SHIPPED -- the fusion re-decodes geom under Clarity's detected key on non-C pieces (the assumed-C-major accidentals are fixed) (2026-06-04)
 
 Implemented + shipped the validated key lever. The worker fusion path now re-decodes geom under

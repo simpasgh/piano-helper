@@ -247,6 +247,28 @@ class TestDetectOttavasRaster:
         assert delta == 1                         # ABOVE the staff -> 8va (+1)
         assert x1 - x0 > 20 * geom_omr._interline(lines)  # spans most of the staff width
 
+    def test_far_stray_dash_does_not_extend_span(self):
+        # A real dashed rule PLUS a lone stray dash far to the left (e.g. inter-staff clutter at a
+        # system's far edge) must NOT chain the bracket span across the empty gap (reverie's bass 8va
+        # over-extension, which shifted 3 unbracketed measures an octave). The span covers the real
+        # rule only; the stray, separated by a gap beyond the cluster gate, is dropped.
+        def draw(d, lines, sp):
+            y = lines[0] - 2 * sp
+            dash, gap = max(4, int(0.7 * sp)), max(4, int(0.9 * sp))
+            sx = int(7 * sp)  # a lone stray dash, past the left margin (xcut) but far from the rule
+            d.line([(sx, y), (sx + dash, y)], fill=0, width=2)
+            x = int(50 * sp)  # the real rule, ~43 interlines right of the stray (gap > cluster gate)
+            for _ in range(28):
+                d.line([(x, y), (x + dash, y)], fill=0, width=2)
+                x += dash + gap
+
+        gray, lines = _draw_staff_with_band(draw, width=1600)
+        staves = geom_omr.detect_systems(gray)
+        spans = geom_omr.detect_ottavas(gray, staves)
+        assert len(spans[0]) == 1
+        x0, _x1, _delta = spans[0][0]
+        assert x0 > 40 * geom_omr._interline(lines)  # span starts at the real rule, not the stray
+
     def test_thick_solid_beam_above_is_not_detected(self):
         def draw(d, lines, sp):
             y = int(lines[0] - 2 * sp)
@@ -279,6 +301,16 @@ class TestDetectOttavasRaster:
         staves = geom_omr.detect_systems(gray)
         spans = geom_omr.detect_ottavas(gray, staves)
         assert spans[0] == []
+
+
+def test_largest_dash_cluster_drops_far_stray():
+    # Pure helper: keep the largest contiguous run cluster; drop a run separated by a gap > max_gap.
+    f = geom_omr._largest_dash_cluster
+    assert f([(0, 2), (5, 7), (8, 10), (200, 202)], 50) == [(0, 2), (5, 7), (8, 10)]  # far stray dropped
+    assert f([(0, 2), (5, 7)], 50) == [(0, 2), (5, 7)]   # a single tight cluster is unchanged
+    assert f([(0, 2), (100, 102)], 50) == [(0, 2)]        # ties keep the leftmost cluster
+    assert f([], 50) == []                                 # degenerate inputs never raise
+    assert f([(3, 5)], 50) == [(3, 5)]
 
 
 # --- Robustness: never raises -------------------------------------------------------------

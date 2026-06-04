@@ -621,6 +621,14 @@ _OTT_BELOW_CLEAR_IL = 10.0  # only scan the 8vb band below a staff when the next
 #                             this far down (open margin). A treble's "below" is the ~6.5-interline
 #                             inter-staff gap, where an 8vb is ambiguous with the BASS staff's 8va
 #                             (its above-band overlaps), so we skip it there to avoid a false shift.
+_OTT_CLUSTER_GAP_IL = 30.0  # split a row's dashes into clusters wherever the gap between consecutive
+#                             dashes exceeds this many interlines, and keep only the LARGEST cluster.
+#                             A real bracket's dashes are ~1 interline apart and a sparse-clutter row's
+#                             runs sit within ~20 interlines, so this large gate fires ONLY on an
+#                             EGREGIOUS far stray (reverie: a lone dash ~68 interlines off chained the
+#                             bass span over 3 unbracketed measures); it never splits a real bracket and
+#                             never concentrates sparse clutter enough to pass the fill gate (which would
+#                             fabricate a shift, the tctab regression a tighter gate caused).
 
 # VERTICAL ISOLATION (the precision gate). A true ottava dash is a LONE thin line with a near-blank
 # margin just above AND below it. Other horizontal repetitive structures in the band above a staff --
@@ -655,6 +663,29 @@ def _dash_runs(rowmask) -> List[Tuple[int, int]]:
         return out
     except Exception:
         return []
+
+
+def _largest_dash_cluster(runs: List[Tuple[int, int]], max_gap: float) -> List[Tuple[int, int]]:
+    """The largest contiguous sub-sequence of dash runs, splitting wherever the gap between a run's
+    end and the next run's start exceeds max_gap. 'Largest' = most runs (ties keep the leftmost). A
+    real ottava bracket is ONE cluster (its dashes are ~1 interline apart); a far-away stray dash
+    forms its own tiny cluster and is dropped, so it cannot extend the bracket's x-span across
+    unbracketed measures. PURE; returns runs unchanged when empty or already one cluster. NEVER raises."""
+    try:
+        if not runs:
+            return runs
+        clusters: List[List[Tuple[int, int]]] = []
+        cur = [runs[0]]
+        for run in runs[1:]:
+            if run[0] - cur[-1][1] > max_gap:
+                clusters.append(cur)
+                cur = [run]
+            else:
+                cur.append(run)
+        clusters.append(cur)
+        return max(clusters, key=len)
+    except Exception:
+        return runs
 
 
 def _band_ink(gray, ra: int, rb: int, s: int, e: int) -> float:
@@ -716,6 +747,13 @@ def _scan_dashed_rule(gray, y0: int, y1: int, xcut: int, sp: float) -> Optional[
             iso = [(s, e) for (s, e) in short
                    if _band_ink(gray, r - hi, r - lo, s, e) < _OTT_ISO_MAX_INK
                    and _band_ink(gray, r + lo, r + hi, s, e) < _OTT_ISO_MAX_INK]
+            if len(iso) < _OTT_MIN_SHORT_RUNS:
+                continue
+            # Keep only the largest CONTIGUOUS dash cluster so a far stray dash (e.g. inter-staff
+            # clutter at a system's far left) cannot chain the span back over unbracketed measures and
+            # shift correct notes an octave. A genuine bracket is one cluster (dashes ~1 interline
+            # apart), so this only trims disconnected outliers; it never splits a real dashed rule.
+            iso = _largest_dash_cluster(iso, _OTT_CLUSTER_GAP_IL * sp)
             if len(iso) < _OTT_MIN_SHORT_RUNS:
                 continue
             span = iso[-1][1] - iso[0][0]
