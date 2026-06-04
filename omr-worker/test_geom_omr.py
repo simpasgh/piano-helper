@@ -549,3 +549,43 @@ def test_normalize_illumination_never_raises():
         tiny = np.ones((1, 1), dtype=np.float32)
         out = geom_omr.normalize_illumination(tiny)
         assert out is not None and out.shape == (1, 1)
+
+
+@requires_geom
+def test_normalize_illumination_noop_on_dense_clean_page():
+    # A CLEAN (uniformly white bg) but DENSE page -- many fully-inked grid cells (beams / chord
+    # clusters) -- must still be a no-op. The cell-brightness guard is max-dilated so an isolated
+    # inked cell borrows its lit neighbours; without that, >5% fully-inked cells would trip the
+    # guard and normalization would alter a clean page (the never-worse-on-clean regression).
+    import numpy as np
+    g = np.ones((480, 480), dtype=np.float32)        # grid=48 -> 10x10 px cells
+    for r in range(0, 48, 4):                         # ink ~6% of cells, isolated (4 cells apart)
+        for c in range(0, 48, 4):
+            g[r * 10:(r + 1) * 10, c * 10:(c + 1) * 10] = 0.0
+    assert (g < 0.5).mean() > 0.05                    # genuinely dense (would trip a density guard)
+    out = geom_omr.normalize_illumination(g)
+    assert np.array_equal(out, g)                     # no-op: clean dense page is unchanged
+
+
+@requires_geom
+def test_detect_barlines_recovers_under_shadow():
+    # the other shadow call site: a barline spanning a grand staff under a cast shadow (background
+    # driven below 0.5) is STILL found, because detect_barlines flat-fields first.
+    import numpy as np
+    from PIL import Image, ImageDraw
+    interline, top, gap = 16, 40, 64
+    treble = [top + i * interline for i in range(5)]
+    bass = [treble[-1] + gap + i * interline for i in range(5)]
+    im = Image.new("L", (400, int(bass[-1] + 60)), 255)
+    d = ImageDraw.Draw(im)
+    for ly in treble + bass:
+        d.line([(0, ly), (400, ly)], fill=0, width=2)
+    d.line([(50, treble[0]), (50, bass[-1])], fill=0, width=2)   # barline spans both staves
+    gray = np.asarray(im, dtype=np.float32) / 255.0
+    band = np.ones(gray.shape[0], dtype=np.float32)
+    band[int(treble[0] - 20):int(bass[-1] + 20)] = 0.45         # broad cast shadow over the system
+    shadowed = np.clip(gray * band[:, None], 0.0, 1.0)
+    assert shadowed[int(treble[2]), 300] < 0.5                   # precondition: paper reads as ink
+    staves = geom_omr.detect_systems(shadowed)
+    bl = geom_omr.detect_barlines(shadowed, staves)
+    assert any(abs(x - 50) <= 3 for row in bl for x in row)      # the barline survives the shadow

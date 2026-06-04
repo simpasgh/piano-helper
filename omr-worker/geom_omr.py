@@ -218,11 +218,13 @@ def normalize_illumination(gray, grid: int = 48, floor: float = 0.25, even_thres
     majority in any block, so the max ignores the darker ink), upsample (bilinear), and divide it
     out so the background renormalizes to ~1.0 everywhere while ink stays well below 0.5.
 
-    NEVER-WORSE-ON-CLEAN GUARD. If the page is already evenly lit (the 5th-percentile block paper
-    is bright, > even_thresh) the input is returned UNCHANGED, so a clean render is byte-identical
-    and the detectors are provably unaffected on the clean-PDF gate. A broad shadow darkens many
-    blocks and pushes even the 5th percentile below the threshold, triggering the flat-field; a few
-    fully-inked blocks (a beam) cannot, since they are a tiny fraction of the grid.
+    NEVER-WORSE-ON-CLEAN GUARD. If the page is already evenly lit (the 5th-percentile block paper is
+    bright, > even_thresh) the input is returned UNCHANGED, so a clean render is a no-op. The
+    per-cell paper estimate is max-dilated across the block grid first, so DENSE ink (a page of beams
+    / chords) borrows the paper level of its lit neighbours and is NOT mistaken for shadow -- the
+    no-op holds on clean DENSE pages, not just bright sparse ones. Only a BROAD shadow, whose
+    interior cells are all dark, pushes the 5th percentile below the threshold and triggers the
+    flat-field.
 
     gray is float [0,1] (0=ink, 1=white). Returns the same shape/dtype. NEVER raises; returns the
     input on any failure so a degenerate image cannot break the detectors."""
@@ -236,9 +238,16 @@ def normalize_illumination(gray, grid: int = 48, floor: float = 0.25, even_thres
         if bs_y < 1 or bs_x < 1:
             return gray
         H2, W2 = gh * bs_y, gw * bs_x
-        block = gray[:H2, :W2].reshape(gh, bs_y, gw, bs_x).max(axis=(1, 3))  # paper level per cell
-        if float(np.percentile(block, 5)) > even_thresh:
-            return gray  # evenly lit -> no-op (clean stays byte-identical)
+        block = gray[:H2, :W2].reshape(gh, bs_y, gw, bs_x).max(axis=(1, 3))  # per-cell brightest pixel
+        # Even-lit GUARD (the no-op decision only): max-dilate the per-cell brightness so an isolated
+        # FULLY inked cell (dense beams/chords with no white) borrows its lit neighbours and is NOT
+        # read as shadow -- a CLEAN dense page therefore stays a no-op. A BROAD shadow's interior
+        # cells are dark even after dilation (their neighbours are shadowed too), so a real shadow
+        # still trips the guard. The CORRECTION below uses the UN-dilated per-cell paper so the
+        # flat-field stays accurate (dilating the field itself under-corrects the shadow).
+        guard = ndimage.maximum_filter(block, size=5, mode="nearest")
+        if float(np.percentile(guard, 5)) > even_thresh:
+            return gray  # evenly lit -> no-op (clean is unchanged)
         bg = np.asarray(
             Image.fromarray((np.clip(block, 0.0, 1.0) * 255.0).astype(np.uint8)).resize(
                 (w, h), Image.BILINEAR), dtype=np.float32) / 255.0
