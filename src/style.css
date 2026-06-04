@@ -1426,6 +1426,16 @@ button:focus-visible,
   margin-left: 0.25rem;
 }
 
+/* COMMIT v1: the trailing Save/Discard group. It carries its OWN divider (not the adjacency rule
+   above) because the per-selection clusters between it and the history group are [hidden] when
+   nothing is selected, which would collapse a sibling-combinator divider. This rule always draws
+   the leading rule so the commit pair reads as a distinct cluster: history | selection | commit. */
+.edit-commit-group {
+  border-left: 1px solid rgba(107, 79, 31, 0.3);
+  padding-left: 0.5rem;
+  margin-left: 0.25rem;
+}
+
 .edit-tool-btn {
   display: inline-flex;
   align-items: center;

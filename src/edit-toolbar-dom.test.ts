@@ -87,6 +87,8 @@ describe("edit toolbar lives OUTSIDE the OSMD-owned #sheet", () => {
       "delete-note-btn",
       "add-note",
       "add-note-btn",
+      "edit-save-btn",
+      "edit-discard-btn",
     ]) {
       const el = doc.getElementById(id);
       expect(el, `#${id} should exist`).not.toBeNull();
@@ -149,5 +151,57 @@ describe("dot TOGGLE button (DOTTED v1) lives in the note cluster as a pressed-s
     const ids = Array.from(noteEdit.querySelectorAll("button")).map((b) => b.id);
     expect(ids.indexOf("dur-dot-btn")).toBeGreaterThan(ids.indexOf("dur-longer-btn"));
     expect(ids.indexOf("delete-note-btn")).toBeGreaterThan(ids.indexOf("dur-dot-btn"));
+  });
+});
+
+describe("Save / Discard commit controls (Smart Edit COMMIT v1) live in the edit toolbar", () => {
+  it("has #edit-save-btn and #edit-discard-btn inside #edit-toolbar (not in OSMD's #sheet)", () => {
+    const save = doc.getElementById("edit-save-btn");
+    const discard = doc.getElementById("edit-discard-btn");
+    expect(save, "#edit-save-btn should exist").not.toBeNull();
+    expect(discard, "#edit-discard-btn should exist").not.toBeNull();
+    expect(editToolbar.contains(save!)).toBe(true);
+    expect(editToolbar.contains(discard!)).toBe(true);
+    // Same OSMD-cannot-detach invariant as the rest of the toolbar (it is a #sheet sibling).
+    expect(sheet.contains(save)).toBe(false);
+    expect(sheet.contains(discard)).toBe(false);
+  });
+
+  it("groups them in a trailing .edit-commit-group AFTER #add-note (history | selection | commit)", () => {
+    const group = editToolbar.querySelector(".edit-commit-group") as HTMLElement;
+    expect(group, ".edit-commit-group should exist").not.toBeNull();
+    expect(group.contains(doc.getElementById("edit-save-btn"))).toBe(true);
+    expect(group.contains(doc.getElementById("edit-discard-btn"))).toBe(true);
+    // The commit group comes LAST: after the add-note cluster in document order within the toolbar.
+    const kids = Array.from(editToolbar.children);
+    const addNote = doc.getElementById("add-note") as HTMLElement;
+    expect(kids.indexOf(group)).toBeGreaterThan(kids.indexOf(addNote));
+  });
+
+  it("orders Save before Discard", () => {
+    const group = editToolbar.querySelector(".edit-commit-group") as HTMLElement;
+    const ids = Array.from(group.querySelectorAll("button")).map((b) => b.id);
+    expect(ids.indexOf("edit-save-btn")).toBeLessThan(ids.indexOf("edit-discard-btn"));
+  });
+
+  it("start disabled + aria-disabled (a fresh edit session is clean, so nothing to commit)", () => {
+    // Mirrors the undo/redo dimmed-disabled idiom; main.ts lights them up via reflectCommitButtons
+    // once an edit is applied. The STATIC markup must start them off.
+    for (const id of ["edit-save-btn", "edit-discard-btn"]) {
+      const b = doc.getElementById(id) as HTMLButtonElement;
+      expect(b.hasAttribute("disabled"), `#${id} starts disabled`).toBe(true);
+      expect(b.getAttribute("aria-disabled"), `#${id} starts aria-disabled`).toBe("true");
+    }
+  });
+
+  it("carry the expected em-dash-free aria-labels + titles (project style rule)", () => {
+    const save = doc.getElementById("edit-save-btn") as HTMLButtonElement;
+    const discard = doc.getElementById("edit-discard-btn") as HTMLButtonElement;
+    expect(save.getAttribute("aria-label")).toBe("Save edits");
+    expect(discard.getAttribute("aria-label")).toBe("Discard edits");
+    for (const b of [save, discard]) {
+      expect(b.getAttribute("title") ?? "").not.toContain("—");
+      expect(b.getAttribute("aria-label") ?? "").not.toContain("—");
+    }
   });
 });

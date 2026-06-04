@@ -159,6 +159,9 @@ const deleteNoteBtn = document.getElementById("delete-note-btn") as HTMLButtonEl
 const addNoteCluster = document.getElementById("add-note") as HTMLDivElement;
 const addNoteReadout = document.getElementById("add-note-readout") as HTMLSpanElement;
 const addNoteBtn = document.getElementById("add-note-btn") as HTMLButtonElement;
+// COMMIT v1: explicit Save / Discard when leaving edit mode (trailing toolbar group).
+const editSaveBtn = document.getElementById("edit-save-btn") as HTMLButtonElement;
+const editDiscardBtn = document.getElementById("edit-discard-btn") as HTMLButtonElement;
 const editLive = document.getElementById("edit-live") as HTMLSpanElement;
 const tempoSlider = document.getElementById("tempo-slider") as HTMLInputElement;
 const tempoReadout = document.getElementById("tempo-readout") as HTMLButtonElement;
@@ -254,6 +257,11 @@ let selectedHandle: number | null = null;
 // rest-registry id (its document position among rests, stable until a structural edit). A rest has
 // no VisNote (rests do not fall), so it shows ONLY on the staff.
 let selectedRest: number | null = null;
+// COMMIT v1: the falling notes captured on entering edit mode (the SESSION baseline: the loaded
+// score, or the last Saved version if this is a re-entry), so DISCARD can restore the live player
+// to that baseline. Holding the array by a shallow slice is safe: every edit builds FRESH VisNote
+// arrays via finishEdit and never mutates these in place. Null when not in edit mode.
+let editBaselineNotes: VisNote[] | null = null;
 // The last MOUSE press on a rest (ADD-a-note v1): which rest + the click height + its glyph, so a
 // following "Add a note" button press fills at the CLICKED staff line/space (ADD-2 mouse default).
 // Cleared whenever the selection changes by any other path (keyboard selection, selecting a note),
@@ -575,6 +583,9 @@ async function enterEditMode(): Promise<void> {
     scoreModel = parseScoreModel(sourceMusicXml, bpm);
     commandStack = new CommandStack(scoreModel);
     selectedHandle = null;
+    // COMMIT v1: snapshot the session-baseline falling notes (now, where score is non-null) so
+    // DISCARD can restore the player to them. A shallow slice is pristine: edits never mutate these.
+    editBaselineNotes = score ? score.notes.slice() : null;
     rederiveMaps();
     renderVerovio();
     editMode = true;
@@ -619,6 +630,7 @@ function exitEditMode(): void {
   commandStack = null;
   selectedHandle = null;
   selectedRest = null;
+  editBaselineNotes = null; // COMMIT v1: drop the pre-edit snapshot with the rest of the edit state
   handleToVisIndex = new Map();
   visIndexToHandle = new Map();
   restIndexToId = new Map();
@@ -641,6 +653,50 @@ function exitEditMode(): void {
     verovioHost.removeAttribute("role");
     verovioHost.removeAttribute("aria-label");
   }
+}
+
+// COMMIT v1: SAVE bakes the edited model back into the retained source MusicXML, then leaves edit
+// mode. The live player already reflects every edit (each edit ran through reloadNotes), so there
+// is nothing to re-derive; we only PERSIST the model so re-entering edit shows the saved edits and
+// any source/MusicXML export is current. serialize() also enriches the score (it inserts inferred
+// <type>s), but it is reached only when dirty, so we never gate on byte-equality. The read-only
+// OSMD sheet is intentionally left as-is: it shows the pre-edit engraving exactly as any
+// edit-then-exit already does today; refreshing it is a separate follow-up. Focus returns to the
+// Edit button (the just-clicked Save is now hidden with the toolbar).
+function saveEdits(): void {
+  if (!scoreModel) return;
+  sourceMusicXml = scoreModel.serialize();
+  exitEditMode();
+  editLive.textContent = "Edits saved.";
+  editBtn.focus();
+}
+
+// COMMIT v1: DISCARD reverts the live player to the session baseline (the notes snapshotted on
+// entering edit mode) and leaves edit mode, throwing away the in-session edits. Restoring the
+// falling notes + audio via the narrow reloadNotes (which preserves mutes/balance/tempo/name and
+// lands paused, since edit mode paused playback) is all that is needed: the read-only OSMD sheet is
+// left as-is, consistent with SAVE and with today's edit-then-exit (the OSMD sheet reflects only
+// the originally loaded score; refreshing it on save/discard is a deferred follow-up). A no-snapshot
+// guard keeps it safe if somehow called outside an edit session.
+function discardEdits(): void {
+  if (editBaselineNotes) reloadNotes(editBaselineNotes);
+  exitEditMode();
+  editLive.textContent = "Edits discarded. Back to the original.";
+  editBtn.focus();
+}
+
+// COMMIT v1: leaving edit mode via the Edit toggle. With unsaved edits, confirm before discarding
+// (the toolbar's explicit Save/Discard are the primary commit path; this is the safety net on the
+// toggle). A clean session exits silently. Programmatic exits (a new score load, an editor-load
+// error) call exitEditMode DIRECTLY and never prompt, so loading a new piece never nags.
+function requestExitEditMode(): void {
+  if (isEditDirty()) {
+    const discard = window.confirm("You have unsaved edits. Discard them and leave editing?");
+    if (!discard) return; // stay in edit mode so the user can Save
+    discardEdits();
+    return;
+  }
+  exitEditMode();
 }
 
 // Rebuild the handle <-> VisNote index maps from the current model + falling notes. Called after
@@ -840,15 +896,12 @@ function reflectDurationButtons(): void {
       canDot = ds.canToggle;
     }
   }
-  durShorterBtn.disabled = !canShorter;
-  durShorterBtn.setAttribute("aria-disabled", String(!canShorter));
-  durLongerBtn.disabled = !canLonger;
-  durLongerBtn.setAttribute("aria-disabled", String(!canLonger));
+  setButtonEnabled(durShorterBtn, canShorter);
+  setButtonEnabled(durLongerBtn, canLonger);
   // The dot button is a TOGGLE: aria-pressed (the lit CSS keys off it) tracks dotted; it is disabled
   // only when a plain note cannot fit the added half (a dotted note's remove always has room).
   durDotBtn.setAttribute("aria-pressed", String(dotted));
-  durDotBtn.disabled = !canDot;
-  durDotBtn.setAttribute("aria-disabled", String(!canDot));
+  setButtonEnabled(durDotBtn, canDot);
 }
 
 // Capitalize the first letter of a label for the cluster readout (announcements use the lowercase
@@ -1160,13 +1213,39 @@ function musicalNeighborAfterDeletedOnset(cmd: DeleteNoteCommand): number | null
 
 // Dim/enable the undo/redo buttons to match the stacks (Designer P1-6: visibly dimmed +
 // aria-disabled when empty so the user can see whether there is history to move through).
+// Set a toolbar button's enabled state, keeping `disabled` and its `aria-disabled` mirror in
+// lockstep (the dimmed-disabled idiom every edit-toolbar reflector shares). Single-sourced so the
+// a11y invariant cannot drift across the undo/redo, duration, and commit button pairs.
+function setButtonEnabled(btn: HTMLButtonElement, enabled: boolean): void {
+  btn.disabled = !enabled;
+  btn.setAttribute("aria-disabled", String(!enabled));
+}
+
 function reflectUndoRedoButtons(): void {
-  const canUndo = commandStack?.canUndo() ?? false;
-  const canRedo = commandStack?.canRedo() ?? false;
-  undoBtn.disabled = !canUndo;
-  undoBtn.setAttribute("aria-disabled", String(!canUndo));
-  redoBtn.disabled = !canRedo;
-  redoBtn.setAttribute("aria-disabled", String(!canRedo));
+  setButtonEnabled(undoBtn, commandStack?.canUndo() ?? false);
+  setButtonEnabled(redoBtn, commandStack?.canRedo() ?? false);
+  // The Save/Discard commit buttons share the SAME dirty signal (canUndo), so reflect them here:
+  // every edit / undo / redo / enter that updates the history also updates commit availability,
+  // with no missed call site (all those paths funnel through this function).
+  reflectCommitButtons();
+}
+
+// COMMIT v1: "dirty" = at least one edit command applied since entering edit mode (or since the
+// last Save). It is DERIVED from the command stack (canUndo), not a separate sticky flag, so
+// undoing every edit back to the entry baseline correctly reads as clean (the model equals the
+// baseline again). A fresh enter builds a new stack, and Save exits, so canUndo tracks exactly
+// "the model differs from the source it was parsed from".
+function isEditDirty(): boolean {
+  return commandStack?.canUndo() ?? false;
+}
+
+// Enable/dim the Save + Discard buttons to match the dirty state (Designer COMMIT v1: the same
+// dimmed + aria-disabled idiom as undo/redo, so the user can see whether there is anything to
+// commit or revert). A clean session shows both dimmed and exits via the Edit toggle instead.
+function reflectCommitButtons(): void {
+  const dirty = isEditDirty();
+  setButtonEnabled(editSaveBtn, dirty);
+  setButtonEnabled(editDiscardBtn, dirty);
 }
 
 // Compute the target pitch for a keyboard pitch step on the STAFF (diatonic / chromatic / octave)
@@ -2446,13 +2525,20 @@ namesBtn.addEventListener("click", () => {
 // the source-of-truth model, and engraves it; leaving restores the OSMD view. Disabled for audio
 // scores (no MusicXML to engrave).
 editBtn.addEventListener("click", () => {
-  if (editMode) exitEditMode();
+  // COMMIT v1: toggling edit OFF prompts when there are unsaved edits (requestExitEditMode); a
+  // clean session exits silently. The explicit Save/Discard buttons are the primary commit path.
+  if (editMode) requestExitEditMode();
   else enterEditMode();
 });
 
 // Undo / redo buttons (Smart Edit P1).
 undoBtn.addEventListener("click", () => doUndo());
 redoBtn.addEventListener("click", () => doRedo());
+
+// COMMIT v1: Save commits the edited model back to the source; Discard reverts the player to the
+// pre-edit score. Both leave edit mode and are enabled only when there are unsaved edits.
+editSaveBtn.addEventListener("click", () => saveEdits());
+editDiscardBtn.addEventListener("click", () => discardEdits());
 
 // ----- STAFF surface: click to select + vertical drag to change pitch (diatonic) -----
 //

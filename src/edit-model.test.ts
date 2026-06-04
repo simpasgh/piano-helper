@@ -297,6 +297,30 @@ describe("parseScoreModel", () => {
   });
 });
 
+describe("ScoreModel.serialize SAVE round-trip (Smart Edit COMMIT v1)", () => {
+  // SAVE writes scoreModel.serialize() back into the retained source MusicXML; the NEXT
+  // enterEditMode re-parses that source. These pin the contract that the round-trip carries the
+  // edit AND is STABLE under repeated save/re-enter (so re-entering then re-saving does not drift).
+  it("a serialized edit re-parses WITH the edit (re-entering edit shows the saved change)", () => {
+    const model = parseScoreModel(GRAND_STAFF_XML);
+    model.setPitch(0, p("D", 5)); // raise the first RH note C5 -> D5
+    const saved = model.serialize(); // what SAVE persists into sourceMusicXml
+    // Re-entering edit mode re-parses the saved source: the edit is present, not the original.
+    const reentered = parseScoreModel(saved);
+    expect(reentered.handles[0].pitch).toEqual(p("D", 5));
+    expect(reentered.handles[0].midi).toBe(74);
+    expect(reentered.handles.map((h) => h.midi)).toEqual([74, 74, 76, 77, 48, 52, 55]);
+  });
+
+  it("serialize is idempotent across a re-parse (re-enter then re-save does not drift)", () => {
+    const model = parseScoreModel(GRAND_STAFF_XML);
+    model.setPitch(0, p("D", 5)); // an edit, mirroring a real Save (serialize only runs when dirty)
+    const saved = model.serialize();
+    const resaved = parseScoreModel(saved).serialize(); // a second Save with no further edits
+    expect(resaved).toBe(saved); // byte-stable: <type> inference + serialize do not keep mutating
+  });
+});
+
 describe("parseScoreModel ties", () => {
   // A held C4 across two beats: a tie START segment then a STOP (continuation). score.ts merges
   // these into ONE VisNote, so the continuation handle must be flagged un-mappable.
