@@ -589,19 +589,24 @@ def detect_barlines(gray, staves: List[List[float]]) -> List[List[float]]:
 # in the spirit of detect_barlines: scan a tight band just ABOVE the staff top (8va) and just BELOW
 # the staff bottom (8vb) for the bracket's dashed horizontal rule.
 #
-# DISCRIMINATORS (measured on reverie at 300 DPI, see the spike C:\tmp\ottava_diag7.py). The dashed
+# DISCRIMINATORS (measured on the 4 real eval pieces; spikes under C:\tmp\ottava_*.py). The dashed
 # rule is, on its densest row:
 #   - made of SHORT runs: the longest dark run is <= ~1.6 interline (a solid BEAM is one long run,
 #     so longest-run rejects beams cleanly),
 #   - MANY of them: >= 15 short runs (sparse stray ink along a row -- e.g. a few notehead/stem tops
 #     poking into the band -- has only a handful, so the run COUNT rejects it),
 #   - spanning a FULL SYSTEM width: the short-run span is >= 40 interlines (LOCAL clutter such as a
-#     hairpin or a rehearsal mark spans only a few interlines, so span rejects it).
-# On reverie this fires on all the clearly-bracketed staves (5 of 6; the 6th's bracket ends very
-# early in the final system and is conservatively skipped) and on NEITHER non-bracketed staff. It is
-# deliberately CONSERVATIVE: a missed bracket leaves that note at the written octave (today's
-# behavior, no worse), while a FALSE bracket would shift correct notes an octave (a regression), so
-# the thresholds favor precision. NEVER raises (returns a safe default on any failure).
+#     hairpin or a rehearsal mark spans only a few interlines, so span rejects it),
+#   - VERTICALLY ISOLATED: each counted run is near-blank just above AND below it (a lone thin line).
+#     This is the precision gate that rejects the two real false-positive sources the first three
+#     gates alone let through -- LYRICS (a vocal line's text above a staff, e.g. tctab) and a run of
+#     LEDGER LINES under a high passage (e.g. icarus), both of which are many short same-y runs but
+#     carry ink (letters / noteheads) in the rows around them. See the isolation constants below.
+# On reverie this fires on the clearly-bracketed staves and on NEITHER non-bracketed staff, and the
+# box real_eval (350 DPI) shows reverie's octave improves while tctab/icarus/liminality do NOT regress
+# (the gate that blocked the pre-isolation version). It is deliberately CONSERVATIVE: a missed bracket
+# leaves that note at the written octave (today's behavior, no worse), while a FALSE bracket would
+# shift correct notes an octave (a regression), so the thresholds favor precision. NEVER raises.
 #
 # SIZE (8 vs 15) is out of scope: reading the engraved "8"/"15" digit needs glyph recognition the
 # notehead-only path lacks. The magnitude is always 1 octave (size 8), which is by far the common
@@ -616,6 +621,20 @@ _OTT_BELOW_CLEAR_IL = 10.0  # only scan the 8vb band below a staff when the next
 #                             this far down (open margin). A treble's "below" is the ~6.5-interline
 #                             inter-staff gap, where an 8vb is ambiguous with the BASS staff's 8va
 #                             (its above-band overlaps), so we skip it there to avoid a false shift.
+
+# VERTICAL ISOLATION (the precision gate). A true ottava dash is a LONE thin line with a near-blank
+# margin just above AND below it. Other horizontal repetitive structures in the band above a staff --
+# LYRICS (a vocal line's text, e.g. tctab) and a run of LEDGER LINES under a high passage (e.g.
+# icarus) -- also read as many short same-y dark runs and otherwise pass the run/span/fill gates, but
+# they have ink (letter bodies / noteheads) packed in the rows immediately around them, so they are
+# NOT vertically isolated. A run is kept only when the band [ISO_LO, ISO_HI] interlines ABOVE and
+# BELOW it (over the run's own columns) is nearly blank. This is what separates a bracket from
+# lyrics/ledger lines (both false-fire WITHOUT it, measured on tctab/icarus), and it also tightens the
+# span to the true dashes by dropping a clef/notehead the densest row would otherwise chain in.
+_OTT_ISO_LO_IL = 0.25      # the isolation band starts this far above/below the dash row (skips the
+_OTT_ISO_HI_IL = 0.75      # dash's own ~2-3px thickness) and ends this far out.
+_OTT_ISO_MAX_INK = 0.20    # a run is "isolated" when its above- AND below-band ink fraction is below
+#                            this; a tall letter or a notehead-laden ledger row clears it (rejected).
 
 
 def _dash_runs(rowmask) -> List[Tuple[int, int]]:
@@ -638,15 +657,32 @@ def _dash_runs(rowmask) -> List[Tuple[int, int]]:
         return []
 
 
+def _band_ink(gray, ra: int, rb: int, s: int, e: int) -> float:
+    """Ink fraction (dark pixels) in rows [ra, rb) over columns [s, e]. Used to test the vertical
+    ISOLATION of a candidate dash run. Returns 1.0 (treated as NOT isolated, the conservative default)
+    when the band is empty after clamping -- so a run whose isolation band falls entirely off the
+    image is rejected rather than fabricating a shift. NEVER raises."""
+    try:
+        h, w = gray.shape
+        ra, rb = max(0, int(ra)), min(h, int(rb))
+        s, e = max(0, int(s)), min(w - 1, int(e))
+        if rb <= ra or e < s:
+            return 1.0
+        return float((gray[ra:rb, s:e + 1] < 0.5).mean())
+    except Exception:
+        return 1.0
+
+
 def _scan_dashed_rule(gray, y0: int, y1: int, xcut: int, sp: float) -> Optional[Tuple[float, float]]:
     """Scan rows [y0, y1) of `gray` for the densest dashed-rule row (an ottava bracket). Returns the
     bracket x-extent (x0, x1) of the best qualifying row, or None if none qualifies. A row qualifies
     when its dark runs are all SHORT (<= _OTT_MAX_RUN_IL interlines, i.e. not a beam), there are
-    >= _OTT_MIN_SHORT_RUNS of them, their span is >= _OTT_MIN_SPAN_IL interlines, AND the dashes FILL
-    >= _OTT_MIN_FILL of that span. The fill gate is what separates a real dashed rule (dash + gap,
-    fill ~0.2-0.5) from the sparse fringe of stem/ledger BOTTOMS in the row just outside a staff
-    (~48 tiny marks at fill ~0.05). The far-left margin (clef/key/the "8" glyph) is excluded by xcut
-    so the span measures the dashes only. NEVER raises."""
+    >= _OTT_MIN_SHORT_RUNS of them that are VERTICALLY ISOLATED (near-blank just above AND below, so a
+    lyric line or a ledger-line run is rejected -- see the isolation constants), their span is
+    >= _OTT_MIN_SPAN_IL interlines, AND the dashes FILL >= _OTT_MIN_FILL of that span. The fill gate
+    separates a real dashed rule (dash + gap, fill ~0.2-0.5) from the sparse fringe of stem/ledger
+    BOTTOMS just outside a staff (~0.05). The far-left margin (clef/key/the "8" glyph) is excluded by
+    xcut, and only ISOLATED runs set the span, so the span measures the true dashes. NEVER raises."""
     if not GEOM_AVAILABLE or gray is None:
         return None
     try:
@@ -657,7 +693,9 @@ def _scan_dashed_rule(gray, y0: int, y1: int, xcut: int, sp: float) -> Optional[
             return None
         max_run = _OTT_MAX_RUN_IL * sp
         min_span = _OTT_MIN_SPAN_IL * sp
-        best: Optional[Tuple[int, float, float]] = None  # (n_short, x0, x1)
+        lo = max(1, int(round(_OTT_ISO_LO_IL * sp)))
+        hi = max(lo + 1, int(round(_OTT_ISO_HI_IL * sp)))
+        best: Optional[Tuple[int, float, float]] = None  # (n_iso, x0, x1)
         for r in range(y0, y1):
             row = (gray[r, :] < 0.5).copy()
             if xcut > 0:
@@ -671,14 +709,23 @@ def _scan_dashed_rule(gray, y0: int, y1: int, xcut: int, sp: float) -> Optional[
             short = [(s, e) for (s, e) in runs if (e - s + 1) <= max_run]
             if len(short) < _OTT_MIN_SHORT_RUNS:
                 continue
-            span = short[-1][1] - short[0][0]
+            # Keep only VERTICALLY ISOLATED runs: near-blank in a thin band just above AND just below
+            # the run's own columns. A lone dash passes; a slice through tall lyric text or a
+            # notehead-laden ledger run has ink in those bands and is dropped. This both rejects the
+            # lyric/ledger false positives and tightens the span to the true dashes.
+            iso = [(s, e) for (s, e) in short
+                   if _band_ink(gray, r - hi, r - lo, s, e) < _OTT_ISO_MAX_INK
+                   and _band_ink(gray, r + lo, r + hi, s, e) < _OTT_ISO_MAX_INK]
+            if len(iso) < _OTT_MIN_SHORT_RUNS:
+                continue
+            span = iso[-1][1] - iso[0][0]
             if span < min_span:
                 continue
-            ink = sum((e - s + 1) for (s, e) in short)
+            ink = sum((e - s + 1) for (s, e) in iso)
             if (ink / span) < _OTT_MIN_FILL:
                 continue
-            if best is None or len(short) > best[0]:
-                best = (len(short), float(short[0][0]), float(short[-1][1]))
+            if best is None or len(iso) > best[0]:
+                best = (len(iso), float(iso[0][0]), float(iso[-1][1]))
         if best is None:
             return None
         return best[1], best[2]
