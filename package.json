@@ -15,7 +15,8 @@
   "dependencies": {
     "@spotify/basic-pitch": "^1.0.1",
     "opensheetmusicdisplay": "^1.9.0",
-    "tone": "^15.0.4"
+    "tone": "^15.0.4",
+    "verovio": "^6.2.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260530.1",

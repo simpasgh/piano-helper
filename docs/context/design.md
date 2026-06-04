@@ -3,6 +3,242 @@
 UX, visual design, interaction decisions. Append durable learnings at the top of the
 relevant section, dated.
 
+## Smart Edit Mode: edit the staff directly, sheet becomes source of truth (epic interaction spec)
+
+- **2026-06-04 - Interaction + visual spec for "Smart Edit Mode": a simplified MuseScore-style
+  editor layered ON the OSMD/VexFlow staff. The user edits notation directly on the engraved
+  staff, the staff re-renders live, and the SHEET becomes the single source of truth that the
+  falling-notes view and audio are re-derived from. This SUPERSEDES the #6 "Correct Mode" mental
+  model (edit-on-falling-canvas, sheet stays a frozen reference) once it ships: the surface of
+  truth flips from the falling canvas to the staff. Tech Lead owns rendering/round-trip
+  feasibility in parallel; this entry is interaction + visual only and assumes we can (a) render
+  an editable staff and (b) place click targets on noteheads. The notehead-geometry hook already
+  exists: `readNotePositions` in `src/sheet-overlay.ts` walks every `GraphicalNote`,
+  `getSVGGElement()` + `getBoundingClientRect()` -> `{ midi, x, y, spelling }` in scrolled `#sheet`
+  coords, and has the OSMD `sourceNote` + `staffEntry` in hand. That is exactly the hook for hit
+  targets, selection geometry, and measure membership.**
+
+  ### Decision 0 (FRAMING) - the staff is the editor; the falling view is a live mirror, not a second editor
+
+  In Edit mode you edit the STAFF only. The falling-notes canvas keeps rendering live (so you see
+  pitch/rhythm changes fall as you make them), but it is READ-ONLY while editing: no selection
+  cursor, no hit-testing, no edit panel on the canvas. One surface of truth removes the "which
+  view wins" ambiguity that #6's divergence banner had to paper over. Rationale: musicians reason
+  about correctness ON the staff (that is the document they are checking against), the OMR error
+  we most need to fix is rhythm/duration which only reads clearly as notation, and a single edit
+  surface halves the interaction + a11y surface area. The falling view earns its keep as instant
+  feedback ("did that fix land?") without being a competing editor. When Edit mode is OFF the app
+  is exactly today's player. The #6 falling-canvas editing surface is RETIRED when this ships (do
+  not maintain two editors); its dashed-edited-marker and divergence banner are no longer needed
+  because the sheet now reflects the edit (no divergence to mark).
+
+  ### Decision 1 - mode model: one explicit Edit toggle; a Select default sub-mode and a Note-input sub-mode inside it; playback is mutually exclusive with editing
+
+  - **Top-level: an explicit "Edit" toggle** replacing the #6 "Correct" button in `group-settings`
+    (Heroicons `pencil-square`, `aria-pressed`, state-explicit title). OFF by default = today's
+    pure player, zero edit overhead. Always-on rejected for the same reasons as #6 (do not steal
+    clicks / run edit machinery for someone who just wants to watch).
+  - **Two sub-modes inside Edit, MuseScore's core split, kept to two (not MuseScore's many):**
+    - **Select (default on entering Edit).** Click/arrow to select existing notes/rests and modify
+      them (pitch, duration, accidental, hand, delete). The pointer is the default arrow.
+    - **Note-input (armed).** An insertion CURSOR appears and clicks/keys ADD notes at the cursor.
+      Entered with **N** (MuseScore's muscle-memory key) or a "+ Add notes" button in the edit
+      toolbar; **Esc or N again** returns to Select. The pointer is a crosshair while armed. This
+      is the one MuseScore convention worth importing wholesale because millions already know "N =
+      note input"; everything else we simplify.
+    - **Why a real armed sub-mode and not #6's one-shot "click to place one note":** rhythm
+      correction means entering RUNS of notes (a mis-scanned beamed group becomes four clean
+      sixteenths). A sticky note-input cursor that advances after each entry makes a run fast; the
+      one-shot add re-arms every note and is painful past the first. Keep the cursor sticky and
+      advancing, MuseScore-style.
+  - **Playback vs editing are mutually exclusive (inherit + tighten #6).** Entering Edit pauses
+    playback. Pressing Play from within Edit is allowed but it EXITS to a still, watchable state:
+    selection/cursor suspend, the edit toolbar hides, the staff is not hit-testable while the
+    cursor sweeps. Pause returns you to where you were (same selection if it still exists). You
+    never edit a moving target, and "hear it" (Decision 4) is a SCOPED loop, not general Play, so
+    it does not trip this. The OSMD playback cursor (green box) sweeps during Play as today; the
+    edit insertion cursor is a separate object only visible while editing + paused.
+
+  ### Decision 2 - the per-operation interaction model (mouse path + keyboard path)
+
+  Selection target = a notehead (or a rest glyph). Hit area is the notehead bbox PADDED to a
+  >=24px CSS hit square (noteheads render ~10px; an invisible padded `<button>`-like hot zone per
+  note in the overlay layer gives a real tap target without changing the engraving). One selection
+  at a time in v1 (multi-select deferred).
+
+  | Operation | Mouse path | Keyboard path |
+  | --- | --- | --- |
+  | **Select a note/rest** | Click the notehead/rest (its padded hot zone). | Enter Edit -> first note auto-selected; **Left/Right** = previous/next note IN STAFF ORDER (across the grand staff by musical time, see grand-staff note); **Home/End** = first/last note of the measure. |
+  | **Move pitch** | **Vertical drag** the notehead: it snaps to staff steps (diatonic line/space) as you drag, live-previewing; release commits. Horizontal drag does nothing (time is fixed, Decision 3). | **Up/Down = diatonic step** (next staff position, key-signature aware so Up from E in C-major is F, not E#). **Ctrl/Cmd+Up/Down = chromatic semitone** (raw +-1, for when you truly want the accidental). **Up/Down+Octave via Ctrl+Shift or PageUp/PageDown = +-octave.** Diatonic-on-plain-arrows matches MuseScore and is what "move it up a line" means to a musician; chromatic is the modifier. |
+  | **Set duration** | A small **duration toolbar** (the edit toolbar's primary row): whole/half/quarter/eighth/16th buttons + a dotted toggle. Click a value to set the selected note's (or the about-to-be-entered note's) duration. | **MuseScore's real number keys, restricted to the five durations in scope: 6=whole, 5=half, 4=quarter, 3=eighth, 2=sixteenth; . (period) toggles dot.** The number keys are the fast path for the frequent rhythm-fix case; the toolbar is the discoverable mirror. Both highlight the active duration. |
+  | **Add a note** | In Note-input (armed): the insertion cursor sits at a time position; **click a staff line/space** to place a note of the current duration at that pitch, then the cursor ADVANCES by that duration. Click placement uses y -> nearest diatonic step, key-sig aware. | In Note-input: **A-G enter that letter** at the nearest octave to the previous note (MuseScore's letter entry), of the current duration; cursor advances. Duration chosen FIRST via number keys, then the letter, MuseScore-style ("4 C" = quarter C). **Up/Down after entry** nudges the just-entered note by octave/step. |
+  | **Add a rest** | Note-input: a **rest button** in the duration toolbar, or set duration then click the rest button; places a rest of the current duration and advances. | **0 (zero) = enter a rest** of the current duration (MuseScore's key), cursor advances. |
+  | **Delete** | Select -> trash button in the edit toolbar. | **Delete/Backspace.** Per Decision 3 this turns the note into a REST of the same duration (fixed-bar), it does not pull later notes left. |
+  | **Toggle accidental** | Three small accidental buttons (flat / natural / sharp) in the edit toolbar, shown for the selected note; click sets that note's accidental. | One keyboard accidental affordance to avoid clashing with rest(0)/octave: **Ctrl/Cmd+Up/Down = chromatic re-spell** (raises/lowers by semitone, which is how you reach a sharp or flat), with the toolbar carrying explicit natural. Announce the resulting spelling. |
+  | **Move note to other hand/staff** | Drag the notehead vertically across the staff gap onto the other staff (it re-homes to that staff, keeping pitch); OR a "send to other staff" button in the edit toolbar. | **Ctrl/Cmd+Shift+Up/Down = move to staff above/below** (MuseScore's cross-staff move), pitch preserved. Announce "Moved to left hand". |
+
+  Notes on the table: where two desirable keybindings collide (accidentals vs rests vs octave),
+  the rule is **number row = durations + rest(0), letter keys = pitch entry, plain arrows =
+  diatonic pitch, modifiers (Ctrl/Cmd, Shift) = chromatic / octave / cross-staff.** That keeps the
+  unmodified keys for the two highest-frequency actions (set duration, move pitch) and pushes the
+  rarer ones onto modifiers, so the frequent rhythm-fix flow ("select the note, hit 3 to make it
+  an eighth") is single-keystroke.
+
+  ### Decision 3 - fixed-bar duration model + the "bar doesn't add up" indicator
+
+  Duration edits are MuseScore-style FIXED-BAR: changing a note's duration does NOT ripple later
+  notes. Lengthening overwrites the time it now covers (the next note(s) it swallows become
+  shorter/removed per MuseScore's overwrite); shortening leaves a REST in the freed time; deleting
+  leaves a rest. Nothing after the edit shifts in time, so the rest of the measure stays put and
+  predictable. This is the right model for CORRECTION (you are fixing one wrong duration, not
+  re-typesetting the bar) and it keeps onsets stable so the falling view + audio re-derive without
+  a global reflow.
+
+  - **"This measure does not add up" indicator.** When a measure's durations do not sum to the
+    meter (under or over), flag THAT measure, do not block editing (half-corrected bars are a
+    normal intermediate state). Treatment: a **2px brass left-edge bracket on the measure** plus a
+    small **brass caution glyph in the measure's top-left margin** (a `!` in a ~14px rounded
+    brass chip, `--accent` fill, `--on-accent` ink so it passes contrast). Hover/focus the chip ->
+    tooltip + aria text: "This measure has 3.5 beats, the time signature is 4/4." Under-full and
+    over-full read the same chip; the tooltip states which. Brass (not red) because this is a
+    gentle "still in progress" nudge in a brass-on-dark palette, not an error; reserve any future
+    red strictly for destructive/illegal. The chip lives in the overlay layer at the measure's
+    bbox top-left, so it scrolls with the staff.
+  - **Why fixed-bar over ripple/insert:** ripple (later notes shift) is a composition gesture and
+    makes every duration edit reflow the whole piece, which is disorienting when you are spot-fixing
+    a scan and watching the falling view. Fixed-bar = local, reversible, and matches the tool's
+    job. Flag-don't-block keeps the user in flow.
+
+  ### Decision 4 - visual language (all on the cream `#f6f1e6` paper, brass-brown ink world)
+
+  The editor must stay legible on the existing cream sheet pane. The annotation ink is brass-brown
+  `#6b4f1f`; selection/active uses the brass `--accent #d8a23a` / `--focus-ring #f0c66b` family,
+  NOT the dark-stage tokens (those are for the falling canvas). Everything below lives in an
+  overlay layer above the SVG (the proven `#sheet-labels` pattern: absolutely positioned in the
+  scrolled box, scrolls natively, but this NEW layer DOES take pointer events for the hot zones).
+
+  - **Selection:** a **brass rounded-rect halo** around the selected notehead (2px `--focus-ring`
+    stroke + a soft `--accent-glow` outer glow), drawn in the overlay so it floats over the
+    engraving without recoloring it. The selected note's stem/flag tint to `--accent` if cheap via
+    OSMD, else the halo alone carries it. One selection at a time.
+  - **Note-input insertion cursor:** a **vertical brass caret** (2px `--accent`, ~1 staff-height
+    tall) at the insertion time-x, spanning the active staff, with a faint brass wash on the target
+    line/space the next note would land on as the pointer/selected-pitch moves. It must read as
+    distinct from the green OSMD PLAYBACK cursor: playback cursor is the existing translucent green
+    box (sweeps during Play); the edit caret is a thin brass vertical line (static, only in Edit).
+    Different color + different shape = no confusion.
+  - **"Bar doesn't add up":** the brass left-bracket + `!` chip from Decision 3.
+  - **Original-vs-edited:** because the sheet is now re-rendered from the edits, an edited note is
+    just part of the engraving (no per-note divergence marker needed, unlike #6). Instead, offer a
+    quiet, OPTIONAL **"show original scan" ghost**: a toggle that overlays the pre-edit notehead
+    positions as faint brass-brown ghosts (~30% ink) so the user can compare against the raw scan.
+    Off by default; it is a triage aid, not always-on clutter. (This replaces #6's mandatory dashed
+    marker: divergence-from-scan is now opt-in comparison, not a permanent warning, since the staff
+    is correct by construction.)
+  - **Low-confidence (OMR uncertainty) highlight:** notes the scanner is unsure about get a
+    **faint brass UNDERLINE/tint under the notehead** (a ~3px brass-brown soft bar, ~40% alpha) so
+    the eye is drawn to triage them, distinct from selection (a full halo) and from the
+    bar-doesn't-add-up (a measure-level bracket). Needs a per-note confidence from the OMR pipeline
+    (Tech Lead: thread a `confidence` through to the geometry records the way `spelling` already
+    rides along). If confidence is unavailable for a source, draw nothing (no false alarms).
+  - **Rests:** rests are first-class selectable glyphs; selecting one shows the same brass halo
+    sized to the rest glyph. A rest that resulted from a duration-shorten/delete is just a normal
+    rest (no special mark) so the staff stays clean.
+
+  ### Decision 5 - the "smart" assists, surfaced without clutter
+
+  All three live in a single small **"Assist" cluster** in the edit toolbar (an outline
+  `sparkles`/wand affordance), so they are discoverable but not spread across the chrome:
+
+  - **Jump to least-confident note:** a button (and key **J**) that selects + scrolls to the
+    lowest-confidence un-reviewed note, then the next on each press. This turns "fix the scan" into
+    a guided pass instead of hunting. Announce "Jumped to a low-confidence note, measure 12." Once
+    a note is edited or explicitly OK'd (an "ok" key, e.g. **K**), it drops out of the queue. If no
+    confidence data, the button is hidden (not dead).
+  - **Hear the selection / loop a bar:** a **play-glyph in the edit toolbar** (key **Space while a
+    note is selected** = play just the selection; **Shift+Space** = loop the selected note's
+    MEASURE). This reuses the existing audio pipeline scoped to a time window; it is NOT general
+    transport so it does not trip the "Play exits edit" rule (Decision 1). A small looping
+    indicator (brass pulse on the measure bracket) shows what is sounding; Esc stops. This is the
+    single most useful assist for rhythm work: you fix a duration, tap Space, hear if it is right.
+  - **Re-OMR a region (lasso a messy measure):** a **lasso tool** (key **L** or a marquee button)
+    lets the user drag a rectangle over a botched measure; on release, show a compact
+    **"Re-scan this measure?"** confirmation (brass outline over the selection) and a "Re-scan"
+    button. The crop is sent back through the OMR path (Tech Lead) and the returned notes REPLACE
+    that measure's notes (fixed-bar boundaries keep neighbors intact). Show the scan spinner scoped
+    to the selection (reuse the #86 spinner, small). This is the heavy-hammer escape hatch when
+    note-by-note fixing a mangled bar is slower than just re-reading it. Keep it behind an explicit
+    drag+confirm so it never fires by accident.
+
+  Cluster, do not scatter: the three assists share one toolbar group with the wand glyph so the
+  edit toolbar stays = [duration row] [accidentals] [delete] [hand] [assists]. On phone the
+  assists collapse into an overflow "More" menu (the toolbar is space-constrained, per #33).
+
+  ### Decision 6 - the edit toolbar: a contextual bar docked to the sheet pane, not floating per-note
+
+  Unlike #6's per-bar floating panel (which chased fast falling bars), the staff is static while
+  editing, so dock a **single contextual edit toolbar to the top of the `#sheet` pane** (a thin
+  brass-bordered strip on the cream paper, appearing only in Edit mode). It shows global controls
+  (duration row, note-input toggle, assists) always, and the per-selection controls (accidentals,
+  delete, hand-move) enable/disable based on whether a note is selected. Docked-not-floating
+  because the staff does not move, the controls are always in the same place (learnable), and it
+  never occludes the note you are editing. It collapses responsively like the main toolbar (#84/#85).
+
+  ### Decision 7 - accessibility (parity with the existing aria-live + keyboard bar)
+
+  - The `#sheet` pane becomes a **`role="application"` with `tabindex="0"`** ONLY in Edit mode,
+    with an `aria-label` enumerating the edit keys (mirrors #6's stage treatment). The OSMD SVG is
+    `aria-hidden` (it is decorative engraving); the SEMANTIC model is announced via aria-live.
+  - **Every edit announces via the existing `#edit-live` polite region:** select ("Selected C4,
+    quarter note, right hand, measure 3"), pitch ("Raised to D4"), duration ("Changed to eighth
+    note"), accidental ("F sharp 4"), add ("Added quarter C5"), rest ("Quarter rest"), delete
+    ("Deleted, now a quarter rest"), cross-staff ("Moved to left hand"), bar-warning ("Measure 3
+    now has 4 and a half beats"), assist jumps, and loop start/stop. The note-input cursor
+    announces its landing target as it moves ("Cursor on beat 3, B line").
+  - **Fully keyboard-drivable note entry** is a hard requirement: the A-G + number-row + arrows
+    model above means a screen-reader user can enter a run of notes with no pointer. The lasso
+    re-OMR is the one pointer-first assist; give it a keyboard fallback = **"Re-scan current
+    measure" (Shift+L)** that re-scans the measure containing the selection, so even the heavy
+    assist has a no-pointer path.
+  - Focus ring = shared `--focus-ring`. Reduced-motion: the selection halo and loop pulse are
+    static (no animation), matching #86/#6.
+
+  ### Open decisions for the main agent / user (call these out)
+
+  1. **(BLOCKING, owned by Tech Lead) sheet round-trip feasibility.** This whole model assumes we
+     can re-render the OSMD/VexFlow staff from an edited model live. #6 deferred exactly this
+     ("OSMD round-trip", #6d). If full live re-render is not feasible v1, the FALLBACK is: keep
+     editing on the staff (selection + the brass overlay), but defer the live re-engrave and
+     instead re-derive only the falling view + audio immediately, re-rendering the staff on a
+     debounce or an explicit "apply". Design works either way; the user should know which one Tech
+     Lead can deliver because it changes how "live" the staff feels.
+  2. **Keybinding conflicts to ratify.** I reserved number row = durations + 0=rest, letters =
+     pitch entry, plain arrows = diatonic pitch, modifiers = chromatic/octave/cross-staff. This
+     drops MuseScore's exact accidental keys in favor of Ctrl+arrow chromatic + toolbar buttons, to
+     keep unmodified keys for the frequent actions. Confirm that simplification is acceptable
+     (musicians coming straight from MuseScore lose the `-`/`up-arrow`-spells-up reflex but gain a
+     less crowded keymap).
+  3. **Confidence data availability.** Jump-to-least-confident and the low-confidence highlight
+     need a per-note confidence from the OMR pipeline. If geom/Clarity do not expose it cleanly,
+     these two assists ship dark (hidden) and the rest stands. Worth a Tech Lead/PM check on
+     whether confidence is threadable like `spelling` is.
+  4. **Does Edit mode REPLACE Correct mode immediately, or ship alongside it for a release?** I
+     recommend replace-on-ship (one editor), but if the staff round-trip lands behind the falling
+     edits, we might keep #6's falling editor for single-staff/audio scores that have no sheet to
+     edit. Audio-derived scores have NO staff, so Smart Edit Mode is inherently sheet-only; those
+     scores either keep the #6 falling editor or are simply not editable until they have a sheet.
+     Flagging because it affects whether #6 code is deleted or retained for the no-sheet case.
+
+  ### Tokens / classes introduced (for the Tech Lead)
+  - Reuse `--accent`, `--accent-glow`, `--focus-ring`, `--on-accent`; annotation ink `#6b4f1f`.
+  - New overlay layer `#sheet-edit-layer` (pointer-events: auto, above `#sheet-labels`) holding:
+    `.note-hotzone` (>=24px padded hit target per note), `.note-selected-halo`, `.input-caret`,
+    `.measure-warn` (bracket + `.measure-warn-chip`), `.note-lowconf`, `.scan-ghost`.
+  - `.edit-toolbar` docked to `#sheet` top with `.edit-tool-group` clusters (duration / accidental
+    / delete / hand / assist). New `Edit` toggle replaces `.correct-toggle`.
+  - Per-note `confidence?: number` threaded onto the geometry record alongside `spelling` (Tech
+    Lead). Edit state (mode, sub-mode, selectedId, input-cursor position) lives in main.ts.
+
 ## OMR correction UI v1 (issue #6 / #6a): select + nudge pitch + delete + add (interaction spec)
 
 - **2026-05-31 - Build-ready interaction + visual spec for the first shippable correction
