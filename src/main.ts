@@ -17,7 +17,12 @@ import {
   type ScoreModel,
   type ModelPitch,
 } from "./edit-model";
-import { CommandStack, type SetPitchCommand } from "./edit-commands";
+import {
+  CommandStack,
+  type SetPitchCommand,
+  type DeleteNoteCommand,
+} from "./edit-commands";
+import { shouldStartPitchDrag } from "./edit-pointer";
 
 // Label a note for the edit readout + announcements. Falls back to letter-mode names when the
 // label mode is "off" (which midiToBarLabel returns as an empty string), so the edit cluster and
@@ -112,6 +117,7 @@ const noteEdit = document.getElementById("note-edit") as HTMLDivElement;
 const noteEditReadout = document.getElementById("note-edit-readout") as HTMLSpanElement;
 const pitchDownBtn = document.getElementById("pitch-down-btn") as HTMLButtonElement;
 const pitchUpBtn = document.getElementById("pitch-up-btn") as HTMLButtonElement;
+const deleteNoteBtn = document.getElementById("delete-note-btn") as HTMLButtonElement;
 const editLive = document.getElementById("edit-live") as HTMLSpanElement;
 const tempoSlider = document.getElementById("tempo-slider") as HTMLInputElement;
 const tempoReadout = document.getElementById("tempo-readout") as HTMLButtonElement;
@@ -525,7 +531,7 @@ async function enterEditMode(): Promise<void> {
     canvas.setAttribute("role", "application");
     canvas.setAttribute(
       "aria-label",
-      "Falling notes editor. Up and down select a note; plus and minus change its pitch by a semitone; Shift with plus or minus moves an octave; Control Z undoes.",
+      "Falling notes editor. Up and down select a note; plus and minus change its pitch by a semitone; Shift with plus or minus moves an octave; Delete removes it; Control Z undoes.",
     );
     reflectUndoRedoButtons();
     reflectSharedSelection();
@@ -610,7 +616,7 @@ function renderVerovio(): void {
   verovioHost.setAttribute("role", "application");
   verovioHost.setAttribute(
     "aria-label",
-    "Staff editor. Left and right select a note; up and down change its pitch by a step; Control with up or down changes by a semitone; Shift with up or down by an octave; Control Z undoes.",
+    "Staff editor. Left and right select a note; up and down change its pitch by a step; Control with up or down changes by a semitone; Shift with up or down by an octave; Delete removes it; Control Z undoes.",
   );
   // Always (re)attach the host to #sheet. OSMD owns #sheet and an osmd.load/render between edit
   // sessions can detach our node, so re-appending here keeps the render going into the live DOM
@@ -768,7 +774,16 @@ function commitPitchEdit(next: ModelPitch): void {
   const handle = scoreModel.handles[selectedHandle];
   if (!handle) return;
   const before = handle.pitch;
-  const fromLabel = pitchLabel(midiFromPitch(before), spellingFromPitch(before));
+  // The stepping functions clamp to the 88-key range, so a step at the boundary returns the SAME
+  // pitch. Treat that as a no-op: do not push a command, just announce the edge gently so a
+  // keyboard/SR user knows the press registered (the boundary, not a dropped keystroke).
+  const beforeMidi = midiFromPitch(before);
+  if (midiFromPitch(next) === beforeMidi) {
+    editLive.textContent =
+      beforeMidi <= 21 ? "Already at the lowest key." : "Already at the highest key.";
+    return;
+  }
+  const fromLabel = pitchLabel(beforeMidi, spellingFromPitch(before));
   const cmd: SetPitchCommand = {
     kind: "setPitch",
     handleId: selectedHandle,
@@ -792,16 +807,26 @@ function verticalVerb(fromMidi: number, toMidi: number): string {
 // Shared tail of an edit (or undo/redo): re-engrave the staff from the model, re-derive the
 // falling notes from the model's new pitches, rebuild the maps, refresh selection, undo/redo
 // buttons, and announce. The audio + canvas swap goes through reloadNotes (transport-safe).
-function finishEdit(announce: string): void {
+//
+// `explicitNotes` is supplied by a STRUCTURAL edit (delete / its undo) whose VisNote COUNT changed:
+// the caller has already spliced the falling note out (or back in), so we use that array verbatim
+// instead of the index-stable pitch projection (which assumes a same-length array). A pitch edit
+// passes no array and gets the projection (midi/spelling from the model onto the existing notes).
+function finishEdit(announce: string, explicitNotes?: VisNote[]): void {
   if (!score) return;
-  // Re-derive every mapped handle's pitch onto the falling notes from the model (covers undo of
-  // a multi-note future too, though P1 edits are one note at a time).
-  let notes = score.notes.slice();
-  if (scoreModel) {
-    for (const h of scoreModel.handles) {
-      const visIndex = handleToVisIndex.get(h.id);
-      if (visIndex !== undefined) {
-        notes[visIndex] = { ...notes[visIndex], midi: h.midi, spelling: spellingFromPitch(h.pitch) };
+  let notes: VisNote[];
+  if (explicitNotes) {
+    notes = explicitNotes;
+  } else {
+    // Re-derive every mapped handle's pitch onto the falling notes from the model (covers undo of
+    // a multi-note future too, though P1 edits are one note at a time).
+    notes = score.notes.slice();
+    if (scoreModel) {
+      for (const h of scoreModel.handles) {
+        const visIndex = handleToVisIndex.get(h.id);
+        if (visIndex !== undefined) {
+          notes[visIndex] = { ...notes[visIndex], midi: h.midi, spelling: spellingFromPitch(h.pitch) };
+        }
       }
     }
   }
@@ -823,6 +848,13 @@ function doUndo(): void {
   }
   const cmd = commandStack.undo();
   if (!cmd) return;
+  if (cmd.kind === "deleteNote") {
+    // Undo of a delete: the model restored the note (re-indexed, so it reclaims its original
+    // document-position id) and the falling note must be spliced BACK in at its original slot. The
+    // VisNote count grows by one, so pass the explicit array to finishEdit.
+    undoDelete(cmd);
+    return;
+  }
   // Re-select the affected note (it now shows its prior pitch) and announce what reversed. Do
   // NOT rebuild the maps here: finishEdit projects the reverted model pitch onto the falling
   // notes using the existing (index-stable) map, THEN reloadNotes + rederiveMaps rebuild it
@@ -842,11 +874,54 @@ function doRedo(): void {
   }
   const cmd = commandStack.redo();
   if (!cmd) return;
+  if (cmd.kind === "deleteNote") {
+    // Redo of a delete: the model re-deleted (re-derived its record); splice the falling note OUT
+    // again and move the selection to a neighbor (or clear), as the original delete did.
+    redoDelete(cmd);
+    return;
+  }
   // Same map ordering as doUndo: project with the existing map, then rebuild in finishEdit.
   selectedHandle = cmd.handleId;
   const verb = verticalVerb(midiFromPitch(cmd.before), midiFromPitch(cmd.after));
   const toLabel = pitchLabel(midiFromPitch(cmd.after), spellingFromPitch(cmd.after));
   finishEdit(`Redid: ${pitchLabel(midiFromPitch(cmd.before), spellingFromPitch(cmd.before))} ${verb} ${toLabel}`);
+}
+
+// Splice the deleted falling note back in (undo of a delete) at its original slot and re-select
+// the restored note. The model has ALREADY restored + re-indexed (the note reclaims handleId).
+function undoDelete(cmd: DeleteNoteCommand): void {
+  if (!score) return;
+  const notes = score.notes.slice();
+  if (cmd.visNote && cmd.visIndex !== null) {
+    const restored: VisNote = {
+      midi: cmd.visNote.midi,
+      time: cmd.visNote.time,
+      duration: cmd.visNote.duration,
+      hand: cmd.visNote.hand,
+      spelling: cmd.visNote.spelling,
+    };
+    const at = Math.min(cmd.visIndex, notes.length);
+    notes.splice(at, 0, restored);
+  }
+  selectedHandle = cmd.handleId; // the restored note is back at its original document position
+  const label = cmd.visNote
+    ? pitchLabel(cmd.visNote.midi, cmd.visNote.spelling)
+    : "note";
+  finishEdit(`Restored ${label}`, notes);
+}
+
+// Splice the deleted falling note back OUT (redo of a delete) and move selection to a neighbor.
+// The model has ALREADY re-deleted + re-indexed, so every pitched handle after the deleted one
+// shifted down by one: the note now AT cmd.handleId is the original "next note" neighbor, else the
+// one before it (deleting the last note), else nothing left to select.
+function redoDelete(cmd: DeleteNoteCommand): void {
+  if (!score || cmd.visIndex === null || !scoreModel) return;
+  const notes = score.notes.slice();
+  notes.splice(cmd.visIndex, 1);
+  const next = scoreModel.handles[cmd.handleId] ?? scoreModel.handles[cmd.handleId - 1] ?? null;
+  selectedHandle = next ? next.id : null;
+  const label = cmd.visNote ? pitchLabel(cmd.visNote.midi, cmd.visNote.spelling) : "note";
+  finishEdit(`Deleted ${label}`, notes);
 }
 
 // Dim/enable the undo/redo buttons to match the stacks (Designer P1-6: visibly dimmed +
@@ -882,6 +957,76 @@ function canvasPitchStep(octaveMod: boolean, dir: 1 | -1): void {
   if (!h) return;
   const next = octaveMod ? octaveStep(h.pitch, dir) : chromaticStep(h.pitch, dir);
   commitPitchEdit(next);
+}
+
+// The <note> element the selection should move to AFTER deleting `handleId`: the next note in
+// musical order, else the previous, else null (the score is now empty of pitched notes). Returned
+// as the DOM element because a delete RE-INDEXES the handles, so the id is not stable across it;
+// we re-find the handle owning this element after the delete. Excludes tie continuations (they
+// have no VisNote to select), matching the staff nav order.
+function neighborNoteElAfterDelete(handleId: number): Element | null {
+  if (!scoreModel) return null;
+  const order = scoreModel.handles
+    .filter((h) => !h.isTieContinuation)
+    .slice()
+    .sort((a, b) => a.onsetSec - b.onsetSec || a.midi - b.midi);
+  const pos = order.findIndex((h) => h.id === handleId);
+  if (pos === -1) return null;
+  const neighbor = order[pos + 1] ?? order[pos - 1] ?? null;
+  return neighbor ? neighbor.el : null;
+}
+
+// Delete the shared-selected note (Smart Edit Mode delete, model-level, fixed-bar, undoable). The
+// note becomes a REST of the same duration (a chord member is removed) so the measure still adds
+// up and nothing after it reflows; the rest is not a VisNote, so it drops from the falling notes
+// and the audio (the VisNote count falls by one). Routed through the command stack so it is
+// undoable (undo restores the note AND the prior selection). Moves the selection to a sensible
+// neighbor (next note, else previous, else clears). No-op without a selected, mapped note.
+function deleteSelectedNote(): void {
+  if (!scoreModel || !commandStack || selectedHandle === null || !score) return;
+  const handleId = selectedHandle;
+  const handle = scoreModel.handles[handleId];
+  if (!handle) return;
+  // The falling note this handle currently owns (so we can splice it out and announce its name).
+  // A tie continuation maps to no VisNote; deleting it would not change the falling notes, so we
+  // require a mapped VisNote (the staff/canvas only let you select mapped notes in practice).
+  const visIndex = handleToVisIndex.get(handleId);
+  if (visIndex === undefined) return;
+  const deletedLabel = editNoteLabel(score.notes[visIndex]);
+  const deletedVisNote = score.notes[visIndex];
+
+  // Pick the neighbor to select next BEFORE the delete re-indexes the handles, by its DOM element.
+  const neighborEl = neighborNoteElAfterDelete(handleId);
+
+  // Push the delete command: apply() calls model.deleteNote (mutates the DOM + re-indexes) and
+  // stashes the DeleteRecord on the command for undo. Record the falling note + its index on the
+  // command too, so undo can splice it back at the right slot.
+  const cmd: DeleteNoteCommand = {
+    kind: "deleteNote",
+    handleId,
+    record: null,
+    visNote: {
+      midi: deletedVisNote.midi,
+      time: deletedVisNote.time,
+      duration: deletedVisNote.duration,
+      hand: deletedVisNote.hand,
+      spelling: deletedVisNote.spelling,
+    },
+    visIndex,
+  };
+  commandStack.push(cmd);
+
+  // Re-derive the falling notes WITHOUT the deleted one (the count drops by one).
+  const notes = score.notes.slice();
+  notes.splice(visIndex, 1);
+
+  // Move the shared selection to the neighbor (now re-indexed) by re-finding its handle, else clear.
+  selectedHandle =
+    neighborEl !== null
+      ? (scoreModel.handles.find((h) => h.el === neighborEl)?.id ?? null)
+      : null;
+
+  finishEdit(`Deleted ${deletedLabel}`, notes);
 }
 
 // Load MusicXML into OSMD and rebuild the pipeline. Shared by the direct MusicXML file
@@ -1677,6 +1822,7 @@ redoBtn.addEventListener("click", () => doRedo());
 // Delegated on the persistent #sheet container so it survives re-renders.
 sheetContainer.addEventListener("pointerdown", (e) => {
   if (!editMode || playing) return;
+  if (!e.isPrimary) return; // ignore secondary touch points entirely
   const target = e.target as Element | null;
   const noteG = target?.closest("g.note") as SVGGElement | null;
   if (noteG && noteG.id) {
@@ -1687,7 +1833,8 @@ sheetContainer.addEventListener("pointerdown", (e) => {
     const handle = visIndex === undefined ? undefined : visIndexToHandle.get(visIndex);
     if (handle === undefined) return;
     selectHandle(handle);
-    beginStaffDrag(noteG, handle, e);
+    // A plain primary left click selects (above) and arms a drag; right-click / touch only select.
+    if (shouldStartPitchDrag(e)) beginStaffDrag(noteG, handle, e);
   } else if (target?.closest("#verovio-host")) {
     // A click on the staff but not on a notehead clears the selection.
     selectedHandle = null;
@@ -1704,6 +1851,7 @@ sheetContainer.addEventListener("pointerdown", (e) => {
 // canvas-local px and hit-test against the current playhead so the rectangle matches what is seen.
 canvas.addEventListener("pointerdown", (e) => {
   if (!score || !editMode || playing) return;
+  if (!e.isPrimary) return; // ignore secondary touch points entirely
   const rect = canvas.getBoundingClientRect();
   const px = e.clientX - rect.left;
   const py = e.clientY - rect.top;
@@ -1717,13 +1865,16 @@ canvas.addEventListener("pointerdown", (e) => {
   const handle = visIndexToHandle.get(hit);
   if (handle === undefined) return; // a bar with no model handle (defensive); just no-op the drag
   selectHandle(handle);
-  beginCanvasDrag(handle, e);
+  // A plain primary left click selects (above) and arms a drag; right-click / touch only select.
+  if (shouldStartPitchDrag(e)) beginCanvasDrag(handle, e);
 });
 
 // Edit cluster buttons (Smart Edit P1): act on the ONE shared selection. Pitch up/down on the
 // cluster are DIATONIC (the staff's native unit, the discoverable mirror of the staff arrows).
 pitchUpBtn.addEventListener("click", () => staffPitchStep("diatonic", 1));
 pitchDownBtn.addEventListener("click", () => staffPitchStep("diatonic", -1));
+// Trash button: delete the shared-selected note (model-level, fixed-bar, undoable).
+deleteNoteBtn.addEventListener("click", () => deleteSelectedNote());
 
 // Whether an element is a form field, so editing shortcuts never steal typing (the rename input).
 function isFormFieldTarget(target: EventTarget | null): boolean {
@@ -1782,6 +1933,14 @@ window.addEventListener("keydown", (e) => {
   }
 
   if (selectedHandle === null) return; // the remaining keys need a selected note
+
+  // Delete / Backspace: remove the selected note (model-level, fixed-bar, undoable). Works from
+  // either surface since it acts on the one shared selection.
+  if (e.key === "Delete" || e.key === "Backspace") {
+    e.preventDefault();
+    deleteSelectedNote();
+    return;
+  }
 
   if (e.key === "+" || e.key === "=") {
     e.preventDefault();

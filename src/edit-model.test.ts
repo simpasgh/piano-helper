@@ -10,6 +10,7 @@ import { describe, it, expect } from "vitest";
 import {
   parseScoreModel,
   midiFromPitch,
+  pitchInRange,
   keyAlterForLetter,
   diatonicStep,
   chromaticStep,
@@ -19,6 +20,7 @@ import {
   spellingFromPitch,
   type ModelPitch,
 } from "./edit-model";
+import { FIRST_MIDI, LAST_MIDI } from "./piano";
 
 // A 1-part / 2-staff grand staff (the omr-worker shape): 4 RH quarters (C5 D5 E5 F5) over a
 // 3-note LH whole chord (C3 E3 G3), default 120bpm so a quarter = 0.5s. Mirrors the committed
@@ -334,5 +336,178 @@ describe("re-derivation across edits + undo (selection-follows invariant)", () =
     expect(vis[0].midi).toBe(72); // the undo landed on the falling notes
     map = buildHandleToVisIndex(model.handles, vis);
     expect(map.get(0)).toBe(0);
+  });
+});
+
+// ===== 88-key clamp (Smart Edit P1 review note): a step must never push a note off MIDI 21..108 =====
+describe("pitchInRange", () => {
+  it("is true inside the 88-key range, false outside", () => {
+    expect(pitchInRange(p("A", 0))).toBe(true); // MIDI 21, lowest key
+    expect(pitchInRange(p("C", 8))).toBe(true); // MIDI 108, highest key
+    expect(pitchInRange(p("A", 0, -1))).toBe(false); // MIDI 20, below the keyboard
+    expect(pitchInRange(p("C", 8, 1))).toBe(false); // MIDI 109, above the keyboard
+  });
+});
+
+describe("stepping clamps to the 88-key range (boundary step is a no-op)", () => {
+  it("diatonicStep does not go below A0 or above C8", () => {
+    // Lowest key is A0 (MIDI 21). A diatonic step DOWN would be G0 (MIDI 19): clamped to a no-op.
+    const a0 = p("A", 0);
+    expect(midiFromPitch(a0)).toBe(FIRST_MIDI);
+    expect(diatonicStep(a0, -1, 0)).toEqual(a0); // unchanged
+    // Highest key is C8 (MIDI 108). A diatonic step UP would be D8 (MIDI 110): clamped.
+    const c8 = p("C", 8);
+    expect(midiFromPitch(c8)).toBe(LAST_MIDI);
+    expect(diatonicStep(c8, 1, 0)).toEqual(c8); // unchanged
+    // A step AWAY from the boundary still moves (not frozen).
+    expect(midiFromPitch(diatonicStep(a0, 1, 0))).toBe(23); // A0 -> B0
+    expect(midiFromPitch(diatonicStep(c8, -1, 0))).toBe(107); // C8 -> B7
+  });
+
+  it("chromaticStep does not cross either boundary", () => {
+    const a0 = p("A", 0);
+    expect(chromaticStep(a0, -1)).toEqual(a0); // A0 down would be 20: no-op
+    expect(midiFromPitch(chromaticStep(a0, 1))).toBe(22); // A0 up -> A#0, fine
+    const c8 = p("C", 8);
+    expect(chromaticStep(c8, 1)).toEqual(c8); // C8 up would be 109: no-op
+    expect(midiFromPitch(chromaticStep(c8, -1))).toBe(107); // C8 down -> B7, fine
+  });
+
+  it("octaveStep does not push a note off the keyboard", () => {
+    // C1 (MIDI 24) down an octave is C0 (MIDI 12), below the keyboard: clamped to a no-op.
+    const c1 = p("C", 1);
+    expect(octaveStep(c1, -1)).toEqual(c1);
+    // C7 (MIDI 96) up an octave is C8 (MIDI 108), still on the keyboard: allowed.
+    expect(midiFromPitch(octaveStep(p("C", 7), 1))).toBe(108);
+    // C8 up an octave would be C9 (120): clamped.
+    const c8 = p("C", 8);
+    expect(octaveStep(c8, 1)).toEqual(c8);
+  });
+});
+
+// ===== Model-level DELETE (fixed-bar, undoable, both surfaces re-derive) =====
+//
+// The time EXTENT of the first measure in divisions: walk its children tracking a cursor exactly
+// like the model does (non-chord notes + rests advance it, <backup>/<forward> move it, chord
+// members are parallel), and return the furthest the cursor reaches. This is the fixed-bar invariant
+// a delete must preserve: replacing a note with a rest of the same duration, removing a chord
+// member, or promoting a chord member all leave this extent unchanged. Handles the grand staff's
+// two voices joined by <backup> (so the RH run and the LH whole note overlap, extent 8, not 16).
+function measureFilledDivs(xml: string): number {
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  const measure = doc.getElementsByTagName("measure").item(0);
+  if (!measure) return 0;
+  let cursor = 0;
+  let extent = 0;
+  for (const node of Array.from(measure.children)) {
+    const tag = node.tagName.toLowerCase();
+    const durOf = (el: Element) =>
+      Number(el.getElementsByTagName("duration").item(0)?.textContent ?? "0");
+    if (tag === "backup") {
+      cursor -= durOf(node);
+    } else if (tag === "forward") {
+      cursor += durOf(node);
+    } else if (tag === "note") {
+      if (node.getElementsByTagName("chord").item(0)) continue; // chord member: parallel, no advance
+      cursor += durOf(node);
+    }
+    extent = Math.max(extent, cursor);
+  }
+  return extent;
+}
+
+describe("ScoreModel.deleteNote / restoreNote", () => {
+  it("replaces a standalone note with a REST of the same duration (the bar still adds up)", () => {
+    const model = parseScoreModel(GRAND_STAFF_XML);
+    const before = measureFilledDivs(model.serialize()); // 4 RH quarters (2 each) = 8 divs
+    expect(before).toBe(8);
+    // Delete the 2nd RH quarter (handle 1 = D5). It is alone at its onset, so it becomes a rest.
+    model.deleteNote(1);
+    const xml = model.serialize();
+    expect(measureFilledDivs(xml)).toBe(before); // fixed-bar: total unchanged
+    // The note count dropped by one (6 pitched handles now); D5 at onset 0.5 is gone.
+    expect(model.handles).toHaveLength(6);
+    expect(model.handles.map((h) => h.midi)).toEqual([72, 76, 77, 48, 52, 55]);
+    // A <rest/> now sits where D5 was, with the same duration (2 divs).
+    const reparsed = new DOMParser().parseFromString(xml, "application/xml");
+    const rests = Array.from(reparsed.getElementsByTagName("rest"));
+    expect(rests.length).toBe(1);
+    const restNote = rests[0].parentElement!;
+    expect(restNote.getElementsByTagName("duration").item(0)?.textContent).toBe("2");
+  });
+
+  it("delete + restore round-trips exactly (undo brings the note back at its position + pitch)", () => {
+    const model = parseScoreModel(GRAND_STAFF_XML);
+    const originalMidis = model.handles.map((h) => h.midi);
+    const originalXmlNotes = model.handles.length;
+    const rec = model.deleteNote(2); // delete E5 (3rd RH note)
+    expect(rec).not.toBeNull();
+    expect(model.handles).toHaveLength(originalXmlNotes - 1);
+    model.restoreNote(rec!);
+    // Handles are back to the original count, order, and pitches (the note reclaimed its slot).
+    expect(model.handles).toHaveLength(originalXmlNotes);
+    expect(model.handles.map((h) => h.midi)).toEqual(originalMidis);
+    // Handle ids are re-assigned by document order, so the restored note is handle 2 again.
+    expect(model.handles[2].midi).toBe(76); // E5 back in position 2
+  });
+
+  it("removes a CHORD MEMBER without disturbing the bar or the other chord notes", () => {
+    const model = parseScoreModel(GRAND_STAFF_XML);
+    const before = measureFilledDivs(model.serialize());
+    // Handle 5 = E3, the 2nd note of the LH whole-note chord (a <chord/> member).
+    expect(model.handles[5].isChordMember).toBe(true);
+    const rec = model.deleteNote(5);
+    const xml = model.serialize();
+    expect(measureFilledDivs(xml)).toBe(before); // chord member is parallel: bar unchanged
+    // The chord is now C3 + G3; E3 is gone, no rest was added (a rest cannot stack in a chord).
+    expect(model.handles.map((h) => h.midi)).toEqual([72, 74, 76, 77, 48, 55]);
+    expect(Array.from(new DOMParser().parseFromString(xml, "application/xml").getElementsByTagName("rest")).length).toBe(0);
+    // Restore puts E3 back as a chord member between C3 and G3.
+    model.restoreNote(rec!);
+    expect(model.handles.map((h) => h.midi)).toEqual([72, 74, 76, 77, 48, 52, 55]);
+    expect(model.handles[5].isChordMember).toBe(true);
+  });
+
+  it("deleting a chord ONSET note promotes the next member and keeps the bar (then restores)", () => {
+    const model = parseScoreModel(GRAND_STAFF_XML);
+    const before = measureFilledDivs(model.serialize());
+    // Handle 4 = C3, the ONSET note of the LH chord (no <chord/>); handles 5,6 are its members.
+    expect(model.handles[4].isChordMember).toBe(false);
+    const rec = model.deleteNote(4);
+    const xml = model.serialize();
+    expect(measureFilledDivs(xml)).toBe(before); // promoted member carries the duration: bar unchanged
+    // C3 is gone; E3 + G3 remain and still sound (E3 is now the chord onset).
+    expect(model.handles.map((h) => h.midi)).toEqual([72, 74, 76, 77, 52, 55]);
+    // Restore: C3 is back as the onset, E3 demoted to a member again.
+    model.restoreNote(rec!);
+    expect(model.handles.map((h) => h.midi)).toEqual([72, 74, 76, 77, 48, 52, 55]);
+    expect(model.handles[4].isChordMember).toBe(false); // C3 onset again
+    expect(model.handles[5].isChordMember).toBe(true); // E3 a member again
+  });
+
+  it("the handle->VisNote map rebuilds after a delete (the remaining notes still map)", () => {
+    const model = parseScoreModel(GRAND_STAFF_XML);
+    model.deleteNote(1); // drop D5 (onset 0.5)
+    // The re-derived VisNote[] no longer has D5; the surviving notes keep their (midi, onset).
+    const visNotes = [
+      { midi: 72, time: 0 },
+      { midi: 76, time: 1 },
+      { midi: 77, time: 1.5 },
+      { midi: 48, time: 0 },
+      { midi: 52, time: 0 },
+      { midi: 55, time: 0 },
+    ];
+    const map = buildHandleToVisIndex(model.handles, visNotes);
+    expect(map.size).toBe(6);
+    // Handle 0 (C5) -> VisNote 0; handle 1 is now E5 (was index-2 pre-delete) -> VisNote 1.
+    expect(map.get(0)).toBe(0);
+    expect(map.get(1)).toBe(1); // the reindexed handle for E5
+    expect(model.handles[1].midi).toBe(76);
+  });
+
+  it("deleteNote on an out-of-range id is a no-op returning null", () => {
+    const model = parseScoreModel(GRAND_STAFF_XML);
+    expect(model.deleteNote(99)).toBeNull();
+    expect(model.handles).toHaveLength(7);
   });
 });

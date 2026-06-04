@@ -3,8 +3,14 @@
 // the real ScoreModel's setPitch is exercised in edit-model.test.ts.
 
 import { describe, it, expect } from "vitest";
-import { CommandStack, applyCommand, invertCommand, type SetPitchCommand } from "./edit-commands";
-import type { ModelPitch, ScoreModel } from "./edit-model";
+import {
+  CommandStack,
+  applyCommand,
+  invertCommand,
+  type SetPitchCommand,
+  type DeleteNoteCommand,
+} from "./edit-commands";
+import type { DeleteRecord, ModelPitch, ScoreModel } from "./edit-model";
 
 const p = (step: ModelPitch["step"], octave: number, alter = 0): ModelPitch => ({
   step,
@@ -12,16 +18,39 @@ const p = (step: ModelPitch["step"], octave: number, alter = 0): ModelPitch => (
   alter,
 });
 
-// A minimal ScoreModel stand-in: records the last pitch set per handle so the tests can assert
-// what apply/invert wrote. Only the methods the command stack calls are implemented.
-function stubModel(): ScoreModel & { pitches: Map<number, ModelPitch> } {
+// A minimal ScoreModel stand-in: records the last pitch set per handle, and a delete/restore log,
+// so the tests can assert what apply/invert routed through the model. Only the methods the command
+// stack calls are implemented. deleteNote returns a sentinel record so the stack stores + replays it.
+function stubModel(): ScoreModel & {
+  pitches: Map<number, ModelPitch>;
+  deleted: number[];
+  restored: DeleteRecord[];
+} {
   const pitches = new Map<number, ModelPitch>();
+  const deleted: number[] = [];
+  const restored: DeleteRecord[] = [];
   return {
     pitches,
+    deleted,
+    restored,
     handles: [],
     fifthsForHandle: () => 0,
     setPitch: (id: number, pitch: ModelPitch) => {
       pitches.set(id, pitch);
+    },
+    deleteNote: (id: number): DeleteRecord => {
+      deleted.push(id);
+      // A stub record: the real DOM fields are not exercised here (edit-model.test.ts covers them).
+      return {
+        removedClone: { tag: `note-${id}` } as unknown as Element,
+        parent: {} as Element,
+        nextSibling: null,
+        restPlaceholder: null,
+        promoted: null,
+      };
+    },
+    restoreNote: (record: DeleteRecord) => {
+      restored.push(record);
     },
     serialize: () => "",
   };
@@ -32,6 +61,14 @@ const setPitch = (handleId: number, before: ModelPitch, after: ModelPitch): SetP
   handleId,
   before,
   after,
+});
+
+const deleteNote = (handleId: number): DeleteNoteCommand => ({
+  kind: "deleteNote",
+  handleId,
+  record: null,
+  visNote: null,
+  visIndex: null,
 });
 
 describe("applyCommand / invertCommand", () => {
@@ -124,5 +161,56 @@ describe("CommandStack", () => {
     expect(stack.canUndo()).toBe(true);
     stack.undo();
     expect(model.pitches.get(0)).toEqual(p("C", 4)); // undo still reverses the whole gesture
+  });
+});
+
+describe("DeleteNoteCommand (apply / invert / stack)", () => {
+  it("apply deletes via the model and stashes the record; invert restores from it", () => {
+    const model = stubModel();
+    const cmd = deleteNote(2);
+    applyCommand(model, cmd);
+    expect(model.deleted).toEqual([2]); // routed through model.deleteNote
+    expect(cmd.record).not.toBeNull(); // the record was captured for undo
+    const captured = cmd.record;
+    invertCommand(model, cmd);
+    expect(model.restored).toEqual([captured]); // restoreNote got the captured record
+  });
+
+  it("push applies a delete and undo restores it (round-trip through the stack)", () => {
+    const model = stubModel();
+    const stack = new CommandStack(model);
+    stack.push(deleteNote(1));
+    expect(model.deleted).toEqual([1]);
+    expect(stack.canUndo()).toBe(true);
+    stack.undo();
+    expect(model.restored.length).toBe(1); // the note was restored on undo
+    expect(stack.canRedo()).toBe(true);
+  });
+
+  it("redo re-deletes, re-deriving a fresh record (deletion is deterministic)", () => {
+    const model = stubModel();
+    const stack = new CommandStack(model);
+    const cmd = deleteNote(0);
+    stack.push(cmd);
+    const recordAfterPush = cmd.record;
+    stack.undo();
+    stack.redo();
+    expect(model.deleted).toEqual([0, 0]); // deleted on push AND on redo
+    // apply() always re-runs model.deleteNote, so redo captures a FRESH record object.
+    expect(cmd.record).not.toBeNull();
+    expect(cmd.record).not.toBe(recordAfterPush); // a new record, not the stale one
+  });
+
+  it("a delete then a pitch edit, both undone in LIFO order, route to the right model calls", () => {
+    const model = stubModel();
+    const stack = new CommandStack(model);
+    stack.push(setPitch(5, p("C", 4), p("D", 4)));
+    stack.push(deleteNote(3));
+    expect(model.pitches.get(5)).toEqual(p("D", 4));
+    expect(model.deleted).toEqual([3]);
+    stack.undo(); // undoes the delete first
+    expect(model.restored.length).toBe(1);
+    stack.undo(); // then the pitch edit
+    expect(model.pitches.get(5)).toEqual(p("C", 4));
   });
 });
