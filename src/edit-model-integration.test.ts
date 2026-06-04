@@ -87,4 +87,22 @@ describe("Smart Edit P1 model <-> Verovio round-trip", () => {
     // Handle 0 still maps to VisNote 0 (its onset never moved, only its pitch).
     expect(map.get(0)).toBe(0);
   });
+
+  it("a model DELETE drops the note from the render (rest engraves) and round-trips on restore", () => {
+    const model = parseScoreModel(GRAND_STAFF_XML);
+    // Delete the 2nd RH quarter (D5, MIDI 74, handle 1). It becomes a rest of the same duration.
+    const rec = model.deleteNote(1);
+    expect(rec).not.toBeNull();
+    // The falling notes the app re-derives drop that VisNote (index 1), so render with 6 notes.
+    const editedVis = visNotes.filter((_, i) => i !== 1);
+    const render = renderMusicXml(toolkit, model.serialize(), editedVis, 800);
+    // Verovio now lays out 6 noteheads (the rest is not a note <g>), and D5 (74) is gone.
+    expect(render.notes).toHaveLength(6);
+    expect(render.notes.map((n) => n.midi)).not.toContain(74);
+    // Restore brings D5 back: a fresh render lays out all 7 again with 74 present.
+    model.restoreNote(rec!);
+    const restored = renderMusicXml(toolkit, model.serialize(), visNotes, 800);
+    expect(restored.notes).toHaveLength(7);
+    expect(restored.notes.map((n) => n.midi)).toContain(74);
+  });
 });

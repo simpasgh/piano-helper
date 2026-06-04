@@ -10,7 +10,7 @@
 // re-render / re-derive / reloadNotes path, so undo restores both surfaces + audio exactly like
 // a fresh edit. This keeps the stack logic unit-testable against a tiny model stub.
 
-import type { ModelPitch, ScoreModel } from "./edit-model";
+import type { DeleteRecord, ModelPitch, ScoreModel } from "./edit-model";
 
 // A pitch edit on one model note. `handleId` is the stable handle index; `before`/`after` are
 // the written pitches. apply() sets `after`; invert() sets `before`. Used by BOTH surfaces (the
@@ -22,12 +22,41 @@ export interface SetPitchCommand {
   after: ModelPitch;
 }
 
-export type EditCommand = SetPitchCommand;
+// A minimal VisNote shape (no import from visualizer, to keep the command stack model-agnostic and
+// DOM-free for its unit tests). The command stack NEVER reads this; only the orchestrator
+// (main.ts) uses it to splice the deleted falling note out on delete and back in on undo.
+export interface VisNoteSnapshot {
+  midi: number;
+  time: number;
+  duration: number;
+  hand?: "left" | "right" | "unknown"; // optional, matching VisNote.hand (absent = unknown)
+  spelling?: { letter: import("./piano").NoteLetter; alter: number };
+}
+
+// A DELETE of one model note (fixed-bar: it becomes a rest / is removed from a chord; the measure
+// still adds up, nothing after reflows). `handleId` is the document-position id of the note.
+// apply() deletes it via the model and stashes the model's DeleteRecord in `record`; invert()
+// restores it from that record. `visNote` + `visIndex` are the orchestrator's bookkeeping so the
+// falling note can be removed and re-added at the right slot (the command stack ignores them).
+export interface DeleteNoteCommand {
+  kind: "deleteNote";
+  handleId: number;
+  record: DeleteRecord | null; // filled by apply(); used by invert(). Re-filled on redo.
+  visNote: VisNoteSnapshot | null;
+  visIndex: number | null;
+}
+
+export type EditCommand = SetPitchCommand | DeleteNoteCommand;
 
 export function applyCommand(model: ScoreModel, cmd: EditCommand): void {
   switch (cmd.kind) {
     case "setPitch":
       model.setPitch(cmd.handleId, cmd.after);
+      break;
+    case "deleteNote":
+      // Re-derive the record on every apply (initial push AND redo) so it always describes the
+      // CURRENT DOM. Deletion is deterministic, so a redo reproduces the same removal.
+      cmd.record = model.deleteNote(cmd.handleId);
       break;
   }
 }
@@ -36,6 +65,9 @@ export function invertCommand(model: ScoreModel, cmd: EditCommand): void {
   switch (cmd.kind) {
     case "setPitch":
       model.setPitch(cmd.handleId, cmd.before);
+      break;
+    case "deleteNote":
+      if (cmd.record) model.restoreNote(cmd.record);
       break;
   }
 }

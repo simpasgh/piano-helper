@@ -26,7 +26,7 @@
 // after each edit (reusing the proven keying in verovio-view.ts), so selection follows a note
 // across re-renders even though its MIDI changed.
 
-import type { NoteLetter, NoteSpelling } from "./piano";
+import { FIRST_MIDI, LAST_MIDI, type NoteLetter, type NoteSpelling } from "./piano";
 
 // A diatonic pitch as written on the staff: letter + octave (scientific) + accidental shift.
 // This is what an edit sets and what serialize() writes back into <pitch>.
@@ -71,6 +71,15 @@ export function midiFromPitch(p: ModelPitch): number {
   return (p.octave + 1) * 12 + LETTER_SEMITONE[p.step] + p.alter;
 }
 
+// Whether a written pitch lands on the 88-key piano (MIDI 21..108). The stepping functions clamp
+// to this range so an edit can never push a note off the keyboard: at the boundary the step is a
+// no-op (the function returns the unchanged pitch), which the caller detects (same MIDI) and skips
+// so no command is pushed and nothing is announced as a move.
+export function pitchInRange(p: ModelPitch): boolean {
+  const m = midiFromPitch(p);
+  return m >= FIRST_MIDI && m <= LAST_MIDI;
+}
+
 // The order of sharps / flats as they appear in a key signature, by letter. Positive `fifths`
 // adds sharps in this order; negative adds flats in the reverse order. Used to decide a
 // letter's DIATONIC accidental in a given key (key-signature-aware diatonic stepping).
@@ -106,7 +115,9 @@ export function diatonicStep(p: ModelPitch, dir: 1 | -1, fifths: number): ModelP
     octave -= 1; // C -> B of the octave below
   }
   const step = LETTERS[next];
-  return { step, octave, alter: keyAlterForLetter(step, fifths) };
+  const candidate: ModelPitch = { step, octave, alter: keyAlterForLetter(step, fifths) };
+  // Clamp to the 88-key range: at the boundary the step is a no-op (return the unchanged pitch).
+  return pitchInRange(candidate) ? candidate : p;
 }
 
 // Move a pitch one CHROMATIC semitone (Ctrl on the staff; the canvas's native unit). Prefer
@@ -115,6 +126,8 @@ export function diatonicStep(p: ModelPitch, dir: 1 | -1, fifths: number): ModelP
 // correct enharmonic so the pitch is still right. Pure; preserves a valid spelling for Verovio.
 export function chromaticStep(p: ModelPitch, dir: 1 | -1): ModelPitch {
   const targetMidi = midiFromPitch(p) + dir;
+  // Clamp to the 88-key range: a semitone past the lowest/highest key is a no-op.
+  if (targetMidi < FIRST_MIDI || targetMidi > LAST_MIDI) return p;
   const nextAlter = p.alter + dir;
   if (nextAlter >= -2 && nextAlter <= 2) {
     // Same letter + adjusted accidental keeps the written letter (E -> E#, E -> Eb).
@@ -124,9 +137,12 @@ export function chromaticStep(p: ModelPitch, dir: 1 | -1): ModelPitch {
   return pitchFromMidi(targetMidi, dir);
 }
 
-// Move a pitch by a whole OCTAVE (Shift), keeping the written letter + accidental. Pure.
+// Move a pitch by a whole OCTAVE (Shift), keeping the written letter + accidental. Pure. Clamps
+// to the 88-key range: an octave past the lowest/highest key is a no-op (returns the unchanged
+// pitch). An octave is 12 semitones, so unlike a step this can over/undershoot by a wide margin.
 export function octaveStep(p: ModelPitch, dir: 1 | -1): ModelPitch {
-  return { step: p.step, octave: p.octave + dir, alter: p.alter };
+  const candidate: ModelPitch = { step: p.step, octave: p.octave + dir, alter: p.alter };
+  return pitchInRange(candidate) ? candidate : p;
 }
 
 // A default spelling for a MIDI pitch, used by the CHROMATIC (canvas) path and the chromatic
@@ -196,11 +212,45 @@ function accidentalToken(alter: number): string | null {
   }
 }
 
+// What a DELETE captured, so it can be inverted (the note restored exactly where it was). Delete
+// is FIXED-BAR: the deleted note's time slot is preserved so the measure still adds up and nothing
+// after it reflows. A standalone note becomes a REST of the same duration in place; a chord member
+// is removed (a rest cannot stack in a chord) while the chord's onset note keeps the slot full; a
+// chord ONSET note with following members is removed after promoting the next member to the onset
+// (stripping its <chord/>) so the duration-advance is preserved. Restoring re-inserts the original
+// <note> element (a deep clone, with its pitch/ties/beams/accidental intact) at its prior position
+// and reverses any promotion, then re-indexes. Holds live DOM references, so it is model-internal.
+export interface DeleteRecord {
+  // The original <note> element (cloned at delete time) and where it was, for re-insertion.
+  removedClone: Element;
+  parent: Element;
+  nextSibling: Node | null;
+  // If this delete CONVERTED the note to a rest in place, the rest element that replaced it (so
+  // restore swaps the clone back in for the rest). Null when the delete REMOVED the element.
+  restPlaceholder: Element | null;
+  // If this delete promoted a following chord member to the onset (stripped its <chord/>), the
+  // promoted element + the <chord/> child that was removed, so restore can re-insert it.
+  promoted: { el: Element; chordChild: Element } | null;
+}
+
 // The editable score model. Holds the parsed DOM and the ordered pitched-note handles. Edits
 // mutate the DOM through handles; serialize() re-emits MusicXML for Verovio.
+//
+// HANDLE-ID STABILITY: a handle's `id` is its index in the document-order pitched-note list. Pitch
+// edits never change that list, so ids are stable across pitch edits. A DELETE removes a note, so
+// the model RE-INDEXES (handles after the deleted one shift down by one); restoring re-inserts at
+// the original DOM position, which restores the original ids. So a handle id is really "the note at
+// this document position", and the delete command keys on that position for undo/redo.
 export interface ScoreModel {
   handles: NoteHandle[];
   setPitch(id: number, pitch: ModelPitch): void;
+  // Delete the note as a FIXED-BAR rest (see DeleteRecord) and re-index. Returns the record needed
+  // to invert, or null for an invalid id. The VisNote count drops by one (the rest / removal emits
+  // no handle), so the caller must re-derive the falling notes + rebuild the maps.
+  deleteNote(id: number): DeleteRecord | null;
+  // Invert a delete: re-insert the original note at its prior position (reversing any promotion)
+  // and re-index, so the restored note reclaims its original handle id.
+  restoreNote(record: DeleteRecord): void;
   fifthsForHandle(id: number): number;
   serialize(): string;
 }
@@ -217,6 +267,8 @@ export interface ScoreModel {
 // ever feed the mapping, so the absolute scale is not otherwise load-bearing.
 export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
   const doc = new DOMParser().parseFromString(xml, "application/xml");
+  // The handle list is the live array `model.handles` aliases; reindexHandles() mutates it IN
+  // PLACE (clear + refill) so a structural edit (delete/restore) keeps that reference valid.
   const handles: NoteHandle[] = [];
 
   const soundTempo = doc.querySelector("sound[tempo]")?.getAttribute("tempo");
@@ -228,76 +280,86 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
         : 120;
   const secPerQuarter = 60 / bpm;
 
-  // Per-handle key signature (fifths) so diatonic stepping is key-aware. Captured at parse time
-  // from the attributes in effect at the handle's measure.
+  // Per-handle key signature (fifths) so diatonic stepping is key-aware. Captured at walk time
+  // from the attributes in effect at the handle's measure. Indexed in lockstep with `handles`.
   const handleFifths: number[] = [];
 
-  const parts = Array.from(doc.getElementsByTagName("part"));
-  for (const part of parts) {
-    let divisions = 1; // <divisions> per quarter note; updated by <attributes>
-    let fifths = 0; // current key signature
-    const measures = Array.from(part.getElementsByTagName("measure"));
-    for (const measure of measures) {
-      let cursor = 0; // divisions from the measure start
-      let prevOnset = 0; // onset of the last non-chord note, for chord members
-      // Walk the measure's direct children in document order.
-      for (const node of Array.from(measure.children)) {
-        const tag = node.tagName.toLowerCase();
-        if (tag === "attributes") {
-          const div = child(node, "divisions");
-          if (div) divisions = num(div, divisions);
-          const fifthsEl = child(node, "fifths");
-          if (fifthsEl) fifths = num(fifthsEl, fifths);
-          continue;
-        }
-        if (tag === "backup") {
-          cursor -= num(child(node, "duration"), 0);
-          continue;
-        }
-        if (tag === "forward") {
-          cursor += num(child(node, "duration"), 0);
-          continue;
-        }
-        if (tag !== "note") continue;
-
-        const isChord = child(node, "chord") !== null;
-        const isRest = child(node, "rest") !== null;
-        const durDivs = num(child(node, "duration"), 0);
-        const onsetDivs = isChord ? prevOnset : cursor;
-
-        if (!isRest) {
-          const pitchEl = child(node, "pitch");
-          if (pitchEl) {
-            const pitch = readPitch(pitchEl);
-            // Tie continuation: a <tie type="stop"> with no "start" is folded into its start
-            // note in the VisNote[] (score.ts), so it must not claim its own VisNote.
-            const ties = Array.from(node.getElementsByTagName("tie"));
-            const hasStop = ties.some((t) => t.getAttribute("type") === "stop");
-            const hasStart = ties.some((t) => t.getAttribute("type") === "start");
-            const isTieContinuation = hasStop && !hasStart;
-            const id = handles.length;
-            handles.push({
-              id,
-              el: node,
-              pitchEl,
-              onsetSec: (onsetDivs / divisions) * secPerQuarter,
-              midi: midiFromPitch(pitch),
-              pitch,
-              isChordMember: isChord,
-              isTieContinuation,
-            });
-            handleFifths.push(fifths);
+  // Walk the live DOM and (re)build the pitched-note handles + their key signatures in document
+  // order. Called once at parse and again after every STRUCTURAL edit (delete / restore), so a
+  // handle's id is always its current document position. Onsets are computed exactly as before
+  // (divisions, <backup>/<forward>, chords share the prior onset, rests advance but emit no handle).
+  function reindexHandles(): void {
+    handles.length = 0;
+    handleFifths.length = 0;
+    const parts = Array.from(doc.getElementsByTagName("part"));
+    for (const part of parts) {
+      let divisions = 1; // <divisions> per quarter note; updated by <attributes>
+      let fifths = 0; // current key signature
+      const measures = Array.from(part.getElementsByTagName("measure"));
+      for (const measure of measures) {
+        let cursor = 0; // divisions from the measure start
+        let prevOnset = 0; // onset of the last non-chord note, for chord members
+        // Walk the measure's direct children in document order.
+        for (const node of Array.from(measure.children)) {
+          const tag = node.tagName.toLowerCase();
+          if (tag === "attributes") {
+            const div = child(node, "divisions");
+            if (div) divisions = num(div, divisions);
+            const fifthsEl = child(node, "fifths");
+            if (fifthsEl) fifths = num(fifthsEl, fifths);
+            continue;
           }
-        }
+          if (tag === "backup") {
+            cursor -= num(child(node, "duration"), 0);
+            continue;
+          }
+          if (tag === "forward") {
+            cursor += num(child(node, "duration"), 0);
+            continue;
+          }
+          if (tag !== "note") continue;
 
-        // Advance the cursor for non-chord notes (and rests); chord members share the onset.
-        if (!isChord) {
-          prevOnset = onsetDivs;
-          cursor = onsetDivs + durDivs;
+          const isChord = child(node, "chord") !== null;
+          const isRest = child(node, "rest") !== null;
+          const durDivs = num(child(node, "duration"), 0);
+          const onsetDivs = isChord ? prevOnset : cursor;
+
+          if (!isRest) {
+            const pitchEl = child(node, "pitch");
+            if (pitchEl) {
+              const pitch = readPitch(pitchEl);
+              // Tie continuation: a <tie type="stop"> with no "start" is folded into its start
+              // note in the VisNote[] (score.ts), so it must not claim its own VisNote.
+              const ties = Array.from(node.getElementsByTagName("tie"));
+              const hasStop = ties.some((t) => t.getAttribute("type") === "stop");
+              const hasStart = ties.some((t) => t.getAttribute("type") === "start");
+              const isTieContinuation = hasStop && !hasStart;
+              const id = handles.length;
+              handles.push({
+                id,
+                el: node,
+                pitchEl,
+                onsetSec: (onsetDivs / divisions) * secPerQuarter,
+                midi: midiFromPitch(pitch),
+                pitch,
+                isChordMember: isChord,
+                isTieContinuation,
+              });
+              handleFifths.push(fifths);
+            }
+          }
+
+          // Advance the cursor for non-chord notes (and rests); chord members share the onset.
+          if (!isChord) {
+            prevOnset = onsetDivs;
+            cursor = onsetDivs + durDivs;
+          }
         }
       }
     }
   }
+
+  reindexHandles();
 
   const serializer = new XMLSerializer();
 
@@ -358,11 +420,113 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
       handle.pitch = next;
       handle.midi = midiFromPitch(next);
     },
+    deleteNote(id: number): DeleteRecord | null {
+      const handle = handles[id];
+      if (!handle) return null;
+      const noteEl = handle.el;
+      const parent = noteEl.parentNode as Element | null;
+      if (!parent) return null;
+      const nextSibling = noteEl.nextSibling;
+      // Clone the original note BEFORE mutating so restore re-inserts it exactly (pitch, ties,
+      // beams, accidental, chord child, position all intact).
+      const removedClone = noteEl.cloneNode(true) as Element;
+
+      const isChordMember = child(noteEl, "chord") !== null;
+      let restPlaceholder: Element | null = null;
+      let promoted: { el: Element; chordChild: Element } | null = null;
+
+      if (isChordMember) {
+        // A chord MEMBER: a rest cannot stack in a chord, so REMOVE the element. The chord's onset
+        // note keeps advancing the cursor, so the measure sum is unchanged (the member's own
+        // duration is parallel, never added to the running total in the walk above).
+        parent.removeChild(noteEl);
+      } else {
+        // A non-chord ONSET note. If the NEXT sibling is a chord member of THIS note, promote it to
+        // the onset (strip its <chord/>) so the chord's duration-advance survives, then remove this
+        // note. Otherwise this note stands alone at its onset: replace it IN PLACE with a rest of
+        // the same duration so the time slot (and the measure sum) is preserved (fixed-bar).
+        const nextNote = nextElementNamed(noteEl, "note");
+        if (nextNote && child(nextNote, "chord") !== null) {
+          const chordChild = child(nextNote, "chord")!;
+          nextNote.removeChild(chordChild);
+          promoted = { el: nextNote, chordChild };
+          parent.removeChild(noteEl);
+        } else {
+          restPlaceholder = makeRestFrom(noteEl);
+          parent.replaceChild(restPlaceholder, noteEl);
+        }
+      }
+
+      reindexHandles();
+      return { removedClone, parent, nextSibling, restPlaceholder, promoted };
+    },
+    restoreNote(record: DeleteRecord): void {
+      // Reverse a promotion first (re-add the stripped <chord/> to the promoted member) so it goes
+      // back to being a chord member once the original onset note returns ahead of it.
+      if (record.promoted) {
+        record.promoted.el.insertBefore(
+          record.promoted.chordChild,
+          record.promoted.el.firstChild,
+        );
+      }
+      if (record.restPlaceholder && record.restPlaceholder.parentNode) {
+        // The delete replaced the note with a rest in place: swap the original clone back in.
+        record.restPlaceholder.parentNode.replaceChild(record.removedClone, record.restPlaceholder);
+      } else {
+        // The delete removed the element: re-insert the clone at its original position. The stored
+        // nextSibling may itself have moved, but for a single delete/undo round-trip it is still a
+        // child of `parent` (promotion only stripped a <chord/>, it did not move the node), so
+        // insertBefore restores the original order; a detached ref falls back to append.
+        const ref =
+          record.nextSibling && record.nextSibling.parentNode === record.parent
+            ? record.nextSibling
+            : null;
+        record.parent.insertBefore(record.removedClone, ref);
+      }
+      reindexHandles();
+    },
     serialize(): string {
       return serializer.serializeToString(doc);
     },
   };
   return model;
+}
+
+// The next ELEMENT sibling of `el` whose tag is `tag` immediately following it (skipping text
+// nodes), or null. Used to find a chord member that directly follows a deleted onset note.
+function nextElementNamed(el: Element, tag: string): Element | null {
+  let n: Node | null = el.nextSibling;
+  while (n) {
+    if (n.nodeType === 1) {
+      const e = n as Element;
+      return e.tagName.toLowerCase() === tag ? e : null;
+    }
+    n = n.nextSibling;
+  }
+  return null;
+}
+
+// Build a <rest> <note> from a pitched <note>, preserving the time-structural children so the rest
+// occupies the SAME slot (fixed-bar) and stays in the right voice/staff, and dropping the
+// pitch-bound children (<pitch>, <accidental>, <tie>, <beam>, <notations>, <stem>, ...). Children
+// are emitted in MusicXML DTD order: <rest>, <duration>, <voice>, <type>, <dot>*, then <staff>
+// (which sits late in the note's content model). This is the "leaves a rest of the same duration"
+// deletion for a standalone note.
+function makeRestFrom(noteEl: Element): Element {
+  const doc = noteEl.ownerDocument;
+  const rest = doc.createElement("note");
+  rest.appendChild(doc.createElement("rest"));
+  for (const tag of ["duration", "voice", "type"]) {
+    const src = child(noteEl, tag);
+    if (src) rest.appendChild(src.cloneNode(true));
+  }
+  for (const dot of Array.from(noteEl.getElementsByTagName("dot"))) {
+    rest.appendChild(dot.cloneNode(true));
+  }
+  // <staff> keeps the rest on the correct staff of a grand staff (else it defaults to staff 1).
+  const staff = child(noteEl, "staff");
+  if (staff) rest.appendChild(staff.cloneNode(true));
+  return rest;
 }
 
 // Map each pitched, NON-continuation handle to the index of the VisNote sharing its (midi,
