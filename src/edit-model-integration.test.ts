@@ -6,7 +6,7 @@
 // by proving the actual edit -> render loop the app runs, against the production grand-staff shape.
 // jsdom gives DOMParser/XMLSerializer for the model; Verovio's WASM is embedded so it runs in node.
 
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadVerovioToolkit, renderMusicXml, buildRestIndexToId } from "./verovio-view";
@@ -403,6 +403,106 @@ describe("no-<type> OMR regression: the real reverie file through real Verovio",
       const onsets = modelOnsetsByMidi.get(n.midi) ?? [];
       expect(onsets).toContain(round3(n.timeSec));
     }
+  });
+});
+
+// ----- CHANGE-DURATION v1 through the REAL engine on the real reverie file -----
+//
+// A duration edit re-serializes the model for Verovio just like a pitch/delete edit, so it must
+// keep the no-<type> fix intact: after the edit EVERY note still carries a <type> (so Verovio
+// engraves the right rhythm + a correct timemap), the timemap onsets stay self-consistent with the
+// model, the click map is still complete (185/185, the count the <type> fix restored), and Verovio
+// emits NO "unsupported note-type-value" warning (which is what a missing/blank <type> would cause).
+
+describe("CHANGE-DURATION v1: a duration edit on real reverie keeps the engine consistent", () => {
+  let toolkit: VerovioToolkit;
+  beforeAll(async () => {
+    toolkit = await loadVerovioToolkit();
+  }, 60000);
+
+  it("after a shorten: every note still has a <type>, the click map is complete, no engine warning", () => {
+    const model = parseScoreModel(REVERIE_XML);
+    const handleCount = model.handles.length;
+    expect(handleCount).toBe(185); // the reverie pitched-note count (the 185/185 click-map target)
+
+    // Baseline: the model render maps every note (the <type> fix's contract), before any edit.
+    const baseVis = visFromModel(model);
+    const base = renderMusicXml(toolkit, model.serialize(), baseVis, 800);
+    expect(base.idToVisIndex.size).toBe(base.notes.length);
+    expect(base.notes).toHaveLength(handleCount);
+
+    // Pick a STANDALONE EIGHTH note (reverie is full of them: duration 2 at divisions 4) and shorten
+    // it to a 16th. Shorten always leaves a rest (never a no-op for a non-16th), so this is a real
+    // edit. A non-chord, non-continuation note keeps the single-note path clear (the chord path is
+    // unit-tested separately).
+    const eighth = model.handles.find(
+      (h) => h.durationDivs === 2 && !h.isTieContinuation && !h.isChordMember,
+    );
+    expect(eighth).toBeDefined();
+    const rec = model.changeDuration(eighth!.id, "shorter");
+    expect(rec?.outcome).toBe("stepped");
+
+    // Re-derive the falling notes from the edited model (onsets/durations changed) and re-render,
+    // capturing console output so we can assert Verovio raised no note-type-value warning.
+    const editedVis = visFromModel(model);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let render;
+    try {
+      render = renderMusicXml(toolkit, model.serialize(), editedVis, 800);
+    } finally {
+      const allOutput = [...logSpy.mock.calls, ...warnSpy.mock.calls]
+        .flat()
+        .map((a) => String(a))
+        .join("\n");
+      logSpy.mockRestore();
+      warnSpy.mockRestore();
+      // The whole point of the <type> fix: no blank/unsupported note-type-value warning.
+      expect(allOutput).not.toContain("note-type-value");
+    }
+
+    // The serialized model still has a <type> on EVERY note (the edit set the changed note's type
+    // and never stripped another note's).
+    const doc = new DOMParser().parseFromString(model.serialize(), "application/xml");
+    const pitchedNotes = Array.from(doc.getElementsByTagName("note")).filter(
+      (n) => n.getElementsByTagName("rest").length === 0,
+    );
+    for (const n of pitchedNotes) {
+      expect(n.getElementsByTagName("type").item(0)?.textContent ?? "").not.toBe("");
+    }
+
+    // The click map is still COMPLETE: every rendered notehead resolves to a VisNote and every
+    // non-continuation handle resolves to a VisNote (185/185, no regression of the <type> fix).
+    expect(render!.idToVisIndex.size).toBe(render!.notes.length);
+    const handleMap = buildHandleToVisIndex(model.handles, editedVis);
+    expect(handleMap.size).toBe(editedVis.length);
+
+    // The timemap onsets are SELF-CONSISTENT with the model: every rendered note's onset matches a
+    // model handle of the same pitch (the precondition for click-to-select after a duration edit).
+    const modelOnsetsByMidi = new Map<number, number[]>();
+    for (const h of model.handles) {
+      if (!modelOnsetsByMidi.has(h.midi)) modelOnsetsByMidi.set(h.midi, []);
+      modelOnsetsByMidi.get(h.midi)!.push(round3(h.onsetSec));
+    }
+    for (const n of render!.notes) {
+      expect(modelOnsetsByMidi.get(n.midi) ?? []).toContain(round3(n.timeSec));
+    }
+  });
+
+  it("a duration edit + restore round-trips the reverie bar back to the original render", () => {
+    const model = parseScoreModel(REVERIE_XML);
+    const before = model.serialize();
+    const eighth = model.handles.find(
+      (h) => h.durationDivs === 2 && !h.isTieContinuation && !h.isChordMember,
+    )!;
+    const rec = model.changeDuration(eighth.id, "shorter");
+    expect(model.serialize()).not.toBe(before);
+    model.restoreDuration(rec!);
+    // The restored model renders the SAME note count + a complete click map again.
+    const vis = visFromModel(model);
+    const restored = renderMusicXml(toolkit, model.serialize(), vis, 800);
+    expect(restored.notes).toHaveLength(185);
+    expect(restored.idToVisIndex.size).toBe(restored.notes.length);
   });
 });
 

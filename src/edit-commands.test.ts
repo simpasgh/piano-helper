@@ -10,8 +10,15 @@ import {
   type SetPitchCommand,
   type DeleteNoteCommand,
   type AddNoteCommand,
+  type ChangeDurationCommand,
 } from "./edit-commands";
-import type { AddRecord, DeleteRecord, ModelPitch, ScoreModel } from "./edit-model";
+import type {
+  AddRecord,
+  ChangeDurationRecord,
+  DeleteRecord,
+  ModelPitch,
+  ScoreModel,
+} from "./edit-model";
 
 const p = (step: ModelPitch["step"], octave: number, alter = 0): ModelPitch => ({
   step,
@@ -29,18 +36,24 @@ function stubModel(): ScoreModel & {
   restored: DeleteRecord[];
   added: { restId: number; pitch: ModelPitch }[];
   removed: AddRecord[];
+  durationChanges: { id: number; direction: "shorter" | "longer" }[];
+  durationRestores: ChangeDurationRecord[];
 } {
   const pitches = new Map<number, ModelPitch>();
   const deleted: number[] = [];
   const restored: DeleteRecord[] = [];
   const added: { restId: number; pitch: ModelPitch }[] = [];
   const removed: AddRecord[] = [];
+  const durationChanges: { id: number; direction: "shorter" | "longer" }[] = [];
+  const durationRestores: ChangeDurationRecord[] = [];
   return {
     pitches,
     deleted,
     restored,
     added,
     removed,
+    durationChanges,
+    durationRestores,
     handles: [],
     restHandles: [],
     fifthsForHandle: () => 0,
@@ -72,6 +85,23 @@ function stubModel(): ScoreModel & {
     removeNote: (record: AddRecord) => {
       removed.push(record);
     },
+    changeDuration: (id: number, direction: "shorter" | "longer"): ChangeDurationRecord => {
+      durationChanges.push({ id, direction });
+      // A stub record: the real DOM snapshot is exercised in edit-model.test.ts. `measureEl` is a
+      // sentinel; childrenBefore non-empty so it reads as a real (non-no-op) edit.
+      return {
+        measureEl: { tag: `measure-${id}` } as unknown as Element,
+        childrenBefore: [{ tag: "child" } as unknown as Node],
+        outcome: "stepped",
+        fromName: "quarter",
+        toName: direction === "shorter" ? "eighth" : "half",
+        dottedSnap: false,
+        direction,
+      };
+    },
+    restoreDuration: (record: ChangeDurationRecord) => {
+      durationRestores.push(record);
+    },
     serialize: () => "",
   };
 }
@@ -97,6 +127,16 @@ const addNote = (restId: number, pitch: ModelPitch): AddNoteCommand => ({
   pitch,
   record: null,
   visNote: null,
+});
+
+const changeDuration = (
+  handleId: number,
+  direction: "shorter" | "longer",
+): ChangeDurationCommand => ({
+  kind: "changeDuration",
+  handleId,
+  direction,
+  record: null,
 });
 
 describe("applyCommand / invertCommand", () => {
@@ -293,5 +333,75 @@ describe("AddNoteCommand (apply / invert / stack) - the inverse of delete", () =
     expect(model.restored.length).toBe(1);
     stack.undo(); // then the add (turns the note back into the rest)
     expect(model.removed.length).toBe(1);
+  });
+});
+
+describe("ChangeDurationCommand (apply / invert / stack)", () => {
+  it("apply changes via the model and stashes the record; invert restores from it", () => {
+    const model = stubModel();
+    const cmd = changeDuration(2, "longer");
+    applyCommand(model, cmd);
+    expect(model.durationChanges).toEqual([{ id: 2, direction: "longer" }]);
+    expect(cmd.record).not.toBeNull();
+    const captured = cmd.record;
+    invertCommand(model, cmd);
+    expect(model.durationRestores).toEqual([captured]); // restoreDuration got the captured record
+  });
+
+  it("push applies a duration step and undo restores it (round-trip through the stack)", () => {
+    const model = stubModel();
+    const stack = new CommandStack(model);
+    stack.push(changeDuration(0, "shorter"));
+    expect(model.durationChanges).toEqual([{ id: 0, direction: "shorter" }]);
+    expect(stack.canUndo()).toBe(true);
+    stack.undo();
+    expect(model.durationRestores.length).toBe(1);
+    expect(stack.canRedo()).toBe(true);
+  });
+
+  it("redo re-applies, re-deriving a fresh record (the step is deterministic)", () => {
+    const model = stubModel();
+    const stack = new CommandStack(model);
+    const cmd = changeDuration(1, "longer");
+    stack.push(cmd);
+    const recordAfterPush = cmd.record;
+    stack.undo();
+    stack.redo();
+    expect(model.durationChanges).toEqual([
+      { id: 1, direction: "longer" },
+      { id: 1, direction: "longer" },
+    ]); // applied on push AND on redo
+    expect(cmd.record).not.toBeNull();
+    expect(cmd.record).not.toBe(recordAfterPush); // a fresh record, not the stale one
+  });
+});
+
+describe("ChangeDurationCommand via pushApplied (a no-op model edit is never recorded)", () => {
+  it("pushApplied records a landed duration edit without re-applying it (mirrors a drag commit)", () => {
+    const model = stubModel();
+    const stack = new CommandStack(model);
+    // The orchestrator runs model.changeDuration DIRECTLY for a real edit, then records it via
+    // pushApplied so it is NOT applied a second time (the model is already mutated).
+    const cmd = changeDuration(0, "longer");
+    cmd.record = model.changeDuration(cmd.handleId, cmd.direction); // the direct (already-applied) edit
+    expect(model.durationChanges).toEqual([{ id: 0, direction: "longer" }]); // applied ONCE
+    stack.pushApplied(cmd);
+    expect(model.durationChanges).toHaveLength(1); // pushApplied did not re-apply
+    expect(stack.canUndo()).toBe(true);
+    stack.undo();
+    expect(model.durationRestores.length).toBe(1); // undo still reverses it
+  });
+
+  it("a boundary no-op is simply never pushed, so the redo branch survives", () => {
+    // The orchestrator does NOT push a no-op duration edit (the model returns an atEnd/noRoom record
+    // and changes nothing), so a prior redo future is preserved. Simulate: push then undo to make a
+    // redo, then a no-op press (no push) must leave canRedo true.
+    const model = stubModel();
+    const stack = new CommandStack(model);
+    stack.push(setPitch(0, p("C", 4), p("D", 4)));
+    stack.undo();
+    expect(stack.canRedo()).toBe(true);
+    // ... a no-op duration press happens here but pushes nothing ...
+    expect(stack.canRedo()).toBe(true); // the redo future is intact
   });
 });

@@ -81,6 +81,8 @@ describe("edit toolbar lives OUTSIDE the OSMD-owned #sheet", () => {
       "note-edit",
       "pitch-down-btn",
       "pitch-up-btn",
+      "dur-shorter-btn",
+      "dur-longer-btn",
       "delete-note-btn",
       "add-note",
       "add-note-btn",
@@ -89,5 +91,37 @@ describe("edit toolbar lives OUTSIDE the OSMD-owned #sheet", () => {
       expect(el, `#${id} should exist`).not.toBeNull();
       expect(editToolbar.contains(el!), `#${id} should be inside #edit-toolbar`).toBe(true);
     }
+  });
+});
+
+describe("duration steppers (Smart Edit P3 v1) live in the note cluster, not in #sheet", () => {
+  it("both stepper buttons exist INSIDE #note-edit (so the note cluster owns them)", () => {
+    const noteEdit = doc.getElementById("note-edit") as HTMLElement;
+    const shorter = doc.getElementById("dur-shorter-btn");
+    const longer = doc.getElementById("dur-longer-btn");
+    expect(shorter, "#dur-shorter-btn should exist").not.toBeNull();
+    expect(longer, "#dur-longer-btn should exist").not.toBeNull();
+    expect(noteEdit.contains(shorter!), "#dur-shorter-btn inside #note-edit").toBe(true);
+    expect(noteEdit.contains(longer!), "#dur-longer-btn inside #note-edit").toBe(true);
+  });
+
+  it("are NOT inside #sheet (so an OSMD re-render can never detach them)", () => {
+    // Same invariant as the whole toolbar: the steppers must be siblings of #sheet, never children
+    // that OSMD's load/render would clear.
+    expect(sheet.contains(doc.getElementById("dur-shorter-btn"))).toBe(false);
+    expect(sheet.contains(doc.getElementById("dur-longer-btn"))).toBe(false);
+  });
+
+  it("start with the right aria-labels (the screen-reader names the steppers)", () => {
+    expect(doc.getElementById("dur-shorter-btn")?.getAttribute("aria-label")).toBe("Shorter note");
+    expect(doc.getElementById("dur-longer-btn")?.getAttribute("aria-label")).toBe("Longer note");
+  });
+
+  it("sit BETWEEN pitch-up and delete in the note cluster (pitch | duration | delete order)", () => {
+    const noteEdit = doc.getElementById("note-edit") as HTMLElement;
+    const ids = Array.from(noteEdit.querySelectorAll("button")).map((b) => b.id);
+    expect(ids.indexOf("dur-shorter-btn")).toBeGreaterThan(ids.indexOf("pitch-up-btn"));
+    expect(ids.indexOf("dur-longer-btn")).toBeGreaterThan(ids.indexOf("dur-shorter-btn"));
+    expect(ids.indexOf("delete-note-btn")).toBeGreaterThan(ids.indexOf("dur-longer-btn"));
   });
 });

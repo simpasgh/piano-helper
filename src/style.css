@@ -1080,6 +1080,32 @@ button:focus-visible,
   opacity: 0.55;
 }
 
+/* Duration-commit pulse (Smart Edit P3): the changed notehead flashes a heavier brass glow for
+   ~150ms (main.ts adds .ph-accent then removes it), then settles to the steady .ph-selected halo.
+   A duration edit can leave the notehead at the same x/y while only its shape changes, so this
+   one-shot flash draws the eye the way a position move does for a pitch edit. The drop-shadow
+   filter glows around the glyph without changing its fill (which .ph-selected owns). */
+#verovio-host svg g.note.ph-accent {
+  filter: drop-shadow(0 0 4px var(--accent)) drop-shadow(0 0 8px var(--accent-glow));
+  animation: ph-accent-pulse 150ms ease-out;
+}
+@keyframes ph-accent-pulse {
+  0% {
+    filter: drop-shadow(0 0 6px var(--accent)) drop-shadow(0 0 12px var(--accent-glow));
+  }
+  100% {
+    filter: drop-shadow(0 0 0 transparent);
+  }
+}
+/* No flash under reduced motion (Designer P3-4): the re-engrave + readout already confirm the
+   change. main.ts also skips setting .ph-accent under the query, but kill any animation here too. */
+@media (prefers-reduced-motion: reduce) {
+  #verovio-host svg g.note.ph-accent {
+    filter: none;
+    animation: none;
+  }
+}
+
 /* ADD-a-note v1: a rest is ACTIONABLE in edit mode (click to select, then fill). The whole rest
    <g> is a pointer hit target like a notehead, and on hover/keyboard-focus it gets a faint brass
    wash behind the glyph (~20% accent) so the user learns rests are clickable without every rest

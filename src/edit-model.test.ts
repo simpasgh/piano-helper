@@ -22,6 +22,12 @@ import {
   spellingFromPitch,
   restDurationName,
   noteTypeForDuration,
+  noteValueName,
+  durationValueName,
+  ladderIndexForDuration,
+  nearestLadderIndex,
+  DURATION_LADDER,
+  NOTE_VALUE_QUARTERS,
   type ModelPitch,
 } from "./edit-model";
 import { FIRST_MIDI, LAST_MIDI } from "./piano";
@@ -934,5 +940,577 @@ describe("parseScoreModel infers <type> for no-<type> notes/rests (OMR shape)", 
     // The delete turns C5 (a standalone note) into a rest, then restore brings it back, so the
     // pitched-note + rest TOTAL is unchanged: the <type> count is identical, never doubled.
     expect(typesAfterEdit).toBe(typesAfterParse);
+  });
+});
+
+// ===== CHANGE-DURATION v1 (Smart Edit P3): step a note along the plain value ladder, fixed-bar =====
+//
+// The ladder is 16th..whole; in divisions=4 (load-bearing): 16th=1, eighth=2, quarter=4, half=8,
+// whole=16. Shorten leaves a REST of the freed time (bar stays full, following onsets unchanged);
+// lengthen ripples following events later and absorbs trailing REST space, CLAMPING at the barline.
+// A plain-rung step sets BOTH <duration> and <type> and writes ZERO dots (removing any). A dotted
+// arrival snaps to the nearest plain rung first. These pin all of that purely (no Verovio).
+
+describe("DURATION_LADDER + ladder helpers", () => {
+  it("the ladder is the plain values 16th..whole in order, drawn from NOTE_VALUE_QUARTERS", () => {
+    expect(DURATION_LADDER.map((v) => v.type)).toEqual([
+      "16th",
+      "eighth",
+      "quarter",
+      "half",
+      "whole",
+    ]);
+    // Each ladder rung's quarter-length matches the canonical NOTE_VALUE_QUARTERS table.
+    for (const rung of DURATION_LADDER) {
+      const canon = NOTE_VALUE_QUARTERS.find((v) => v.type === rung.type)!;
+      expect(rung.quarters).toBe(canon.quarters);
+    }
+  });
+
+  it("maps divisions to the load-bearing duration values (divisions=4)", () => {
+    // 16th=1, eighth=2, quarter=4, half=8, whole=16 in divisions=4.
+    const byType = Object.fromEntries(DURATION_LADDER.map((v) => [v.type, v.quarters * 4]));
+    expect(byType).toEqual({ "16th": 1, eighth: 2, quarter: 4, half: 8, whole: 16 });
+  });
+
+  it("ladderIndexForDuration finds plain rungs and rejects dotted/odd durations", () => {
+    expect(ladderIndexForDuration(4, 4)).toBe(2); // quarter
+    expect(ladderIndexForDuration(8, 4)).toBe(3); // half
+    expect(ladderIndexForDuration(1, 4)).toBe(0); // 16th
+    expect(ladderIndexForDuration(16, 4)).toBe(4); // whole
+    expect(ladderIndexForDuration(6, 4)).toBe(-1); // dotted quarter: off the plain ladder
+    expect(ladderIndexForDuration(12, 4)).toBe(-1); // dotted half: off the plain ladder
+  });
+
+  it("nearestLadderIndex snaps a dotted value to the nearest rung, ties going SHORTER", () => {
+    // A dotted quarter (1.5q) is equidistant from quarter (idx 2) and half (idx 3); tie -> shorter.
+    expect(nearestLadderIndex(6, 4)).toBe(2); // -> quarter
+    // A dotted half (3q) is equidistant from half (idx 3) and whole (idx 4); tie -> shorter (half).
+    expect(nearestLadderIndex(12, 4)).toBe(3); // -> half
+    // A dotted eighth (0.75q) is between 16th(0.25, idx0) and eighth(0.5, idx1) and quarter(1, idx2):
+    // nearest is quarter? |0.75-0.5|=0.25 vs |0.75-1|=0.25 tie eighth vs quarter -> shorter (eighth).
+    expect(nearestLadderIndex(3, 4)).toBe(1); // -> eighth
+  });
+});
+
+describe("noteValueName / durationValueName", () => {
+  it("names plain and dotted values", () => {
+    expect(noteValueName("quarter", 0)).toBe("quarter");
+    expect(noteValueName("16th", 0)).toBe("sixteenth");
+    expect(noteValueName("quarter", 1)).toBe("dotted quarter");
+    expect(noteValueName("half", 2)).toBe("double dotted half");
+    expect(noteValueName("weird", 0)).toBe("note"); // unknown -> generic
+  });
+  it("durationValueName infers from divisions", () => {
+    expect(durationValueName(4, 4)).toBe("quarter");
+    expect(durationValueName(6, 4)).toBe("dotted quarter"); // dotted arrival reads as dotted
+    expect(durationValueName(16, 4)).toBe("whole");
+  });
+});
+
+// A SINGLE-VOICE 4/4 bar at divisions=4: four quarters C5 D5 E5 F5 (each dur 4), total 16. The
+// clean ground for ladder steps + dot handling on the FIRST note (which has a following note to
+// ripple). 120bpm => quarter = 0.5s.
+const FOUR_QUARTERS = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>F</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+// Helpers to read a serialized note's duration/type/dots by its pitch step (each pitch is unique in
+// the fixtures below), and to list a measure's events in order (tag + duration) for ripple checks.
+function noteInfo(xml: string, step: string, octave = "5"): { dur: number; type: string; dots: number } {
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  const note = Array.from(doc.getElementsByTagName("note")).find(
+    (n) =>
+      n.getElementsByTagName("step").item(0)?.textContent === step &&
+      n.getElementsByTagName("octave").item(0)?.textContent === octave,
+  );
+  return {
+    dur: Number(note?.getElementsByTagName("duration").item(0)?.textContent ?? "NaN"),
+    type: note?.getElementsByTagName("type").item(0)?.textContent ?? "",
+    dots: note?.getElementsByTagName("dot").length ?? 0,
+  };
+}
+
+// The first measure's events as {rest, dur} in document order (single voice), for ripple/rest checks.
+function measureEvents(xml: string): { rest: boolean; dur: number }[] {
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  const measure = doc.getElementsByTagName("measure").item(0)!;
+  return Array.from(measure.getElementsByTagName("note")).map((n) => ({
+    rest: n.getElementsByTagName("rest").length > 0,
+    dur: Number(n.getElementsByTagName("duration").item(0)?.textContent ?? "0"),
+  }));
+}
+
+describe("ScoreModel.changeDuration ladder step (both <duration> and <type>, dots removed)", () => {
+  it("LONGER steps one rung up across the ladder, setting duration + type, zero dots", () => {
+    // Start E5 = quarter (the 3rd note); lengthen consumes from the trailing F5? No: a step that
+    // RIPPLES needs trailing rest room. To pin a clean rung-by-rung mapping without bar interaction,
+    // use a one-note 4/4 bar per rung so there is room to the barline.
+    const oneNote = (dur: number, type: string) => `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><time><beats>8</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>${dur}</duration><voice>1</voice><type>${type}</type></note>
+  <note><rest/><duration>${32 - dur}</duration><voice>1</voice><type>whole</type></note>
+</measure></part></score-partwise>`;
+    // 8/4 bar (capacity 32) so there is always trailing rest room to step up into.
+    const cases: Array<[number, string, number, string]> = [
+      [1, "16th", 2, "eighth"],
+      [2, "eighth", 4, "quarter"],
+      [4, "quarter", 8, "half"],
+      [8, "half", 16, "whole"],
+    ];
+    for (const [dur, type, nextDur, nextType] of cases) {
+      const model = parseScoreModel(oneNote(dur, type));
+      const rec = model.changeDuration(0, "longer");
+      expect(rec?.outcome).toBe("stepped");
+      const info = noteInfo(model.serialize(), "C");
+      expect(info.dur).toBe(nextDur);
+      expect(info.type).toBe(nextType);
+      expect(info.dots).toBe(0);
+    }
+  });
+
+  it("SHORTER steps one rung down across the ladder, setting duration + type, zero dots", () => {
+    const oneNote = (dur: number, type: string) => `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><time><beats>8</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>${dur}</duration><voice>1</voice><type>${type}</type></note>
+  <note><rest/><duration>${32 - dur}</duration><voice>1</voice><type>whole</type></note>
+</measure></part></score-partwise>`;
+    const cases: Array<[number, string, number, string]> = [
+      [16, "whole", 8, "half"],
+      [8, "half", 4, "quarter"],
+      [4, "quarter", 2, "eighth"],
+      [2, "eighth", 1, "16th"],
+    ];
+    for (const [dur, type, prevDur, prevType] of cases) {
+      const model = parseScoreModel(oneNote(dur, type));
+      const rec = model.changeDuration(0, "shorter");
+      expect(rec?.outcome).toBe("stepped");
+      const info = noteInfo(model.serialize(), "C");
+      expect(info.dur).toBe(prevDur);
+      expect(info.type).toBe(prevType);
+      expect(info.dots).toBe(0);
+    }
+  });
+
+  it("announces the spelled value name on a step (toName matches the readout, incl. the sixteenth rung)", () => {
+    // The screen-reader announce (rec.toName) must use the SAME spelled form as the visible readout
+    // (durationValueName), so a step landing on a 16th says "sixteenth", not the raw "16th" token.
+    // The other rungs already coincide (their <type> token is the spelled word); the 16th was the gap.
+    const oneNote = (dur: number, type: string) => `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><time><beats>8</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>${dur}</duration><voice>1</voice><type>${type}</type></note>
+  <note><rest/><duration>${32 - dur}</duration><voice>1</voice><type>whole</type></note>
+</measure></part></score-partwise>`;
+    const down = parseScoreModel(oneNote(2, "eighth")).changeDuration(0, "shorter");
+    expect(down?.toName).toBe("sixteenth");
+    const up = parseScoreModel(oneNote(1, "16th")).changeDuration(0, "longer");
+    expect(up?.toName).toBe("eighth");
+  });
+
+  it("REMOVES existing <dot> children on a plain-rung step", () => {
+    // A note that arrives dotted (dotted quarter = 6) gets its dot stripped when stepped; the result
+    // is a clean plain rung with zero dots (the dotted-arrival snap also runs, see the snap tests).
+    const DOTTED = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><time><beats>8</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>6</duration><voice>1</voice><type>quarter</type><dot/></note>
+  <note><rest/><duration>26</duration><voice>1</voice><type>whole</type></note>
+</measure></part></score-partwise>`;
+    const model = parseScoreModel(DOTTED);
+    expect(noteInfo(DOTTED, "C").dots).toBe(1); // precondition: arrives dotted
+    model.changeDuration(0, "longer"); // snaps to quarter then up to half
+    expect(noteInfo(model.serialize(), "C").dots).toBe(0); // the dot is gone
+  });
+});
+
+describe("ScoreModel.changeDuration ladder-end clamp (no-op + signaling)", () => {
+  it("SHORTER at a 16th is a no-op marked atEnd (no DOM change)", () => {
+    const SIXTEENTH = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice><type>16th</type></note>
+  <note><rest/><duration>15</duration><voice>1</voice><type>whole</type></note>
+</measure></part></score-partwise>`;
+    const model = parseScoreModel(SIXTEENTH);
+    const before = model.serialize();
+    const rec = model.changeDuration(0, "shorter");
+    expect(rec?.outcome).toBe("atEnd");
+    expect(rec?.childrenBefore.length).toBe(0); // nothing snapshotted (true no-op)
+    expect(model.serialize()).toBe(before); // DOM unchanged
+  });
+
+  it("LONGER at a whole is a no-op marked atEnd (no DOM change)", () => {
+    const WHOLE = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>16</duration><voice>1</voice><type>whole</type></note>
+</measure></part></score-partwise>`;
+    const model = parseScoreModel(WHOLE);
+    const before = model.serialize();
+    const rec = model.changeDuration(0, "longer");
+    expect(rec?.outcome).toBe("atEnd");
+    expect(model.serialize()).toBe(before);
+  });
+
+  it("changeDuration on an out-of-range id is null", () => {
+    const model = parseScoreModel(FOUR_QUARTERS);
+    expect(model.changeDuration(99, "longer")).toBeNull();
+  });
+});
+
+describe("ScoreModel.changeDuration SHORTEN inserts a rest, bar stays full, onsets unchanged", () => {
+  it("shrinks the note and inserts a REST of the freed time right after it", () => {
+    // Shorten the 2nd quarter D5 (dur 4) -> eighth (dur 2): a freed eighth-rest (dur 2) appears right
+    // after it; E5 and F5 keep their onsets; the bar still sums to 16.
+    const model = parseScoreModel(FOUR_QUARTERS);
+    const eOnsetBefore = model.handles.find((h) => h.midi === 76)!.onsetSec; // E5
+    const fOnsetBefore = model.handles.find((h) => h.midi === 77)!.onsetSec; // F5
+    const rec = model.changeDuration(1, "shorter");
+    expect(rec?.outcome).toBe("stepped");
+    const xml = model.serialize();
+    // D5 is now an eighth; a rest of dur 2 sits immediately after it.
+    expect(noteInfo(xml, "D")).toEqual({ dur: 2, type: "eighth", dots: 0 });
+    const events = measureEvents(xml);
+    // C(4) D(2) REST(2) E(4) F(4): the freed rest is between D and E.
+    expect(events).toEqual([
+      { rest: false, dur: 4 },
+      { rest: false, dur: 2 },
+      { rest: true, dur: 2 },
+      { rest: false, dur: 4 },
+      { rest: false, dur: 4 },
+    ]);
+    expect(measureFilledDivs(xml)).toBe(16); // bar still full
+    // E5 and F5 onsets are UNCHANGED (the freed time became a rest; nothing shifted).
+    expect(model.handles.find((h) => h.midi === 76)!.onsetSec).toBeCloseTo(eOnsetBefore, 6);
+    expect(model.handles.find((h) => h.midi === 77)!.onsetSec).toBeCloseTo(fOnsetBefore, 6);
+  });
+});
+
+describe("ScoreModel.changeDuration LENGTHEN ripples following events, clamps at the barline", () => {
+  // C5 quarter (4), D5 quarter (4), E5 quarter (4), then a quarter REST (4): total 16. Lengthening
+  // C5 to a half (8) must ripple D5 and E5 right and CONSUME the trailing rest, keeping the bar full.
+  const RIPPLE = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><rest/><duration>4</duration><voice>1</voice><type>quarter</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+  it("ripples following NOTES later and absorbs the trailing rest (bar stays full)", () => {
+    const model = parseScoreModel(RIPPLE);
+    const dBefore = model.handles.find((h) => h.midi === 74)!.onsetSec; // D5
+    const eBefore = model.handles.find((h) => h.midi === 76)!.onsetSec; // E5
+    const rec = model.changeDuration(0, "longer"); // C5 quarter -> half
+    expect(rec?.outcome).toBe("stepped");
+    const xml = model.serialize();
+    expect(noteInfo(xml, "C")).toEqual({ dur: 8, type: "half", dots: 0 });
+    // The quarter rest (4) was fully consumed by the half-note's extra quarter; the bar is now
+    // C(8) D(4) E(4) with NO rest, still summing to 16.
+    expect(measureEvents(xml)).toEqual([
+      { rest: false, dur: 8 },
+      { rest: false, dur: 4 },
+      { rest: false, dur: 4 },
+    ]);
+    expect(measureFilledDivs(xml)).toBe(16);
+    // D5 and E5 rippled later by one quarter (4 divs = 0.5s at 120bpm).
+    expect(model.handles.find((h) => h.midi === 74)!.onsetSec).toBeCloseTo(dBefore + 0.5, 6);
+    expect(model.handles.find((h) => h.midi === 76)!.onsetSec).toBeCloseTo(eBefore + 0.5, 6);
+  });
+
+  it("CLAMPS growth to the barline when the next rung overflows the room (note fills the bar)", () => {
+    // A half note (8) then a quarter rest (4) then a quarter note (4): total 16. Lengthening the half
+    // to a whole (16) would add 8, but only 4 divs of rest are available -> CLAMP: grow by 4 to a
+    // dotted-half (12), consuming the rest, keeping the quarter note. The bar stays exactly full.
+    const CLAMP = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>8</duration><voice>1</voice><type>half</type></note>
+      <note><rest/><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const model = parseScoreModel(CLAMP);
+    const rec = model.changeDuration(0, "longer");
+    expect(rec?.outcome).toBe("clamped");
+    const xml = model.serialize();
+    // The note filled to the barline: dur 12 (a dotted half), consuming the rest; G4 remains.
+    const c = noteInfo(xml, "C");
+    expect(c.dur).toBe(12);
+    expect(measureEvents(xml)).toEqual([
+      { rest: false, dur: 12 },
+      { rest: false, dur: 4 },
+    ]);
+    expect(measureFilledDivs(xml)).toBe(16); // bar exactly full, no overflow, no barline crossing
+  });
+
+  it("is a NO-OP (noRoom) when the note already fills to the barline (no following rest)", () => {
+    // A half note then a half note, no rest: total 16. The first half has no rest room after it, so
+    // lengthening it is a no-op at the bar boundary (noRoom), not an overflow.
+    const FULL = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>8</duration><voice>1</voice><type>half</type></note>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>8</duration><voice>1</voice><type>half</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const model = parseScoreModel(FULL);
+    const before = model.serialize();
+    const rec = model.changeDuration(0, "longer");
+    expect(rec?.outcome).toBe("noRoom");
+    expect(rec?.childrenBefore.length).toBe(0);
+    expect(model.serialize()).toBe(before); // DOM unchanged
+  });
+});
+
+describe("ScoreModel.changeDuration dotted-arrival snap to the nearest plain rung", () => {
+  it("SHORTER on a dotted quarter snaps to quarter (folds the snap into the step)", () => {
+    // A dotted quarter (dur 6) then a dotted-quarter rest... use a bar with room. The shorter press
+    // snaps the dotted quarter (1.5q) to its nearest plain rung (quarter, tie -> shorter), so it
+    // lands on a plain quarter with zero dots.
+    const DOTTED_Q = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>6</duration><voice>1</voice><type>quarter</type><dot/></note>
+  <note><rest/><duration>10</duration><voice>1</voice><type>half</type></note>
+</measure></part></score-partwise>`;
+    const model = parseScoreModel(DOTTED_Q);
+    const rec = model.changeDuration(0, "shorter");
+    expect(rec?.dottedSnap).toBe(true);
+    expect(rec?.fromName).toBe("dotted quarter");
+    expect(rec?.toName).toBe("quarter");
+    const info = noteInfo(model.serialize(), "C");
+    expect(info).toEqual({ dur: 4, type: "quarter", dots: 0 }); // snapped to a plain quarter
+    expect(measureFilledDivs(model.serialize())).toBe(16); // bar still full (freed time -> rest)
+  });
+
+  it("LONGER on a dotted quarter snaps to quarter then steps up to half", () => {
+    // The longer press snaps the dotted quarter (snapped value = quarter, which is SHORTER than the
+    // arrival), so it takes one more rung up to half (so the press still lengthens).
+    const DOTTED_Q = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><time><beats>8</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>6</duration><voice>1</voice><type>quarter</type><dot/></note>
+  <note><rest/><duration>26</duration><voice>1</voice><type>whole</type></note>
+</measure></part></score-partwise>`;
+    const model = parseScoreModel(DOTTED_Q);
+    const rec = model.changeDuration(0, "longer");
+    expect(rec?.dottedSnap).toBe(true);
+    expect(rec?.toName).toBe("half");
+    expect(noteInfo(model.serialize(), "C")).toEqual({ dur: 8, type: "half", dots: 0 });
+  });
+});
+
+describe("ScoreModel.changeDuration undo via restoreDuration restores the bar exactly", () => {
+  it("a SHORTEN + restore round-trips to the exact prior bar (durations, types, onsets)", () => {
+    const model = parseScoreModel(FOUR_QUARTERS);
+    const before = model.serialize();
+    const beforeOnsets = model.handles.map((h) => Number(h.onsetSec.toFixed(6)));
+    const rec = model.changeDuration(1, "shorter");
+    expect(rec).not.toBeNull();
+    expect(model.serialize()).not.toBe(before); // it changed
+    model.restoreDuration(rec!);
+    // The bar children are restored; the model re-parses to the identical handles + onsets.
+    expect(model.handles.map((h) => h.midi)).toEqual([72, 74, 76, 77]);
+    expect(model.handles.map((h) => Number(h.onsetSec.toFixed(6)))).toEqual(beforeOnsets);
+    expect(noteInfo(model.serialize(), "D")).toEqual({ dur: 4, type: "quarter", dots: 0 });
+    expect(model.restHandles).toHaveLength(0); // the freed rest is gone again
+  });
+
+  it("a LENGTHEN-with-ripple + restore brings back the consumed rest and the original onsets", () => {
+    const RIPPLE = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><rest/><duration>4</duration><voice>1</voice><type>quarter</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const model = parseScoreModel(RIPPLE);
+    const beforeOnsets = model.handles.map((h) => Number(h.onsetSec.toFixed(6)));
+    const rec = model.changeDuration(0, "longer");
+    expect(model.restHandles).toHaveLength(0); // the rest was consumed
+    model.restoreDuration(rec!);
+    expect(model.handles.map((h) => Number(h.onsetSec.toFixed(6)))).toEqual(beforeOnsets);
+    expect(model.restHandles).toHaveLength(1); // the consumed quarter rest is back
+    expect(noteInfo(model.serialize(), "C")).toEqual({ dur: 4, type: "quarter", dots: 0 });
+  });
+
+  it("restoreDuration on a no-op record (ladder end) is a safe no-op", () => {
+    const WHOLE = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>16</duration><voice>1</voice><type>whole</type></note>
+</measure></part></score-partwise>`;
+    const model = parseScoreModel(WHOLE);
+    const before = model.serialize();
+    const rec = model.changeDuration(0, "longer"); // atEnd no-op
+    expect(() => model.restoreDuration(rec!)).not.toThrow();
+    expect(model.serialize()).toBe(before);
+  });
+});
+
+describe("ScoreModel.changeDuration applies to the whole CHORD (one shared duration)", () => {
+  // A 4/4 bar (divisions=4) with a half-note chord C5+E5+G5 (each dur 8) then a half rest (dur 8).
+  // Editing ANY chord member must change ALL members' durations together, never split the chord.
+  const CHORD = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>8</duration><voice>1</voice><type>half</type></note>
+      <note><chord/><pitch><step>E</step><octave>5</octave></pitch><duration>8</duration><voice>1</voice><type>half</type></note>
+      <note><chord/><pitch><step>G</step><octave>5</octave></pitch><duration>8</duration><voice>1</voice><type>half</type></note>
+      <note><rest/><duration>8</duration><voice>1</voice><type>half</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+  it("SHORTEN a chord member shrinks ALL members and inserts one rest after the chord", () => {
+    const model = parseScoreModel(CHORD);
+    // Select the chord MEMBER E5 (handle 1) and shorten it: the whole chord becomes a quarter.
+    const rec = model.changeDuration(1, "shorter");
+    expect(rec?.outcome).toBe("stepped");
+    const xml = model.serialize();
+    expect(noteInfo(xml, "C")).toEqual({ dur: 4, type: "quarter", dots: 0 });
+    expect(noteInfo(xml, "E")).toEqual({ dur: 4, type: "quarter", dots: 0 });
+    expect(noteInfo(xml, "G")).toEqual({ dur: 4, type: "quarter", dots: 0 });
+    // The freed rest sits AFTER the whole chord (one new rest of 4), and the bar is still full.
+    const events = measureEvents(xml);
+    // C(4) E(4,chord) G(4,chord) FREED-REST(4) HALF-REST(8): the freed rest comes after the chord.
+    expect(events.map((e) => e.dur)).toEqual([4, 4, 4, 4, 8]);
+    expect(events[3].rest).toBe(true);
+    expect(measureFilledDivs(xml)).toBe(16); // chord members are parallel: bar sum unchanged
+  });
+
+  it("LENGTHEN a chord ONSET grows ALL members and consumes the trailing rest", () => {
+    const model = parseScoreModel(CHORD);
+    // Select the chord ONSET C5 (handle 0) and lengthen: the half chord becomes a whole, consuming
+    // the trailing half rest, so the whole bar is one whole-note chord.
+    const rec = model.changeDuration(0, "longer");
+    expect(rec?.outcome).toBe("stepped");
+    const xml = model.serialize();
+    expect(noteInfo(xml, "C")).toEqual({ dur: 16, type: "whole", dots: 0 });
+    expect(noteInfo(xml, "E")).toEqual({ dur: 16, type: "whole", dots: 0 });
+    expect(noteInfo(xml, "G")).toEqual({ dur: 16, type: "whole", dots: 0 });
+    // The half rest was consumed; the bar is just the whole-note chord (3 notes, no rest), sum 16.
+    const events = measureEvents(xml);
+    expect(events.map((e) => e.rest)).toEqual([false, false, false]);
+    expect(measureFilledDivs(xml)).toBe(16);
+  });
+});
+
+describe("ScoreModel.changeDuration keeps the <type>-inference idempotent + handle ids stable", () => {
+  it("re-running reindex after a duration edit does not double-insert <type> (idempotent)", () => {
+    const model = parseScoreModel(FOUR_QUARTERS);
+    const typesBefore = new DOMParser()
+      .parseFromString(model.serialize(), "application/xml")
+      .getElementsByTagName("type").length;
+    const rec = model.changeDuration(1, "shorter"); // adds a rest (which carries a <type>)
+    model.restoreDuration(rec!); // re-indexes back
+    const typesAfter = new DOMParser()
+      .parseFromString(model.serialize(), "application/xml")
+      .getElementsByTagName("type").length;
+    expect(typesAfter).toBe(typesBefore); // exactly one <type> per note, never doubled
+  });
+
+  it("a duration edit leaves the pitched-note handle ids stable (no note added/removed)", () => {
+    const model = parseScoreModel(FOUR_QUARTERS);
+    const midisBefore = model.handles.map((h) => h.midi);
+    model.changeDuration(0, "shorter"); // shorten C5 (adds a rest, not a note)
+    expect(model.handles.map((h) => h.midi)).toEqual(midisBefore); // same notes, same order, same ids
+    expect(model.handles[0].midi).toBe(72); // C5 still handle 0
+  });
+});
+
+describe("CHANGE-DURATION edit-OFF no-op: parsing without an edit never mutates the document", () => {
+  it("serialize() of a parsed-but-UNEDITED typed score is byte-identical to the source", () => {
+    // The duration feature added cached time fields (durationDivs/divisions/durationSec) to each
+    // handle, read during the parse walk. They must be READ-ONLY: with NO changeDuration call, the
+    // serialized output of a fully-typed score must equal the input exactly (edit-off is untouched).
+    // GRAND_STAFF_XML carries a <type> on every note, so addTypeIfMissing is a no-op too.
+    const model = parseScoreModel(GRAND_STAFF_XML);
+    // No edit performed. serialize() should round-trip the typed document unchanged.
+    const out = model.serialize();
+    // Compare structurally: same notes, same durations, same types, no extra/removed elements.
+    const reparse = (x: string) => {
+      const doc = new DOMParser().parseFromString(x, "application/xml");
+      return Array.from(doc.getElementsByTagName("note")).map((n) => ({
+        step: n.getElementsByTagName("step").item(0)?.textContent ?? "",
+        dur: n.getElementsByTagName("duration").item(0)?.textContent ?? "",
+        type: n.getElementsByTagName("type").item(0)?.textContent ?? "",
+        dots: n.getElementsByTagName("dot").length,
+      }));
+    };
+    expect(reparse(out)).toEqual(reparse(GRAND_STAFF_XML));
+    // And the total element count is unchanged (no field leaked into the DOM as a stray child).
+    const count = (x: string) =>
+      new DOMParser().parseFromString(x, "application/xml").getElementsByTagName("*").length;
+    expect(count(out)).toBe(count(GRAND_STAFF_XML));
+  });
+});
+
+describe("ScoreModel.changeDuration respects a non-4/4 time signature for the bar capacity", () => {
+  it("clamps at the barline of a 2/4 bar (capacity 8 at divisions=4)", () => {
+    // 2/4 bar (capacity 8): a quarter note (4) + a quarter rest (4). Lengthen the quarter to a half
+    // (8) would add 4; exactly 4 of rest is available, so it grows fully to a half, consuming the
+    // rest and filling the 2/4 bar (a stepped, not clamped, outcome since the rung fit exactly).
+    const TWO_FOUR = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><time><beats>2</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+  <note><rest/><duration>4</duration><voice>1</voice><type>quarter</type></note>
+</measure></part></score-partwise>`;
+    const model = parseScoreModel(TWO_FOUR);
+    const rec = model.changeDuration(0, "longer");
+    expect(rec?.outcome).toBe("stepped");
+    expect(noteInfo(model.serialize(), "C")).toEqual({ dur: 8, type: "half", dots: 0 });
+    expect(measureFilledDivs(model.serialize())).toBe(8); // the 2/4 bar is now full with one half note
+    // A further lengthen is now a no-op: a half fills the 2/4 bar, no rest room left.
+    const rec2 = model.changeDuration(0, "longer");
+    expect(rec2?.outcome).toBe("noRoom");
   });
 });

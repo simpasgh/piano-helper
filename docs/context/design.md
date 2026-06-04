@@ -3,6 +3,189 @@
 UX, visual design, interaction decisions. Append durable learnings at the top of the
 relevant section, dated.
 
+## Smart Edit Mode P3 CHANGE-DURATION v1: shorten/lengthen a selected note along a note-value ladder (interaction + visual spec)
+
+- **2026-06-04 - The last leg of the stated vision ("move notes, change their duration, add
+  new ones"): move (P1 pitch) and add (ADD v1 rest-to-note) shipped; this is duration. Same
+  substrate as P1/P2/ADD: ONE editable MusicXML model (`src/edit-model.ts`) projected onto the
+  Verovio staff and the falling canvas, edits routed through the command/undo stack
+  (`src/edit-commands.ts`) and the dual-surface re-render path in `main.ts` (serialize -> Verovio
+  re-engrave -> re-derive VisNote[]/stepTimes -> `reloadNotes`). The model is ALREADY built for
+  this: `NOTE_VALUE_QUARTERS` is the canonical ladder, `noteTypeForDuration` infers `<type>`+dots
+  from `<duration>` divisions (the reason real OMR scores that omit `<type>` render at all), and
+  the model header says it is "extensible toward duration: P3 mutates `<duration>`/`<type>` + adds
+  a fixed-bar...". This entry is interaction + visual only; Tech Lead owns the model mutation +
+  the ripple/reflow.**
+
+  ### Decision P3-0 (SCOPE) - duration = walk a note up/down a fixed value ladder, ripple-and-reflow, RIGHT to the barline only.
+
+  v1 is the smallest thing that delivers "change a note's duration": select a note, press a key or
+  a button to make it the next-shorter or next-longer note value. NO duration palette, NO dotted
+  values in v1, NO tuplets, NO note-input run mode (still deferred, see ADD-3). It applies ONLY to
+  a selected NOTE (a rest's duration is not editable in v1; you fill it via ADD, then change the
+  note's duration). This mirrors how P1 scoped pitch to a single nudge and ADD scoped to a single
+  conversion: one selected object, one stepwise transform, one undo step, both surfaces re-derive.
+
+  ### Decision P3-1 (CONTROL) - two stepper buttons (shorter / longer), NOT a value palette.
+
+  RECOMMENDATION: add exactly TWO buttons to the `#note-edit` cluster (the note-selection cluster
+  that already holds pitch-down / pitch-up / delete), placed AFTER pitch-up and BEFORE delete so
+  the cluster reads pitch | duration | delete:
+  - `#dur-shorter-btn`, aria-label "Shorter note", title "Make this note shorter (comma). Halves
+    the value: half to quarter to eighth." Glyph: a short horizontal bar shrinking (or two notes
+    with the right one smaller); keep it in the `.edit-tool-btn` ghost style.
+  - `#dur-longer-btn`, aria-label "Longer note", title "Make this note longer (period). Doubles
+    the value: eighth to quarter to half." Glyph: a bar growing. Same `.edit-tool-btn` style.
+
+  Why steppers over explicit value buttons (a 16th/8th/quarter/half/whole palette): (1) two
+  buttons fit the existing narrow docked toolbar that already carries undo/redo + pitch + delete,
+  where a five-or-more-button palette would crowd or wrap on phone (#33/#84); (2) "make it a bit
+  longer / shorter" is the OMR-correction verb (the scanner read a quarter as an eighth, the user
+  wants one notch over), which a relative stepper expresses in one press, the same mental model as
+  pitch-up/pitch-down already on the cluster; (3) it reuses the proven enabled/disabled idiom
+  (gray out at the ends of the ladder) instead of needing a "which value am I on" highlighted-state
+  palette. A value palette is the right richer follow-up when note-input mode lands (you pick a
+  duration to ARM, which is a different gesture); flag to PM, do not build now. The cluster swap
+  rule is UNCHANGED: `#note-edit` shows for a note selection, `#add-note` for a rest; duration only
+  ever shows in the note cluster, so a rest never shows duration controls (correct, rests are not
+  editable in v1).
+
+  ### Decision P3-2 (KEYBOARD) - comma = shorter, period = longer. (Recommended, justified.)
+
+  The arrow keys are fully spent: Left/Right = staff selection step, Up/Down = pitch (plain
+  diatonic, Ctrl semitone, Shift octave), Enter = add-on-rest, Delete = delete, Ctrl+Z/Y = undo/
+  redo, plus/minus = canvas pitch. Duration needs a fresh, unshifted, ergonomic pair that does not
+  collide. CHOSEN: **comma `,` = shorter, period `.` = longer**, active on BOTH surfaces whenever a
+  NOTE is selected in edit mode. Rationale: (1) `,` and `.` are physically the `<` / `>` keys, a
+  near-universal "decrease / increase" pair, and on a piano-roll editor they read as "tighter /
+  wider" which is exactly duration; (2) they are unmodified single keys (no Ctrl/Shift gymnastics),
+  matching the lightweight feel of the existing single-key verbs (Enter, Delete); (3) they do not
+  collide with anything bound today and are free on the canvas too (the canvas only spends arrows,
+  plus/minus, Space). Rejected: bracket keys `[` `]` (harder to reach, less obviously ordered, and
+  bracket-as-duration is a niche convention); Shift+Left/Right (reads as "extend selection", a
+  multi-select gesture we may want later, so keep it free); the number row (that is the value-
+  palette idiom for a future note-input mode, do not burn it on a stepper now). Document `,`/`.`
+  in BOTH surface aria-labels (P3-6). On a rest selection `,`/`.` are no-ops (optionally a polite
+  "Rests cannot change duration in this version" once, but silent is acceptable for v1).
+
+  ### Decision P3-3 (LADDER) - plain values only: 16th, eighth, quarter, half, whole. No dots in v1.
+
+  The stepper walks this exact ordered ladder (shortest to longest), one notch per press/click:
+  **16th, eighth, quarter, half, whole**. These are the five values that cover essentially all
+  real piano OMR corrections; `NOTE_VALUE_QUARTERS` already defines them (plus 32nd/64th/breve,
+  which v1 simply does not step onto). Ends of the ladder CLAMP: at a 16th, "shorter" is a no-op
+  (button disabled, key announces "Already the shortest value, sixteenth"); at a whole, "longer"
+  is a no-op (button disabled, key announces "Already the longest value, whole"). DOTTED values
+  are EXCLUDED from v1 and this is deliberate: dotted notes triple the ladder size (each value gets
+  a dotted variant), make "next notch" ambiguous (does quarter step to dotted-quarter or to half?),
+  and the bar-math for a 1.5x value is exactly where reflow gets hairy. Plain powers-of-two keep
+  every step a clean double/halve, which keeps the ripple predictable and the mental model trivial
+  ("each press doubles or halves"). A note that ARRIVES dotted (the model inferred dot(s) from an
+  odd `<duration>`) snaps to the NEAREST plain ladder value on its first duration edit, announced
+  ("Dotted quarter changed to quarter") so the user is not surprised; v1 never PRODUCES a dotted
+  note. Dotted support is the natural v2 once reflow is proven. NOTE for Tech Lead: a duration edit
+  sets BOTH `<duration>` (divisions) and `<type>`/dots together via the existing `noteTypeForDuration`
+  inverse; `divisions` stays 4 (load-bearing across the codebase), so a 16th = 1 div, eighth = 2,
+  quarter = 4, half = 8, whole = 16, and reflow math is in those integer divisions.
+
+  ### Decision P3-4 (FEEDBACK) - both surfaces re-render the value; readout states the new value; a brief flash on the changed note.
+
+  A duration change is a re-engrave (discrete, like a keyboard pitch step or an add), so there is
+  no drag-preview phase in v1. On commit:
+  - **Staff:** Verovio re-engraves the note at its new value (notehead fill open/closed, stem,
+    flags/beams change) and the bar re-spaces. The `.ph-selected` brass halo stays on it. This is
+    the primary "it landed" signal: a quarter visibly becoming a half is unambiguous notation.
+  - **Falling canvas:** the bar's LENGTH changes (a longer value = a taller bar, since bar length
+    is duration), and following bars in the voice shift to their new onsets (the ripple, P3-5). The
+    bar keeps the focus-ring + glow selection. The length change is the canvas's native "it landed"
+    signal.
+  - **Readout (required):** the existing `#note-edit-readout` (which already names the selected
+    note) ALSO states the current value, so a selected note reads e.g. "D5, quarter" and after a
+    lengthen "D5, half". This is the transient value readout; no extra chrome. The readout uses the
+    current Names mode for the pitch token (solfege/letters) as elsewhere.
+  - **Transient flash:** on a duration commit, briefly pulse the changed note (staff notehead +
+    canvas bar) with the brass `--accent-glow` for ~150ms, then settle to the steady selection
+    halo. Pitch edits move the halo (visible by position); a duration edit can leave the notehead
+    in the same x/y while only its shape changes, so a one-shot flash draws the eye to "this note
+    just changed" the way a position move does for pitch. Respect reduced motion: NO flash under
+    `prefers-reduced-motion` (the re-engrave + readout already confirm it), matching #86/#6.
+
+  ### Decision P3-5 (BAR-FULLNESS) - RIPPLE-and-reflow within the bar, spill is CLAMPED at the barline (simplest predictable rule). Plainly stated limit.
+
+  RECOMMENDATION: **ripple-and-reflow, scoped to the current bar, with a clamp at the barline.**
+  This is NOT MuseScore's overwrite model (where lengthening a note silently eats the notes after
+  it) and NOT a free global reflow (where one edit shoves the whole piece). The rule:
+  - **Lengthen:** the note grows; the following notes/rests IN THE SAME VOICE AND BAR shift later
+    by the added duration (ripple right). If the bar would OVERFLOW, the growth is CLAMPED so the
+    note grows only as far as the barline allows: the note takes all remaining room up to the bar's
+    end and no event is pushed across the barline. If there is no room at all (the note is already
+    the last event filling the bar), "longer" is a no-op at the bar boundary (announce "No room to
+    lengthen in this bar"). So a bar NEVER overflows and notes NEVER cross a barline in v1.
+  - **Shorten:** the note shrinks; the freed time becomes a REST appended after it in the bar (the
+    bar stays full, mirroring how DELETE leaves a rest). The following events do not move (their
+    onsets are unchanged); only a rest appears in the gap. This reuses the proven "completing a bar
+    with rests is a rendering-safe fill" finding (rhythm_repair: complete-with-rests is never-worse;
+    stretching a note to fill REGRESSED real pieces, MEMORY.md). So shorten = "note + new rest",
+    which is exactly the delete-leaves-a-rest idiom the user already knows.
+  - **The limitation, stated plainly (for the PM + the help copy):** in v1 a duration change CANNOT
+    spill across a barline. If you want a note longer than the room left in its bar, v1 stops you at
+    the barline (it does not auto-create a tie into the next bar). Cross-barline durations + ties are
+    the v2 follow-up. This is the honest, predictable boundary: every edit stays inside one bar, so
+    the bar always sums correctly and the user never has to reason about a tie they did not ask for.
+    The clamp-and-announce makes the limit legible at the moment it is hit rather than silently doing
+    something surprising.
+
+  Why this over MuseScore overwrite: overwrite (lengthening swallows the next note) DESTROYS data
+  silently, which is the opposite of a correction tool's job and has no undo-friendly "what did I
+  just lose" story. Ripple + clamp loses nothing: shorten adds a rest (recoverable by lengthening
+  back), lengthen either ripples within the bar or stops at the wall. It keeps the bar invariant
+  the rest of the editor already relies on (every prior op is fixed-bar) and it is one sentence to
+  explain ("a note grows or shrinks inside its bar; it never crosses a barline").
+
+  ### Decision P3-6 (ACCESSIBILITY) - aria-labels for the two buttons + the full revised staff help/aria string.
+
+  - **Button aria-labels:** `#dur-shorter-btn` = "Shorter note"; `#dur-longer-btn` = "Longer note".
+    Disabled at the ladder ends carry `disabled` + `aria-disabled="true"` (same idiom as undo/redo),
+    so a pointer user sees them dim and a keyboard user gets the boundary announce instead.
+  - **Announcements (the shared `#edit-live` polite region), value-named, current Names mode:**
+    - On a duration step: **"D5 quarter to half"** (lengthen) / **"D5 half to quarter"** (shorten),
+      the from->to form matching P1's "D4 up to E4". The pitch token is informational; the values
+      are load-bearing.
+    - Shorten that adds a rest: the same "D5 quarter to eighth" suffices (the new rest is implied by
+      a shorter value); no extra sentence in v1.
+    - Lengthen clamped at the barline: **"D5 lengthened to fill the bar"** when it grew partway, or
+      **"No room to lengthen in this bar"** when it could not grow at all.
+    - Ladder ends: **"Already the shortest value, sixteenth"** / **"Already the longest value, whole"**.
+    - Snapping a dotted arrival to plain: **"Dotted quarter changed to quarter"** before the step's
+      own from->to announce (or fold into one: "Dotted quarter to quarter").
+    - Undo of a duration edit: **"Undid lengthen to half"** / **"Undid shorten to eighth"** (P1-6
+      form); redo mirrors. After undo the note returns selected at its prior value.
+  - **Full REVISED staff help/aria string (replaces the `main.ts` ~line 657 string verbatim, no
+    em dashes):**
+
+    "Staff editor. Left and right select a note or a rest; up and down change a note's pitch by a
+    step; Control with up or down changes by a semitone; Shift with up or down by an octave; comma
+    makes a note shorter and period makes it longer; on a rest, press Enter to add a note of the
+    same duration; Delete removes a note; Control Z undoes."
+
+  - **Canvas surface aria-label (append the duration clause to the canvas string too, since `,`/`.`
+    work there as well):** add ", comma and period change its length" after the pitch clause, e.g.
+    "...plus and minus change its pitch by a semitone; Shift with plus or minus moves an octave;
+    comma and period change its length; Delete removes it; Control Z undoes."
+
+  ### Decisions to confirm with the main agent / product owner
+  1. **Ladder = plain 16th/eighth/quarter/half/whole, NO dots in v1.** Confirm dropping dotted
+     values for the first cut; I chose it because clean halve/double keeps reflow predictable and
+     the mental model one sentence. Dotted is the obvious v2.
+  2. **Reflow = ripple inside the bar, CLAMP at the barline (no cross-bar ties).** Confirm we accept
+     "a note cannot grow past its barline in v1" as the honest limit rather than auto-tying into the
+     next bar. I recommend the clamp; ties are v2.
+  3. **Keys = comma (shorter) / period (longer).** Confirm this pair over brackets; I picked `,`/`.`
+     for the `<`/`>` decrease/increase reading and zero collisions.
+  4. **Shorten leaves a REST in the freed time (following onsets unchanged); lengthen RIPPLES the
+     following events later within the bar.** Confirm this asymmetry (shorten = local rest, lengthen
+     = ripple) reads right; it falls out of "the bar always stays full and nothing crosses a barline".
+
 ## Smart Edit Mode ADD-A-NOTE v1: fill a rest (turn a REST into a NOTE of the same duration) (interaction + visual spec)
 
 - **2026-06-04 - The inverse of P2 delete. P2 (model-level DELETE) shipped: a selected note
