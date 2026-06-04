@@ -185,8 +185,14 @@ def _bar_fallback_durs(durs: List[Optional[int]], capacity16: Optional[int],
     room = capacity16 - matched_sum
     out: List[int] = []
     for d in durs:
-        if d and d > 0:
-            out.append(int(d))
+        if d is not None:
+            # A MATCHED chord. Pass its borrowed dur16 through. A matched dur16 that rounded to 0 (a
+            # sub-sixteenth Clarity read, or base<=0) is degenerate, NOT an unmatched slot: give it
+            # the blind fallback exactly as the no-capacity path does, so a matched chord never draws
+            # on the unmatched-room budget -- otherwise its duration would depend on whether an
+            # unrelated sibling happened to be unmatched. Only `d is None` (a genuinely unmatched
+            # chord, the same set n_unmatched counts) consumes room.
+            out.append(int(d) if d > 0 else fallback)
             continue
         take = max(1, min(fallback, room))  # clamp to [1, quarter]; >= quarter room keeps a quarter.
         out.append(take)

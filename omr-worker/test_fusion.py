@@ -146,6 +146,11 @@ def test_bar_fallback_durs_unit():
     assert f([14, None, None], 16, 4) == [14, 2, 1]           # 2 room split: 2 then floored to 1
     assert f([None, None], None, 4) == [4, 4]                 # unknown capacity -> blind quarters
     assert f([2, None, 2], 16, 4) == [2, 4, 2]                # room 12 -> a full quarter (no clamp)
+    # A MATCHED chord whose borrowed dur16 rounded to 0 (a sub-sixteenth Clarity read) is degenerate,
+    # NOT an unmatched slot: it takes the blind fallback like the no-capacity path and does NOT draw on
+    # the unmatched-room budget, so its size never depends on whether a sibling happened to be unmatched.
+    assert f([12, 0, None], 16, 4) == [12, 4, 4]              # matched-0 -> quarter; only None takes room
+    assert f([12, 0], 16, 4) == [12, 4]                       # no unmatched -> early path, matched-0 -> quarter
 
 
 def test_fuse_preserves_chords():
