@@ -14,7 +14,8 @@ give each geom chord a duration borrowed from the temporally-corresponding Clari
 is found by aligning each staff's geom chord stream to Clarity's with Needleman-Wunsch scored on
 PITCH-CLASS overlap. Pitch-class (not full MIDI) is deliberate: geom's edge is the OCTAVE, which
 pitch-class ignores, so a chord still aligns when geom corrected its octave relative to Clarity.
-A geom chord with no Clarity match keeps a neutral quarter-note duration.
+A geom chord with no Clarity match is sized to the bar's meter (a lone onset filling its bar reads as
+a held note; with several onsets the unmatched ones split the leftover room, capped at a quarter each).
 
 geom's pitches pass through unchanged, so the fused pitch is exactly geom's (never worse than geom
 on pitch). Beyond per-note durations, fusion also adopts Clarity's declared TIME SIGNATURE (geom
@@ -163,26 +164,42 @@ def _bar_capacity16(beats: int, beat_type: int) -> Optional[int]:
 def _bar_fallback_durs(durs: List[Optional[int]], capacity16: Optional[int],
                        fallback: int) -> List[int]:
     """Resolve a (measure, staff) voice's per-chord durations, sizing the UNMATCHED chords (a None
-    entry) so the bar does not exceed its meter. Matched chords (an int) pass through unchanged.
+    entry) to the meter so the bar neither over-reads past it nor under-reads a held note. Matched
+    chords (an int) pass through unchanged. Two complementary cases, split by the chord count:
 
-    WHY (the reverie m17 / tctab over-read this fix targets). An unmatched geom chord previously took
-    a blind quarter (fallback=4 sixteenths). When the bar's matched borrows already (nearly) fill the
-    meter, that quarter OVERFILLS it: reverie's last bar read a half + four eighths but one eighth
-    failed to align to its (re-ordered) Clarity twin, so it took a quarter and the bar summed to 18/16
-    = 4.5 beats (the user's symptom). geom's OWN duration cannot rescue this -- the deployed notehead
-    path fakes duration:1 for every note -- so the fix sizes the fallback to the room the bar has
-    LEFT: each unmatched chord takes clamp(room_remaining, 1, quarter), consuming the room greedily.
-    A lone unmatched chord in a near-empty bar still gets a full quarter (room >= 4), so this is
-    IDENTICAL to the old behaviour except where a quarter would overfill (room < 4) -- exactly the
-    over-read case. An always-positive floor of one sixteenth keeps every geom notehead present (a
-    dropped note would regress geom's pitch edge), even when the matched borrows already overfill.
-    capacity16=None (unknown / odd meter) -> every unmatched chord keeps the blind quarter (no room
-    signal to improve). PURE."""
+    LONE onset (the bar's ONLY chord, and it is unmatched) -> it FILLS the bar (a held whole / half
+    note = the full capacity), NOT a quarter. geom does not detect rests, so a single geom onset alone
+    in a voice is a note SUSTAINED across the bar, never a short note trailed by silence. Capping it
+    at a quarter is what made a held bass chord read as a quarter + a padded dotted-half rest (the
+    reverie bass m4/m6/m8 symptom: a whole-note triad that failed pitch-class alignment to Clarity, so
+    it took the fallback). Filling is also never-worse on the metric -- a single held onset that fills
+    its bar matches the truth's held note, and was measured to only ever move TOWARD truth (16 such
+    bars across the 4 real eval pieces, 0 regressions; liminality fills a 2/4 bar to a half note, not
+    a whole, since the fill is the capacity).
+
+    MULTIPLE onsets (>= 2 chords) -> each UNMATCHED chord takes clamp(room_remaining, 1, quarter),
+    consuming the bar's leftover room greedily. When the matched borrows already (nearly) fill the
+    meter, a blind quarter would OVERFILL it: reverie's last TREBLE bar read a half + four eighths but
+    one eighth failed to align to its (re-ordered) Clarity twin, so it took a quarter and the bar
+    summed to 18/16 = 4.5 beats (the #201 over-read). Sizing each unmatched chord to the room left
+    caps the bar at its meter; an always-positive floor of one sixteenth keeps every geom notehead
+    present (a dropped note would regress geom's pitch edge) even when the matched borrows overfill.
+
+    The two cases never overlap: the fill needs EXACTLY ONE onset, the clamp needs >= 2 (a matched
+    sibling is what fills the bar there). geom's OWN duration cannot rescue either -- the deployed
+    notehead path fakes duration:1 for every note. capacity16=None (unknown / odd meter) -> every
+    unmatched chord keeps the blind quarter (no room signal to improve). PURE."""
     n_unmatched = sum(1 for d in durs if d is None)
     if capacity16 is None or n_unmatched == 0:
         return [int(d) if d and d > 0 else fallback for d in durs]
     matched_sum = sum(int(d) for d in durs if d and d > 0)
     room = capacity16 - matched_sum
+    if len(durs) == 1 and durs[0] is None:
+        # The bar's SOLE chord is unmatched: fill the whole bar (a held note), not a blind quarter.
+        # matched_sum is 0 here (the only chord is the unmatched one), so room == capacity16. This is
+        # the INVERSE of the over-read clamp below, and the two can never overlap: the clamp needs a
+        # MATCHED sibling to have filled the bar (>= 2 onsets), this fill fires only at exactly one.
+        return [max(1, room)]
     out: List[int] = []
     for d in durs:
         if d is not None:
@@ -205,9 +222,10 @@ def _build(g_cells: Dict, borrowed: Dict, fifths: int, beats: int = 4, beat_type
     """Rebuild geom's notes (pitch + measures) with the borrowed durations and the meter the caller
     resolved (beats/beat_type: Clarity's declared meter, except a 4/4-equivalent meter is passed as
     4/4 -- see fuse -- so a non-4/4 piece renders at its true width). An UNMATCHED geom chord takes a
-    fallback sized so its bar is not inflated past the meter (_bar_fallback_durs: clamp(room left, 1,
-    quarter); a lone unmatched chord in a near-empty bar still gets a full quarter, so this only bites
-    when a quarter would overfill -- the reverie/tctab over-read). The key stays geom's (a non-C key
+    fallback sized to the meter (_bar_fallback_durs: a LONE unmatched chord -- the bar's only onset --
+    FILLS the bar as a held note; with >= 2 onsets each unmatched chord takes clamp(room left, 1,
+    quarter) so the bar is never inflated past the meter -- the reverie bass under-read fill and the
+    #201 treble over-read clamp, two non-overlapping cases). The key stays geom's (a non-C key
     borrow is a later enhancement, validated on a non-C piece first; all current eval pieces are C
     major).
 

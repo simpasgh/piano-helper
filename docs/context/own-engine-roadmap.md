@@ -4,6 +4,44 @@ Self-contained plan so any session (esp. the one on the GPU PC) can pick up and 
 without the prior machine's local memory. Newest status at the top. NO em dashes in generated
 text (project rule). Ship every code change through the gated flow (see "Constraints" below).
 
+## STATUS: fusion held-note UNDER-read FIXED (a lone unmatched geom chord now fills its bar) (2026-06-04)
+
+Branch `fix/fusion-held-note-fill` (off main). RHYTHM lever, prod-primary fusion path. The INVERSE of
+the over-read fix below: a HELD chord that fills its bar, if UNMATCHED, was capped at a blind QUARTER and
+`rhythm_repair` then padded a trailing rest, so a 4/4 whole-note bass triad rendered as a 1/4 note + a 3/4
+rest (the user's reverie report: "bass blocks recognised as a 1/4 note and a 3/4 pause instead of 4/4
+notes"). CONFIRMED on the box (reverie fixture, `diag_bass.py` over the cached engine outputs): reverie's
+bass is one held whole-note triad per bar; 14 of 17 bars align to a Clarity whole note (borrow=16, render
+right), but m4/m6/m8 fail pitch-class Needleman-Wunsch to any Clarity chord (Clarity reads fewer bass
+chords, so the global per-staff alignment leaves 3 geom bass chords unmatched) and took the capped quarter.
+NOT a Clarity matched-under-read (0 bass bars are a lone MATCHED chord borrowing a quarter). geom's m4/m6/m8
+pitches EXACTLY match truth and truth is whole notes, so the fill fixes rendering AND adds (midi,16) matches.
+
+FIX (`fusion.py`, `_bar_fallback_durs`): a LONE unmatched onset -- the bar's ONLY chord -- FILLS the bar
+(its capacity = a held whole/half note) instead of the blind quarter. `if len(durs) == 1 and durs[0] is
+None: return [max(1, room)]` (room == capacity16 there, since the sole chord is the unmatched one). geom
+detects no rests, so a single geom onset alone in a (measure,staff) voice is a HELD note, never a quarter
+trailed by silence. The INVERSE of the over-read clamp and the two NEVER overlap: the fill needs exactly
+ONE onset, the clamp needs >= 2 (a matched sibling is what fills the bar there). Multiple unmatched onsets
+still split the room greedily + cap per chord (over-read fix unchanged). Pitch is geom's untouched -> cannot
+regress pitch. Reads the same capacity as the clamp, so it fills a 2/4 bar to a HALF (8), not a whole.
+
+MEASURED never-worse (box `fusion_repair_eval.py`, BEFORE deployed vs AFTER `RHY_SRC=/root/fusionfix`;
+STABLE cache `/root/fusion_eval_cache` so both runs share byte-identical geom+Clarity inputs -- the default
+`/tmp/fusion_eval_cache` was getting wiped mid-session by a tmp-cleaner / a parallel worktree, so it is
+relocated under /root for a reproducible BEFORE vs AFTER):
+- note_dur_f1: liminality 0.929->0.946, tctab 0.890->0.940, icarus 0.880->0.949, reverie 0.427->0.476.
+- duration_acc: liminality 0.983->1.000, tctab 0.894->0.945, icarus 0.890->0.959, reverie 0.898->1.000.
+- note_f1 (pitch) UNCHANGED on all 4 (0.946/0.995/0.990/0.476); pre-repair incomplete bars down on all 4
+  (liminality 1->0, tctab 43->35, icarus 6->2, reverie 3->0). reverie m4/m6/m8 now render whole-note triads
+  matching truth EXACTLY (no padded rest).
+IMPROVES 3 pieces the over-read clamp was a no-op on (tctab/icarus/liminality), not just reverie: an impact
+scan found 16 sole-onset-unmatched bars across the 4 pieces, ALL moving toward truth, 0 regressions. Tests:
+`test_fusion.py` +2 fuse-level (held-note fill 4/4 whole + 2/4 half) + updated `test_bar_fallback_durs_unit`
+(`f([None],16,4)` now `[16]` not the buggy `[4]`; `f([None,None],16,4)==[4,4]` proves >= 2 onsets clamp, not
+fill, so the two cases provably coexist); 28 fusion tests, full omr-worker suite 465 passed / 15 torch-skipped.
+NEXT rhythm lever: the residual tctab overfull bars (the SEPARATE Clarity matched-side over-read noted below).
+
 ## STATUS: fusion FALLBACK over-read FIXED (an unmatched geom chord no longer overfills its bar) (2026-06-04)
 
 Branch `fix/fusion-rhythm-overread` (off main, not yet merged). RHYTHM lever, prod-primary fusion path.
