@@ -1514,3 +1514,387 @@ describe("ScoreModel.changeDuration respects a non-4/4 time signature for the ba
     expect(rec2?.outcome).toBe("noRoom");
   });
 });
+
+// ---------------------------------------------------------------------------------------------------
+// DOTTED v1: the dot TOGGLE (changeDuration(id, "dot")). Add = grow to x1.5 via the lengthen path
+// (ripple / absorb / REFUSE when the half does not fit, never clamp); remove = shrink to the plain
+// value via the shorten path (freed third -> rest). Single dot only; off-ladder arrival snaps first.
+// ---------------------------------------------------------------------------------------------------
+
+// One note of `dur`/`type` then a trailing rest filling an 8/4 bar (capacity 32 at divisions=4), so a
+// dot ADD on each plain rung has room to grow into. The dot's added half is half the plain rung.
+const dotBar = (dur: number, type: string) => `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><time><beats>8</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>${dur}</duration><voice>1</voice><type>${type}</type></note>
+  <note><rest/><duration>${32 - dur}</duration><voice>1</voice><type>whole</type></note>
+</measure></part></score-partwise>`;
+
+describe("ScoreModel.changeDuration dot ADD on each plain rung (x1.5, one <dot>, lengthen path)", () => {
+  it("adds a single dot on 16th..half, setting <duration>=x1.5 + <type> + exactly one <dot>", () => {
+    // 16th(1)->1.5 ... half(8)->12. divisions=4. Each lands on the SAME base type with one dot.
+    const cases: Array<[number, string, number]> = [
+      [1, "16th", 1.5],
+      [2, "eighth", 3],
+      [4, "quarter", 6],
+      [8, "half", 12],
+    ];
+    for (const [dur, type, dottedDur] of cases) {
+      const model = parseScoreModel(dotBar(dur, type));
+      const rec = model.changeDuration(0, "dot");
+      expect(rec?.outcome).toBe("stepped");
+      expect(rec?.dotVerb).toBe("lengthen"); // adding a dot is a lengthen
+      const info = noteInfo(model.serialize(), "C");
+      expect(info.dur).toBe(dottedDur);
+      expect(info.type).toBe(type); // same base type, now dotted
+      expect(info.dots).toBe(1); // EXACTLY one dot, never two
+      expect(rec?.toName).toBe(noteValueName(type, 1)); // e.g. "dotted quarter"
+    }
+  });
+
+  it("the dot ADD consumes trailing rest and keeps the bar full (no overflow)", () => {
+    // quarter(4) + rest(28) in an 8/4 bar. Dot -> dotted quarter (6); the 2 added divs come from the
+    // rest, which shrinks to 26. The bar still sums to 32, no barline crossing.
+    const model = parseScoreModel(dotBar(4, "quarter"));
+    model.changeDuration(0, "dot");
+    const xml = model.serialize();
+    expect(noteInfo(xml, "C")).toEqual({ dur: 6, type: "quarter", dots: 1 });
+    const events = measureEvents(xml);
+    expect(events).toEqual([
+      { rest: false, dur: 6 },
+      { rest: true, dur: 26 },
+    ]);
+    expect(measureFilledDivs(xml)).toBe(32);
+  });
+});
+
+describe("ScoreModel.changeDuration dot ADD ripples + absorbs like a lengthen", () => {
+  // C5 quarter (4), D5 quarter (4), then a quarter rest (4): total 12 in a 3/4 bar. Dotting C5 to a
+  // dotted quarter (6) adds 2; the rest absorbs it (4 -> 2) and D5 ripples right by 2 divs.
+  const RIPPLE = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><time><beats>3</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+  <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+  <note><rest/><duration>4</duration><voice>1</voice><type>quarter</type></note>
+</measure></part></score-partwise>`;
+
+  it("ripples the following note right and shrinks the trailing rest by the added half", () => {
+    const model = parseScoreModel(RIPPLE);
+    const dBefore = model.handles.find((h) => h.midi === 74)!.onsetSec; // D5
+    const rec = model.changeDuration(0, "dot");
+    expect(rec?.outcome).toBe("stepped");
+    const xml = model.serialize();
+    expect(noteInfo(xml, "C")).toEqual({ dur: 6, type: "quarter", dots: 1 });
+    // C(6) D(4) REST(2): the rest shrank from 4 to 2; the bar still sums to 12.
+    expect(measureEvents(xml)).toEqual([
+      { rest: false, dur: 6 },
+      { rest: false, dur: 4 },
+      { rest: true, dur: 2 },
+    ]);
+    expect(measureFilledDivs(xml)).toBe(12);
+    // D5 rippled later by 2 divs = 0.25s at 120bpm.
+    expect(model.handles.find((h) => h.midi === 74)!.onsetSec).toBeCloseTo(dBefore + 0.25, 6);
+  });
+});
+
+describe("ScoreModel.changeDuration dot ADD is REFUSED (noRoom) when the half does not fit", () => {
+  it("a quarter that fills to the barline cannot be dotted (no following rest, no slack)", () => {
+    // 4/4 bar: a quarter (4) then a dotted-half (12) fill it exactly (16). The quarter has no rest
+    // room after it and no slack, so dotting it would cross the barline -> REFUSED, DOM unchanged.
+    const FULL = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+  <note><pitch><step>G</step><octave>4</octave></pitch><duration>12</duration><voice>1</voice><type>half</type><dot/></note>
+</measure></part></score-partwise>`;
+    const model = parseScoreModel(FULL);
+    const before = model.serialize();
+    const rec = model.changeDuration(0, "dot");
+    expect(rec?.outcome).toBe("noRoom");
+    expect(rec?.childrenBefore.length).toBe(0); // nothing snapshotted (true no-op)
+    expect(model.serialize()).toBe(before); // DOM unchanged, no overflow, no barline crossing
+  });
+
+  it("partial room is NOT a clamp: a half with only a quarter rest after it is refused", () => {
+    // 4/4 bar: a half (8) + a quarter rest (4) + a quarter note (4) = 16. Dotting the half needs +4
+    // (to 12), and exactly 4 of rest is available... so it FITS. Tighten: only 2 of rest available.
+    // half(8) + eighth-rest(2) + ... must still sum to 16; use half(8)+rest(2)+dotted-half? Keep it
+    // simple: half(8) needs +4 but only a 2-div rest follows -> REFUSED (would need to clamp, which
+    // the dot never does).
+    const TIGHT = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>8</duration><voice>1</voice><type>half</type></note>
+  <note><rest/><duration>2</duration><voice>1</voice><type>eighth</type></note>
+  <note><pitch><step>G</step><octave>4</octave></pitch><duration>6</duration><voice>1</voice><type>quarter</type><dot/></note>
+</measure></part></score-partwise>`;
+    const model = parseScoreModel(TIGHT);
+    const before = model.serialize();
+    const rec = model.changeDuration(0, "dot");
+    expect(rec?.outcome).toBe("noRoom"); // +4 needed, only 2 of rest -> refused, NOT clamped to +2
+    expect(model.serialize()).toBe(before);
+  });
+});
+
+describe("ScoreModel.changeDuration dot on a WHOLE note is refused (no room)", () => {
+  it("a whole note filling a 4/4 bar cannot be dotted", () => {
+    const WHOLE = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>16</duration><voice>1</voice><type>whole</type></note>
+</measure></part></score-partwise>`;
+    const model = parseScoreModel(WHOLE);
+    const before = model.serialize();
+    const rec = model.changeDuration(0, "dot");
+    expect(rec?.outcome).toBe("noRoom"); // a dotted whole (24) would overflow the 4/4 bar
+    expect(model.serialize()).toBe(before);
+    // ... but in an 8/4 bar (capacity 32) a whole HAS room, so the dot is allowed there.
+    const big = parseScoreModel(dotBar(16, "whole"));
+    expect(big.changeDuration(0, "dot")?.outcome).toBe("stepped");
+    expect(noteInfo(big.serialize(), "C")).toEqual({ dur: 24, type: "whole", dots: 1 });
+  });
+});
+
+describe("ScoreModel.changeDuration dot REMOVE returns to the plain value + inserts the freed rest", () => {
+  it("removing a dot from a dotted quarter yields a plain quarter and a freed eighth rest", () => {
+    // A dotted quarter (6) then a rest (10) in a 4/4 bar. Pressing dot REMOVES it: quarter (4) + a new
+    // rest of the freed 2 right after, then the original rest. The bar still sums to 16.
+    const DOTTED = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>6</duration><voice>1</voice><type>quarter</type><dot/></note>
+  <note><rest/><duration>10</duration><voice>1</voice><type>half</type></note>
+</measure></part></score-partwise>`;
+    const model = parseScoreModel(DOTTED);
+    const rec = model.changeDuration(0, "dot");
+    expect(rec?.outcome).toBe("stepped");
+    expect(rec?.dotVerb).toBe("shorten"); // removing a dot is a shorten
+    expect(rec?.dottedSnap).toBe(false); // a plain single-dot remove uses the normal from->to
+    expect(rec?.fromName).toBe("dotted quarter");
+    expect(rec?.toName).toBe("quarter");
+    const xml = model.serialize();
+    expect(noteInfo(xml, "C")).toEqual({ dur: 4, type: "quarter", dots: 0 }); // plain quarter, no dot
+    // C(4) FREED-REST(2) REST(10): the freed eighth sits right after the note.
+    expect(measureEvents(xml)).toEqual([
+      { rest: false, dur: 4 },
+      { rest: true, dur: 2 },
+      { rest: true, dur: 10 },
+    ]);
+    expect(measureFilledDivs(xml)).toBe(16);
+  });
+});
+
+describe("ScoreModel.changeDuration dot toggle is binary (plain <-> dotted, never two dots)", () => {
+  it("dot then dot returns to the original plain value (toggle off)", () => {
+    const model = parseScoreModel(dotBar(4, "quarter"));
+    model.changeDuration(0, "dot"); // -> dotted quarter (6)
+    expect(noteInfo(model.serialize(), "C")).toEqual({ dur: 6, type: "quarter", dots: 1 });
+    model.changeDuration(0, "dot"); // -> back to a plain quarter (4)
+    expect(noteInfo(model.serialize(), "C")).toEqual({ dur: 4, type: "quarter", dots: 0 });
+  });
+
+  it("a double-dotted ARRIVAL normalizes DOWN to a single dot (never up to a third)", () => {
+    // A double-dotted half (3.5q = 14 divs) then a rest (2) in a 4/4 bar. Pressing dot removes ONE dot
+    // level: dotted half (12), freeing 2 -> rest. dottedSnap folds the announce "double dotted half to
+    // dotted half". It NEVER becomes triple-dotted.
+    const DOUBLE = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>14</duration><voice>1</voice><type>half</type><dot/><dot/></note>
+  <note><rest/><duration>2</duration><voice>1</voice><type>eighth</type></note>
+</measure></part></score-partwise>`;
+    const model = parseScoreModel(DOUBLE);
+    expect(noteInfo(DOUBLE, "C").dots).toBe(2); // precondition: arrives double-dotted
+    const rec = model.changeDuration(0, "dot");
+    expect(rec?.outcome).toBe("stepped");
+    expect(rec?.dottedSnap).toBe(true); // non-plain arrival -> snap phrasing
+    expect(rec?.toName).toBe("dotted half");
+    expect(noteInfo(model.serialize(), "C")).toEqual({ dur: 12, type: "half", dots: 1 });
+  });
+});
+
+describe("ScoreModel.changeDuration dot on an OFF-LADDER plain arrival snaps to the nearest rung", () => {
+  it("a tuplet-ish odd duration (5 divs) snaps to its nearest plain rung, then dots it", () => {
+    // 5 divs at divisions=4 = 1.25q: not a plain rung, and noteTypeForDuration approximates it to a
+    // plain quarter (0 dots, nearest base). Pressing dot snaps to the nearest plain rung (quarter, 4)
+    // then dots -> dotted quarter (6). dottedSnap is true (an off-ladder arrival was snapped).
+    const ODD = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><time><beats>8</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>5</duration><voice>1</voice><type>quarter</type></note>
+  <note><rest/><duration>27</duration><voice>1</voice><type>whole</type></note>
+</measure></part></score-partwise>`;
+    const model = parseScoreModel(ODD);
+    expect(ladderIndexForDuration(5, 4)).toBe(-1); // precondition: off the plain ladder
+    const rec = model.changeDuration(0, "dot");
+    expect(rec?.outcome).toBe("stepped");
+    expect(rec?.dottedSnap).toBe(true);
+    expect(rec?.toName).toBe("dotted quarter");
+    expect(noteInfo(model.serialize(), "C")).toEqual({ dur: 6, type: "quarter", dots: 1 });
+  });
+});
+
+describe("ScoreModel.changeDuration dot applies to the WHOLE chord (one shared dotted duration)", () => {
+  // A half-note chord C5+E5+G5 (each dur 8) then a half rest (8) in a 4/4 bar. Dotting ANY member
+  // must dot ALL of them to a dotted half (12), consuming 4 of the rest, never splitting the chord.
+  const CHORD = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>8</duration><voice>1</voice><type>half</type></note>
+  <note><chord/><pitch><step>E</step><octave>5</octave></pitch><duration>8</duration><voice>1</voice><type>half</type></note>
+  <note><chord/><pitch><step>G</step><octave>5</octave></pitch><duration>8</duration><voice>1</voice><type>half</type></note>
+  <note><rest/><duration>8</duration><voice>1</voice><type>half</type></note>
+</measure></part></score-partwise>`;
+
+  it("dotting a chord MEMBER dots every member to one shared dotted-half and absorbs the rest", () => {
+    const model = parseScoreModel(CHORD);
+    const rec = model.changeDuration(1, "dot"); // select the member E5
+    expect(rec?.outcome).toBe("stepped");
+    const xml = model.serialize();
+    for (const step of ["C", "E", "G"]) {
+      expect(noteInfo(xml, step)).toEqual({ dur: 12, type: "half", dots: 1 });
+    }
+    // The chord (3 dotted halves) + the shrunken rest (4): the half rest absorbed 4 of its 8.
+    const events = measureEvents(xml);
+    expect(events.map((e) => e.dur)).toEqual([12, 12, 12, 4]);
+    expect(events[3].rest).toBe(true);
+    expect(measureFilledDivs(xml)).toBe(16); // chord members are parallel: bar sum unchanged
+  });
+});
+
+describe("ScoreModel.changeDuration dot undo via restoreDuration restores the bar exactly", () => {
+  // restoreDuration rebuilds the measure from a deep clone of its ELEMENT children, which drops
+  // inter-element whitespace text nodes; the bar is STRUCTURALLY identical but not byte-identical, so
+  // (like the stepper undo tests) we compare the note structure + onsets, not the raw serialization.
+  const noteShapes = (xml: string) => {
+    const doc = new DOMParser().parseFromString(xml, "application/xml");
+    return Array.from(doc.getElementsByTagName("note")).map((n) => ({
+      step: n.getElementsByTagName("step").item(0)?.textContent ?? "",
+      rest: n.getElementsByTagName("rest").length > 0,
+      dur: n.getElementsByTagName("duration").item(0)?.textContent ?? "",
+      type: n.getElementsByTagName("type").item(0)?.textContent ?? "",
+      dots: n.getElementsByTagName("dot").length,
+    }));
+  };
+
+  it("add-dot + restore round-trips to the exact prior duration/type/dots/onsets", () => {
+    const model = parseScoreModel(dotBar(4, "quarter"));
+    const before = noteShapes(model.serialize());
+    const beforeOnsets = model.handles.map((h) => Number(h.onsetSec.toFixed(6)));
+    const rec = model.changeDuration(0, "dot");
+    expect(noteShapes(model.serialize())).not.toEqual(before);
+    model.restoreDuration(rec!);
+    expect(noteShapes(model.serialize())).toEqual(before); // structure restored exactly
+    expect(model.handles.map((h) => Number(h.onsetSec.toFixed(6)))).toEqual(beforeOnsets);
+    expect(noteInfo(model.serialize(), "C")).toEqual({ dur: 4, type: "quarter", dots: 0 });
+  });
+
+  it("remove-dot + restore brings back the dot and removes the freed rest", () => {
+    const DOTTED = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>6</duration><voice>1</voice><type>quarter</type><dot/></note>
+  <note><rest/><duration>10</duration><voice>1</voice><type>half</type></note>
+</measure></part></score-partwise>`;
+    const model = parseScoreModel(DOTTED);
+    const before = noteShapes(model.serialize());
+    const rec = model.changeDuration(0, "dot"); // remove the dot, insert a freed rest
+    expect(model.restHandles).toHaveLength(2); // freed rest + the original rest
+    model.restoreDuration(rec!);
+    expect(noteShapes(model.serialize())).toEqual(before); // exact restore: dot back, freed rest gone
+    expect(noteInfo(model.serialize(), "C")).toEqual({ dur: 6, type: "quarter", dots: 1 });
+    expect(model.restHandles).toHaveLength(1); // back to just the original rest
+  });
+});
+
+describe("ScoreModel.changeDuration dot keeps handle ids stable + reindex idempotent", () => {
+  it("a dot edit adds/removes no pitched note, so handle ids are unchanged", () => {
+    const model = parseScoreModel(dotBar(4, "quarter"));
+    const midisBefore = model.handles.map((h) => h.midi);
+    model.changeDuration(0, "dot");
+    expect(model.handles.map((h) => h.midi)).toEqual(midisBefore);
+    expect(model.handles[0].midi).toBe(72); // C5 still handle 0
+  });
+
+  it("dot add then restore does not double-insert <type> (reindex idempotent)", () => {
+    const model = parseScoreModel(dotBar(4, "quarter"));
+    const typeCount = (x: string) =>
+      new DOMParser().parseFromString(x, "application/xml").getElementsByTagName("type").length;
+    const before = typeCount(model.serialize());
+    const rec = model.changeDuration(0, "dot");
+    model.restoreDuration(rec!);
+    expect(typeCount(model.serialize())).toBe(before); // exactly one <type> per note, never doubled
+  });
+});
+
+describe("ScoreModel.dotState (the dot button's aria-pressed + enabled probe)", () => {
+  it("reports PLAIN + toggleable when a plain note has room for the added half", () => {
+    const model = parseScoreModel(dotBar(4, "quarter")); // quarter with a big trailing rest
+    expect(model.dotState(0)).toEqual({ dotted: false, canToggle: true });
+  });
+
+  it("reports DOTTED + always toggleable for an already-dotted note", () => {
+    const DOTTED = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>12</duration><voice>1</voice><type>half</type><dot/></note>
+  <note><rest/><duration>4</duration><voice>1</voice><type>quarter</type></note>
+</measure></part></score-partwise>`;
+    // Even though the dotted half fills most of the bar, removing its dot frees time, so it is always
+    // toggleable regardless of room.
+    expect(parseScoreModel(DOTTED).dotState(0)).toEqual({ dotted: true, canToggle: true });
+  });
+
+  it("reports PLAIN + NOT toggleable when a plain note has no room for the half", () => {
+    const FULL = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+  <note><pitch><step>G</step><octave>4</octave></pitch><duration>12</duration><voice>1</voice><type>half</type><dot/></note>
+</measure></part></score-partwise>`;
+    expect(parseScoreModel(FULL).dotState(0)).toEqual({ dotted: false, canToggle: false });
+  });
+
+  it("returns a safe default for an out-of-range id", () => {
+    expect(parseScoreModel(FOUR_QUARTERS).dotState(99)).toEqual({ dotted: false, canToggle: false });
+  });
+});
+
+describe("DOTTED edit-OFF no-op: parsing without a dot edit never mutates the document", () => {
+  it("serialize() of a parsed-but-UNEDITED dotted score is byte-identical (dots preserved)", () => {
+    // A score that ARRIVES dotted must round-trip unchanged with NO dot edit: the dot machinery only
+    // mutates on an explicit changeDuration(id, "dot") call. Confirms edit-off is untouched and the
+    // model DISPLAYS (preserves) an arriving dotted note without producing or stripping dots.
+    const DOTTED = `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>6</duration><voice>1</voice><type>quarter</type><dot/></note>
+  <note><pitch><step>D</step><octave>5</octave></pitch><duration>10</duration><voice>1</voice><type>half</type><dot/></note>
+</measure></part></score-partwise>`;
+    const model = parseScoreModel(DOTTED);
+    const reparse = (x: string) => {
+      const doc = new DOMParser().parseFromString(x, "application/xml");
+      return Array.from(doc.getElementsByTagName("note")).map((n) => ({
+        step: n.getElementsByTagName("step").item(0)?.textContent ?? "",
+        dur: n.getElementsByTagName("duration").item(0)?.textContent ?? "",
+        type: n.getElementsByTagName("type").item(0)?.textContent ?? "",
+        dots: n.getElementsByTagName("dot").length,
+      }));
+    };
+    expect(reparse(model.serialize())).toEqual(reparse(DOTTED));
+  });
+});

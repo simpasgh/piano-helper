@@ -67,16 +67,17 @@ export interface AddNoteCommand {
 }
 
 // A CHANGE-DURATION of one note (Smart Edit P3 v1): step it one notch shorter/longer along the
-// plain value ladder, FIXED-BAR. `handleId` is the stable handle id (a duration edit never adds or
-// removes a pitched note, so the id is stable). apply() steps it via the model and stashes the
-// ChangeDurationRecord (a bar snapshot) for undo; invert() restores the bar from that record. Like
-// delete/add, the orchestrator (main.ts) re-derives the falling notes itself (a lengthen ripples
-// following onsets and a shorten changes a duration + adds a rest), so the command stack ignores
-// the vis bookkeeping. `direction` is recorded so a redo reproduces the same step deterministically.
+// plain value ladder, or TOGGLE its dot (DOTTED v1), FIXED-BAR. `handleId` is the stable handle id
+// (a duration edit never adds or removes a pitched note, so the id is stable). apply() steps it via
+// the model and stashes the ChangeDurationRecord (a bar snapshot) for undo; invert() restores the
+// bar from that record. Like delete/add, the orchestrator (main.ts) re-derives the falling notes
+// itself (a lengthen ripples following onsets and a shorten changes a duration + adds a rest), so the
+// command stack ignores the vis bookkeeping. `direction` is recorded so a redo reproduces the same
+// step deterministically; "dot" reuses the same model edit + undo path (it returns the same record).
 export interface ChangeDurationCommand {
   kind: "changeDuration";
   handleId: number;
-  direction: "shorter" | "longer";
+  direction: "shorter" | "longer" | "dot";
   record: ChangeDurationRecord | null; // filled by apply(); used by invert(). Re-filled on redo.
 }
 
