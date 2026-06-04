@@ -38,6 +38,53 @@ deliberately leaves alone. NEXT for those: a matched-side bar-sum sanity check o
 the full-symbol geom durations (which would also give the unmatched-chord fallback a real value instead
 of a clamp). Tests: `test_fusion.py` +6 (reverie shape, full-bar sixteenth floor, 2/4 capacity, the
 `_bar_fallback_durs` unit); full omr-worker suite 463 passed / 15 torch-skipped locally.
+## STATUS: OTTAVA (8va/8vb) read in BOTH decode paths; reverie's residual addressed, box real_eval is the ship gate (2026-06-04)
+
+Built the ottava-bracket read in geom_omr (research/worker change, UNCOMMITTED in the
+vigorous-shaw worktree, not deployed). This is the roadmap's long-standing "reverie's residual":
+geom decoded the WRITTEN staff position and never applied the 8va/8vb shift, so notes under a
+bracket sounded an octave off (the user's reverie bug: an octave too LOW in the bracketed region,
+pred = truth - 12). Both prod pitch sources keep geom's octave (geom-primary AND the geom+Clarity
+fusion), so this reached the user.
+
+WHAT SHIPPED (code): `geom_omr.detect_ottavas(gray, staves)` + `ottava_delta_at(rep_x, spans)` +
+helpers `_scan_dashed_rule` / `_dash_runs` / `_ottava_spans_from_boxes`, and the shift threaded
+into BOTH decode tails (`_decode_staves_to_musicxml`, the DEPLOYED notehead-only path, via the
+classical detector; and `_decode_staff`, the full-symbol path, via the detected `ottava` class
+boxes). Emits the SOUNDING octave directly (no `<octave-shift>` direction) so audio + falling notes
++ scorer are all correct with zero OSMD double-apply risk. Tests: test_geom_ottava.py (+29; pure
+shift in both paths, a numpy raster detect, never-raise). Full omr-worker suite 459 -> 488 green.
+
+DETECTOR (classical CPU, no GPU/model, in the spirit of detect_barlines): scan a tight band ABOVE
+the staff top (8va, +1) and BELOW the bottom (8vb, -1) for the bracket's dashed horizontal rule.
+Discriminators measured on reverie@300DPI (spike C:\tmp\ottava_diag*.py): longest dark run <= 1.6
+interline (rejects SOLID beams), >= 15 short runs (rejects sparse stray ink), span >= 40 interlines
+(rejects LOCAL clutter like a hairpin), AND dash fill >= 0.12 of the span (rejects the ~0.05-fill
+fringe of stem/ledger BOTTOMS in the row just outside a staff). KEY GOTCHA: a TREBLE staff's
+"below" band IS the ~6.5-interline inter-staff gap, where an 8vb is ambiguous with the BASS staff's
+own 8va (their bands overlap); scanning it produced FALSE 8vb that shifted correct notes DOWN. Fix:
+only scan the 8vb band when the next staff is >= 10 interlines below (open margin) or absent. After
+this, reverie detects 8va-only on the 5 clearly-bracketed staves, ZERO false 8vb.
+
+VERIFIED LOCALLY (the classical transcribe_geometric on the real reverie raster, no trained model):
+105 of 188 notes shift by EXACTLY +12 semitones (one octave up), note count unchanged, nothing
+shifts down; octave-6 mass jumps 7 -> 55 notes. Non-ottava input is byte-identical (shift is +0).
+
+SHIP GATE (NOT done locally): this is a worker change that does NOT reach the user until it passes
+the box `real_eval` on ALL 4 pieces (it-support/on-box). reverie should improve (note_f1 in the
+bracketed region); tctab/icarus/liminality must NOT regress (a false ottava would shift correct
+notes an octave; liminality also has ottavas). My local proof covers reverie + unit tests only.
+
+FOLLOW-UPS (deferred, clearly-scoped): (1) SYNTHETIC honesty for the FULL-SYMBOL eval: today the
+rich generator (`generate_rich_score(ottava=True)`) draws the bracket but keeps the WRITTEN octave
+as truth, so the new full-symbol shift would REGRESS its self-score. The deployed notehead path is
+UNAFFECTED (it never touches the generator); only `eval_detector` on synthetic ottava scores is.
+Fix when wiring the full-symbol path: model truth as SOUNDING octave + emit the matching
+`<octave-shift>` so Verovio engraves the glyph at the written position (decode recovers sounding =
+truth). The render path has NO CI, so overlay-verify. (2) FAITHFUL bracket: emit `<octave-shift>`
+in the deployed path for a low-notes + bracket engraving, gated on verifying OSMD reports `<pitch>`
+as the SOUNDING pitch (else it double-applies). (3) 15ma: read the engraved "8 vs 15" digit
+(needs glyph recognition the notehead-only path lacks; magnitude is always 1 octave today).
 
 ## STATUS: FULL-SYMBOL DECODE built (durations/key/accidentals/clefs/rests from glyphs); detector training + eval in flight (2026-06-04)
 
