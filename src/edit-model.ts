@@ -218,6 +218,14 @@ const num = (el: Element | null, fallback: number): number => {
 const child = (el: Element, tag: string): Element | null =>
   el.getElementsByTagName(tag).item(0);
 
+// Parse a raw string (e.g. an attribute value) to a finite number, or a fallback. Parallel to `num`
+// but for a string-or-null source (a getAttribute) rather than an element's textContent.
+const num2 = (s: string | null, fallback: number): number => {
+  if (s === null || s.trim() === "") return fallback;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : fallback;
+};
+
 // Read a <pitch> element into a ModelPitch. Defensive: a malformed pitch falls back to C4. The
 // `alter` is the RAW value from the DOM (the explicit <alter> element, or 0 when absent); the
 // key-signature implication for a BARE notehead is layered on separately (see effectiveAlter) so
@@ -369,6 +377,13 @@ export interface ChangeDurationRecord {
   dotVerb?: "lengthen" | "shorten";
 }
 
+// A time signature's beats / beat-type, the shape the time pill + the duration capacity read. Used
+// for the per-handle in-effect meter (MID-PIECE v2) and the targeted setTimeSignature readout.
+export interface MeterSig {
+  beats: number;
+  beatType: number;
+}
+
 // What a SET-KEY captured, so it can be inverted exactly (the OLD <fifths> + every per-note accidental
 // that changed). A key edit (SIG-4) is PITCH-PRESERVING: it rewrites the initial <key><fifths> and
 // then, for every note, makes the printed accidental BARE (the new key's default already sounds the
@@ -383,11 +398,16 @@ export interface ChangeDurationRecord {
 export interface SetKeyRecord {
   oldFifths: number;
   newFifths: number;
-  // Deep-cloned children of every <measure> in the score, at edit time, keyed by the live (stable)
+  // Deep-cloned children of the affected <measure>s, at edit time, keyed by the live (stable)
   // <measure> element. restore drops each measure's live children and re-appends its snapshot, then
-  // re-indexes, restoring the exact prior signature + accidentals.
+  // re-indexes, restoring the exact prior signature + accidentals. For a START (initial-declaration)
+  // edit this is EVERY measure (v1); for a MID-PIECE edit at measure M it is only the affected region
+  // `[M, nextKeyChange)`, so the snapshot + undo shrink to the bars whose key actually changed (MID-3).
   measures: Array<{ el: Element; childrenBefore: Node[] }>;
   changedCount: number;
+  // MID-PIECE (v2): the SCORE measure number the edit targeted, or null for a START edit (v1). Carried
+  // for the region-aware announce + as context; the invert itself is fully described by `measures`.
+  targetMeasure: number | null;
 }
 
 // What a SET-TIME captured, so it can be inverted EXACTLY (the OLD <beats> + <beat-type> text). A time
@@ -405,6 +425,16 @@ export interface SetTimeRecord {
   newBeats: number;
   newBeatType: number;
   mismatchedBars: number;
+  // MID-PIECE (v2): the SCORE measure number the edit targeted, or null for a START edit (v1). A START
+  // edit rewrites the one initial <time> in place (the tiny old-beats/old-beat-type inverse above). A
+  // mid-piece edit can ADD/EDIT/REMOVE a <time> in measure M (creating/emptying/dropping <attributes>),
+  // so its inverse is a CHILDREN snapshot of the affected measures (`measures`), restored in place.
+  targetMeasure: number | null;
+  // Deep-cloned children of the affected <measure>(s) BEFORE a mid-piece edit, for a byte-exact invert
+  // of an add/edit/remove (parallel to SetKeyRecord.measures). Empty for a START edit (which uses the
+  // in-place numeral restore). For a mid-piece add/edit this is just the target measure; for a remove it
+  // is also just the target measure (the next change downstream is never touched).
+  measures: Array<{ el: Element; childrenBefore: Node[] }>;
 }
 
 // The editable score model. Holds the parsed DOM and the ordered pitched-note handles. Edits
@@ -476,12 +506,19 @@ export interface ScoreModel {
   // if its actual alter equals the NEW key's default for its letter it prints BARE (any now-redundant
   // <accidental>/<alter> is removed); otherwise it carries an EXPLICIT accidental (<alter> + matching
   // <accidental>, including a NATURAL when the new key would sharp/flat that letter) pinning the pitch.
-  // <step>/<octave> are never touched; no note moves on the staff or changes MIDI. Only the INITIAL
-  // <key> is rewritten (mid-piece key changes are v2; a score with no <key> is a no-op). Returns the
-  // record needed to invert (the old fifths + a snapshot of every measure), or null when there is no
-  // initial <key> or `newFifths` already equals the current fifths (a no-op). Note handle ids are
+  // <step>/<octave> are never touched; no note moves on the staff or changes MIDI. Note handle ids are
   // STABLE (no pitched note is added or removed), so the selection stays put.
-  setKeyFifths(newFifths: number): SetKeyRecord | null;
+  //
+  // `atMeasure` (MID-PIECE v2) is the SCORE measure number to target. When OMITTED (v1) it rewrites the
+  // INITIAL piece-level <key> exactly as before (whole-score pitch-preservation, whole-score snapshot;
+  // null when there is no initial <key> or the key is unchanged). When PROVIDED it sets the key AT that
+  // measure following the MID-2 single rule against the region just before it: a no-op if V already
+  // equals the in-effect key with no own declaration, a REMOVE (delete the measure's own <key>) if V
+  // equals the prior region's key and the measure declares one, else an ADD/EDIT so the measure declares
+  // V. The pitch-preservation pass + the undo snapshot SCOPE to the affected region `[M, nextKeyChange)`,
+  // leaving every other region byte-stable. Returns the record to invert, or null for a no-op / when no
+  // part has that measure.
+  setKeyFifths(newFifths: number, atMeasure?: number): SetKeyRecord | null;
   // Invert a set-key: restore the snapshotted measure children (the prior <fifths> + accidentals) and
   // re-index, returning the score byte-for-byte to its pre-edit state.
   restoreKey(record: SetKeyRecord): void;
@@ -492,10 +529,17 @@ export interface ScoreModel {
   // duration editor, which reads the LIVE <time> for its bar capacity, so a lengthen/shorten/dot/tie after
   // this edit clamps/ties at the NEW barline); the count of such bars is returned for the announce. Only
   // the INITIAL <time> is rewritten (mid-piece meter changes are v2; a score with no <time> is a no-op).
-  // Returns the record needed to invert (the old beats/beat-type + the mismatched-bar count), or null when
-  // there is no initial <time> or the meter is unchanged (a no-op). Note handle ids are STABLE (no pitched
-  // note is added, removed, or retimed), so the selection + the falling notes are untouched.
-  setTimeSignature(beats: number, beatType: number): SetTimeRecord | null;
+  // Note handle ids are STABLE (no pitched note is added, removed, or retimed), so the selection + the
+  // falling notes are untouched.
+  //
+  // `atMeasure` (MID-PIECE v2) is the SCORE measure number to target. When OMITTED (v1) it rewrites the
+  // INITIAL piece-level <time> in place (null when there is no initial <time> or the meter is unchanged);
+  // the mismatched-bar count is whole-piece. When PROVIDED it sets the meter AT that measure following the
+  // MID-2 single rule (no-op / REMOVE the measure's own <time> / ADD or EDIT so it declares the meter),
+  // and the mismatched-bar count SCOPES to the affected region `[M, nextTimeChange)`. The duration
+  // editor's per-bar capacity already resolves the in-effect meter (timeSignatureFor), so no retiming is
+  // done here. Returns the record to invert, or null for a no-op / when no part has that measure.
+  setTimeSignature(beats: number, beatType: number, atMeasure?: number): SetTimeRecord | null;
   // Invert a set-time: restore the prior <beats>/<beat-type> verbatim (a tiny, byte-exact inverse).
   restoreTime(record: SetTimeRecord): void;
   // The current INITIAL (piece-level) time signature, for seeding the toolbar pill + the popover's
@@ -514,6 +558,26 @@ export interface ScoreModel {
   // The key signature (fifths) in effect at a REST handle, so the add can spell its accidental
   // diatonically (parallel to fifthsForHandle for note handles).
   fifthsForRest(restId: number): number;
+  // MID-PIECE signature editing (v2). The SCORE measure number (1-based, what Verovio prints) of a
+  // note / rest handle, so a signature edit can TARGET that handle's measure (MID-1). A chord member
+  // or a tie continuation reports its own (onset's) measure. 1 for an invalid id (a safe start target).
+  measureNumberForHandle(id: number): number;
+  measureNumberForRest(restId: number): number;
+  // The <time> meter IN EFFECT at a note / rest handle's measure (the most recent <time> at or before
+  // it), so the time pill reads the meter WHERE THE SELECTION IS (parallel to fifthsForHandle for the
+  // key). Falls back to the initial meter (or 4/4) when the handle declares/inherits no <time>.
+  timeForHandle(id: number): MeterSig;
+  timeForRest(restId: number): MeterSig;
+  // The SCORE measure number where the in-effect KEY at a handle STARTED: the most recent measure with
+  // its own <key> at or before the handle's measure, or 1 (the initial region) when the initial
+  // declaration governs. Drives the pill's `(m. N)` qualifier (shown only when N > 1) + the aria "in
+  // effect from measure N" (MID-1). The rest equivalent is parallel.
+  keyRegionStartForHandle(id: number): number;
+  keyRegionStartForRest(restId: number): number;
+  // The SCORE measure number where the in-effect TIME at a handle STARTED (parallel to the key, keyed on
+  // <time>). 1 when the initial <time> governs.
+  timeRegionStartForHandle(id: number): number;
+  timeRegionStartForRest(restId: number): number;
   serialize(): string;
 }
 
@@ -745,6 +809,23 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
   const handleFifths: number[] = [];
   // Per-REST key signature, indexed in lockstep with `restHandles`, so an ADD spells diatonically.
   const restFifths: number[] = [];
+  // MID-PIECE signature editing (v2): per-handle SCORE measure number (the 1-based <measure number>
+  // Verovio prints) and the in-effect <time> meter at that handle's measure, captured in the SAME
+  // walk that fills handleFifths. The measure number targets a mid-piece signature edit at the
+  // selected handle's measure; the meter feeds the time pill's readout (parallel to fifthsForHandle,
+  // which already gives the in-effect KEY). REST equivalents indexed in lockstep with restHandles.
+  // `null` time means no <time> was in effect at/before the handle's measure (pill falls back to 4/4).
+  const handleMeasureNumbers: number[] = [];
+  const restMeasureNumbers: number[] = [];
+  const handleTimes: Array<MeterSig | null> = [];
+  const restTimes: Array<MeterSig | null> = [];
+  // The SCORE measure number where the in-effect KEY / TIME region STARTED, per handle/rest, for the
+  // pill's `(m. N)` qualifier (shown only when N > 1). Updated to a measure's number when that measure
+  // declares its OWN <key>/<time>; 1 (initial region) until the first own declaration after measure 1.
+  const handleKeyRegionStart: number[] = [];
+  const restKeyRegionStart: number[] = [];
+  const handleTimeRegionStart: number[] = [];
+  const restTimeRegionStart: number[] = [];
 
   // Walk the live DOM and (re)build the pitched-note handles + the rest handles + their key
   // signatures in document order. Called once at parse and again after every STRUCTURAL edit
@@ -756,10 +837,27 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
     handleFifths.length = 0;
     restHandles.length = 0;
     restFifths.length = 0;
+    handleMeasureNumbers.length = 0;
+    restMeasureNumbers.length = 0;
+    handleTimes.length = 0;
+    restTimes.length = 0;
+    handleKeyRegionStart.length = 0;
+    restKeyRegionStart.length = 0;
+    handleTimeRegionStart.length = 0;
+    restTimeRegionStart.length = 0;
     const parts = Array.from(doc.getElementsByTagName("part"));
     for (const part of parts) {
       let divisions = 1; // <divisions> per quarter note; updated by <attributes>
       let fifths = 0; // current key signature
+      // The <time> meter in effect, updated as the walk crosses each measure's <attributes><time>
+      // (MusicXML signatures persist until changed). Null until the first <time> is seen. Captured
+      // per handle so the time pill reads the meter IN EFFECT where the selection is (MID-PIECE v2).
+      let time: MeterSig | null = null;
+      // The SCORE measure number where the current KEY / TIME region started (the measure of the most
+      // recent own declaration), for the pill's `(m. N)` qualifier. 1 (initial region) until a later
+      // measure re-declares the axis. The FIRST measure's own declaration is the initial region (stays 1).
+      let keyRegionStart = 1;
+      let timeRegionStart = 1;
       // ABSOLUTE onset clock: quarter-notes elapsed from the SCORE start up to the current measure's
       // start. Onsets must be absolute (from the score start), because both the VisNote[] (score.ts)
       // and the Verovio timemap time everything from the score start; a measure-relative onset only
@@ -776,6 +874,10 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
         // musical length is the MAX forward position, not the final cursor. This is how far to
         // advance the absolute clock for the next measure.
         let measureMaxCursor = 0;
+        // The SCORE measure number (1-based, what Verovio prints), so a handle can name the measure
+        // a mid-piece signature edit targets (MID-1). Falls back to the document-order index (1-based)
+        // when a measure omits @number (rare; real OMR always numbers them).
+        const measureNumber = num2(measure.getAttribute("number"), measures.indexOf(measure) + 1);
         // Walk the measure's direct children in document order.
         for (const node of Array.from(measure.children)) {
           const tag = node.tagName.toLowerCase();
@@ -783,7 +885,21 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
             const div = child(node, "divisions");
             if (div) divisions = num(div, divisions);
             const fifthsEl = child(node, "fifths");
-            if (fifthsEl) fifths = num(fifthsEl, fifths);
+            if (fifthsEl) {
+              fifths = num(fifthsEl, fifths);
+              // This measure declares its OWN key, so it STARTS a key region: subsequent handles read
+              // its number as the region start (the pill's `(m. N)` qualifier). Measure 1's initial
+              // declaration sets it to 1 (the clean initial region; the qualifier hides N == 1).
+              keyRegionStart = measureNumber;
+            }
+            // Track the in-effect meter as we cross a <time> (mid-piece changes update it; it persists
+            // until the next change), so each handle records the meter that governs ITS measure, and the
+            // measure that re-declares it STARTS a time region (parallel to the key region start).
+            const t = readTime(node);
+            if (t) {
+              time = t;
+              timeRegionStart = measureNumber;
+            }
             continue;
           }
           if (tag === "backup") {
@@ -849,6 +965,10 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
                 durationSec: (durDivs / divisions) * secPerQuarter,
               });
               handleFifths.push(fifths);
+              handleMeasureNumbers.push(measureNumber);
+              handleTimes.push(time ? { ...time } : null);
+              handleKeyRegionStart.push(keyRegionStart);
+              handleTimeRegionStart.push(timeRegionStart);
             }
           } else {
             // A REST: push a rest handle so it is selectable + convertible (ADD-a-note v1). A rest
@@ -871,6 +991,10 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
               beat: Math.round(beat * 1000) / 1000,
             });
             restFifths.push(fifths);
+            restMeasureNumbers.push(measureNumber);
+            restTimes.push(time ? { ...time } : null);
+            restKeyRegionStart.push(keyRegionStart);
+            restTimeRegionStart.push(timeRegionStart);
           }
 
           // Advance the cursor for non-chord notes (and rests); chord members share the onset.
@@ -1207,6 +1331,30 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
     },
     fifthsForRest(restId: number): number {
       return restFifths[restId] ?? 0;
+    },
+    measureNumberForHandle(id: number): number {
+      return handleMeasureNumbers[id] ?? 1;
+    },
+    measureNumberForRest(restId: number): number {
+      return restMeasureNumbers[restId] ?? 1;
+    },
+    timeForHandle(id: number): MeterSig {
+      return handleTimes[id] ?? readInitialTime(doc);
+    },
+    timeForRest(restId: number): MeterSig {
+      return restTimes[restId] ?? readInitialTime(doc);
+    },
+    keyRegionStartForHandle(id: number): number {
+      return handleKeyRegionStart[id] ?? 1;
+    },
+    keyRegionStartForRest(restId: number): number {
+      return restKeyRegionStart[restId] ?? 1;
+    },
+    timeRegionStartForHandle(id: number): number {
+      return handleTimeRegionStart[id] ?? 1;
+    },
+    timeRegionStartForRest(restId: number): number {
+      return restTimeRegionStart[restId] ?? 1;
     },
     setPitch(id: number, next: ModelPitch): void {
       const handle = handles[id];
@@ -1613,67 +1761,106 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
       const fifthsEl = initialFifthsEl(doc);
       return fifthsEl ? num(fifthsEl, 0) : 0;
     },
-    setKeyFifths(newFifths: number): SetKeyRecord | null {
+    setKeyFifths(newFifths: number, atMeasure?: number): SetKeyRecord | null {
       const clamped = Math.max(-7, Math.min(7, Math.trunc(newFifths)));
-      const fifthsEl = initialFifthsEl(doc);
-      if (!fifthsEl) return null; // no initial <key> to rewrite (declaration-only edit, MVP)
-      const oldFifths = num(fifthsEl, 0);
-      if (clamped === oldFifths) return null; // no change: nothing to do, push no command
 
-      // Snapshot EVERY measure's child NODES BEFORE mutating, so the invert restores the prior
-      // <fifths> + every accidental byte-for-byte (the <key> lives in measure 1, the accidentals across
-      // all bars). We clone childNodes (NOT just element children) so the inter-element WHITESPACE text
-      // nodes are preserved too: restore is then a true byte-exact inverse (the pretty-print formatting
-      // survives undo, unlike the duration snapshot which keeps only element children).
-      const measures: Array<{ el: Element; childrenBefore: Node[] }> = [];
-      for (const part of Array.from(doc.getElementsByTagName("part"))) {
-        for (const m of Array.from(part.getElementsByTagName("measure"))) {
-          measures.push({
-            el: m,
-            childrenBefore: Array.from(m.childNodes).map((c) => c.cloneNode(true)),
-          });
+      // START edit (v1, no target): rewrite the INITIAL <key><fifths> and hold EVERY note to pitch.
+      // Byte-identical to v1: same null guards, same whole-score snapshot, same per-note pass.
+      if (atMeasure === undefined) {
+        const fifthsEl = initialFifthsEl(doc);
+        if (!fifthsEl) return null; // no initial <key> to rewrite (declaration-only edit)
+        const oldFifths = num(fifthsEl, 0);
+        if (clamped === oldFifths) return null; // no change: nothing to do, push no command
+
+        // Snapshot EVERY measure's child NODES BEFORE mutating (the v1 whole-score snapshot), so the
+        // invert restores the prior <fifths> + every accidental byte-for-byte. childNodes (not just
+        // element children) preserves inter-element WHITESPACE text nodes for a true byte-exact undo.
+        const measures = snapshotMeasures(Array.from(allMeasures(doc)));
+        // ACTUAL (sounding) alter per note under the OLD key, captured BEFORE rewriting <fifths>.
+        const actualAlterByEl = captureActualAlters(handles, oldFifths);
+        fifthsEl.textContent = String(clamped);
+        const changedCount = applyKeyToNotes(handles, actualAlterByEl, clamped);
+        reindexHandles();
+        return { oldFifths, newFifths: clamped, measures, changedCount, targetMeasure: null };
+      }
+
+      // MID-PIECE edit (v2): set the key at the SCORE measure `atMeasure`, applying the MID-2 single
+      // rule (no-op / remove / add / edit) and SCOPING the pitch-preservation pass + the snapshot to the
+      // affected region `[M, nextKeyChange)`. Resolve the target measure in each part (signatures are
+      // per-part); the FIRST part that has the measure drives the prior/here decision (all parts share
+      // the same numbering for a piano OMR). No-op if no part has that measure.
+      const parts = Array.from(doc.getElementsByTagName("part"));
+      const targets = parts
+        .map((p) => ({ part: p, measureEl: measureByNumber(p, atMeasure) }))
+        .filter((t): t is { part: Element; measureEl: Element } => t.measureEl !== null);
+      if (targets.length === 0) return null;
+
+      const driver = targets[0];
+      const prior = fifthsBefore(driver.part, driver.measureEl);
+      const ownHere = ownFifths(driver.measureEl); // null when the target inherits (no own <key>)
+      const here = ownHere ?? prior; // the key actually in effect AT the target measure
+
+      // MID-2 (a): V == here AND the target has no own declaration -> NO-OP (re-seat the pill only).
+      if (clamped === here && ownHere === null) return null;
+      // MID-2 (a'): V == here AND the target DOES declare it -> nothing changes (editing to the same
+      // value). Treat as a no-op so an EDIT to the current value pushes nothing (mirrors v1's discipline).
+      if (clamped === here && ownHere !== null && clamped !== prior) return null;
+
+      // The affected region's measures (per part), for the scoped snapshot + the scoped accidental pass.
+      const regionByPart = targets.map((t) => ({
+        part: t.part,
+        measureEl: t.measureEl,
+        region: keyRegionMeasures(t.part, t.measureEl),
+      }));
+      const allRegionMeasures = regionByPart.flatMap((r) => r.region);
+      const measures = snapshotMeasures(allRegionMeasures);
+
+      // The pitched notes whose pitch-preservation must be re-evaluated: those in the affected region.
+      const regionSet = new Set(allRegionMeasures);
+      const regionHandles = handles.filter((h) => {
+        const m = ancestorNamed(h.el, "measure");
+        return m !== null && regionSet.has(m);
+      });
+      // Capture each region note's ACTUAL alter under the key currently in effect AT it (`here`), BEFORE
+      // the declaration changes, so the pitch is pinned across the new signature (MIDI never moves).
+      const actualAlterByEl = captureActualAlters(regionHandles, here);
+
+      // MID-2 (b): V == prior AND the target has its own declaration -> REMOVE it (the region reverts to
+      // inheriting the prior key). Independent of TIME (only <key> is dropped).
+      if (clamped === prior && ownHere !== null) {
+        for (const t of targets) {
+          const keyEl = ownKeyEl(t.measureEl);
+          if (keyEl) {
+            const attrs = keyEl.parentNode as Element;
+            attrs.removeChild(keyEl);
+            dropAttributesIfEmpty(attrs);
+          }
+        }
+      } else {
+        // MID-2 (c): ADD (target has no own <key>) or EDIT (it does) so the target declares V.
+        for (const t of targets) {
+          const existing = ownKeyEl(t.measureEl);
+          if (existing) {
+            const f = existing.getElementsByTagName("fifths").item(0);
+            if (f) f.textContent = String(clamped);
+            else insertKey(ensureAttributes(t.measureEl), clamped); // malformed <key>: replace content
+          } else {
+            insertKey(ensureAttributes(t.measureEl), clamped);
+          }
         }
       }
 
-      // For EVERY pitched note, capture its ACTUAL (sounding) alter under the OLD key BEFORE rewriting
-      // <fifths>, keyed by the <note> element so the per-note mutation below can pin that pitch. A bare
-      // note's actual alter is the OLD key's default for its letter; an explicit <alter>/<accidental>
-      // overrides. This is the load-bearing correctness read (effectiveAlter), taken while the OLD key
-      // is still declared.
-      const actualAlterByEl = new Map<Element, number>();
-      for (const h of handles) {
-        actualAlterByEl.set(h.el, effectiveAlter(h.el, h.pitch, oldFifths));
-      }
-
-      // Rewrite the initial signature.
-      fifthsEl.textContent = String(clamped);
-
-      // Re-print each note's accidental for the NEW key, PRESERVING its actual alter: bare when the new
-      // key's default for the letter already equals the note's actual alter, else an explicit
-      // accidental (incl. a natural). <step>/<octave> are never touched, so no notehead moves + no MIDI
-      // changes; only the printed accidental toggles.
-      let changedCount = 0;
-      for (const h of handles) {
-        const noteEl = h.el;
-        const pitchEl = h.pitchEl;
-        const actualAlter = actualAlterByEl.get(noteEl) ?? 0;
-        const before = serializeNoteAccidental(noteEl, pitchEl);
-        applyKeyAwareAccidental(noteEl, pitchEl, h.pitch.step, actualAlter, clamped);
-        if (serializeNoteAccidental(noteEl, pitchEl) !== before) changedCount++;
-      }
-
-      // Re-index so each handle's cached pitch/MIDI reflect the new bare/explicit accidental under the
-      // new key (effectiveAlter in the walk keeps the SOUNDING pitch the same, so MIDI is unchanged).
+      // Re-print the affected-region notes' accidentals for the NEW in-effect key, preserving each actual
+      // alter (the region's governing key is now `clamped`). Notes OUTSIDE the region are byte-untouched.
+      const changedCount = applyKeyToNotes(regionHandles, actualAlterByEl, clamped);
       reindexHandles();
-      return { oldFifths, newFifths: clamped, measures, changedCount };
+      return { oldFifths: here, newFifths: clamped, measures, changedCount, targetMeasure: atMeasure };
     },
     restoreKey(record: SetKeyRecord): void {
-      // Restore every measure's children exactly (the prior <fifths> + accidentals). Each <measure>
-      // node is the same element (children replaced in place), so handles/reindex survive.
-      for (const { el, childrenBefore } of record.measures) {
-        while (el.firstChild) el.removeChild(el.firstChild);
-        for (const c of childrenBefore) el.appendChild(c.cloneNode(true));
-      }
+      // Restore the snapshotted measures' children exactly (the prior <fifths> + accidentals). Each
+      // <measure> node is the same element (children replaced in place), so handles/reindex survive. For
+      // a START edit this is every measure (v1); for a mid-piece edit only the affected region.
+      restoreMeasureChildren(record.measures);
       reindexHandles();
     },
     initialTime(): { beats: number; beatType: number } {
@@ -1682,31 +1869,125 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
     barsNotMatchingMeter(): number {
       return countMismatchedBars(doc);
     },
-    setTimeSignature(beats: number, beatType: number): SetTimeRecord | null {
-      const timeEl = initialTimeEl(doc);
-      if (!timeEl) return null; // no initial <time> to rewrite (declaration-only edit, MVP)
-      const beatsEl = timeEl.getElementsByTagName("beats").item(0);
-      const beatTypeEl = timeEl.getElementsByTagName("beat-type").item(0);
-      if (!beatsEl || !beatTypeEl) return null; // malformed <time> with no beats/beat-type
-      const oldBeats = num(beatsEl, 0);
-      const oldBeatType = num(beatTypeEl, 0);
-      if (beats === oldBeats && beatType === oldBeatType) return null; // no change: push no command
+    setTimeSignature(beats: number, beatType: number, atMeasure?: number): SetTimeRecord | null {
+      // START edit (v1, no target): rewrite the INITIAL <time>'s numerals in place. Byte-identical to v1:
+      // same null guards, same in-place rewrite, same whole-piece mismatched count, same tiny record.
+      if (atMeasure === undefined) {
+        const timeEl = initialTimeEl(doc);
+        if (!timeEl) return null; // no initial <time> to rewrite (declaration-only edit)
+        const beatsEl = timeEl.getElementsByTagName("beats").item(0);
+        const beatTypeEl = timeEl.getElementsByTagName("beat-type").item(0);
+        if (!beatsEl || !beatTypeEl) return null; // malformed <time> with no beats/beat-type
+        const oldBeats = num(beatsEl, 0);
+        const oldBeatType = num(beatTypeEl, 0);
+        if (beats === oldBeats && beatType === oldBeatType) return null; // no change: push no command
 
-      // DECLARATION-ONLY: rewrite the initial <time>'s numerals only. No barline, note, or duration is
-      // touched, so handles/onsets are unchanged and the falling notes do not move. We still re-index so
-      // the duration editor's live-meter capacity (measureCapacityDivs reads this <time>) takes effect
-      // immediately, even though no handle's geometry changed (the re-index is a cheap, safe no-op here).
-      beatsEl.textContent = String(beats);
-      beatTypeEl.textContent = String(beatType);
+        // DECLARATION-ONLY: rewrite the initial <time>'s numerals only. No barline/note/duration touched,
+        // so handles/onsets are unchanged and the falling notes do not move. Re-index so the duration
+        // editor's live-meter capacity (measureCapacityDivs reads this <time>) takes effect immediately.
+        beatsEl.textContent = String(beats);
+        beatTypeEl.textContent = String(beatType);
+        reindexHandles();
+        const mismatchedBars = countMismatchedBars(doc);
+        return {
+          oldBeats,
+          oldBeatType,
+          newBeats: beats,
+          newBeatType: beatType,
+          mismatchedBars,
+          targetMeasure: null,
+          measures: [],
+        };
+      }
+
+      // MID-PIECE edit (v2): set the meter at the SCORE measure `atMeasure`, applying the MID-2 single
+      // rule (no-op / remove / add / edit) and SCOPING the mismatched-bar count to the affected region
+      // `[M, nextTimeChange)`. Declaration-only: no note is retimed, falling notes unchanged; each bar's
+      // capacity from M onward already resolves the new meter via timeSignatureFor (the duration editor
+      // needs no change). The invert is a measure-children snapshot of the target measure(s).
+      const parts = Array.from(doc.getElementsByTagName("part"));
+      const targets = parts
+        .map((p) => ({ part: p, measureEl: measureByNumber(p, atMeasure) }))
+        .filter((t): t is { part: Element; measureEl: Element } => t.measureEl !== null);
+      if (targets.length === 0) return null;
+
+      const driver = targets[0];
+      const priorMeter = meterBefore(driver.part, driver.measureEl) ?? readInitialTime(doc);
+      const ownHere = ownMeter(driver.measureEl); // null when the target inherits (no own <time>)
+      const here = ownHere ?? priorMeter; // the meter actually in effect AT the target measure
+      const sameAsHere = beats === here.beats && beatType === here.beatType;
+      const sameAsPrior = beats === priorMeter.beats && beatType === priorMeter.beatType;
+
+      // MID-2 (a): V == here AND the target has no own declaration -> NO-OP (re-seat the pill only).
+      if (sameAsHere && ownHere === null) return null;
+      // MID-2 (a'): V == here AND the target DOES declare it, and that is NOT the prior (so a remove is
+      // not what is meant) -> editing to the same value, nothing changes: no-op.
+      if (sameAsHere && ownHere !== null && !sameAsPrior) return null;
+
+      // Snapshot the target measure(s)' children BEFORE mutating, for a byte-exact invert of the
+      // add/edit/remove (parallel to the key edit's region snapshot, but just the target measures).
+      const measures = snapshotMeasures(targets.map((t) => t.measureEl));
+
+      if (sameAsPrior && ownHere !== null) {
+        // MID-2 (b): V == prior AND the target declares its own <time> -> REMOVE it (the region reverts to
+        // inheriting the prior meter). Independent of KEY (only <time> is dropped).
+        for (const t of targets) {
+          const tEl = ownTimeEl(t.measureEl);
+          if (tEl) {
+            const attrs = tEl.parentNode as Element;
+            attrs.removeChild(tEl);
+            dropAttributesIfEmpty(attrs);
+          }
+        }
+      } else {
+        // MID-2 (c): ADD (no own <time>) or EDIT (rewrite the own <time>) so the target declares V.
+        for (const t of targets) {
+          const existing = ownTimeEl(t.measureEl);
+          if (existing) {
+            const be = existing.getElementsByTagName("beats").item(0);
+            const bt = existing.getElementsByTagName("beat-type").item(0);
+            if (be && bt) {
+              be.textContent = String(beats);
+              bt.textContent = String(beatType);
+            } else {
+              existing.parentNode?.removeChild(existing); // malformed <time>: replace it cleanly
+              insertTime(ensureAttributes(t.measureEl), beats, beatType);
+            }
+          } else {
+            insertTime(ensureAttributes(t.measureEl), beats, beatType);
+          }
+        }
+      }
+
       reindexHandles();
-      // Count bars that no longer fill the NEW meter, for the SIG-3 announce. Declaration-only, so this is
-      // a non-blocking readout (the user fixes durations with the duration editor); never auto-fixed here.
-      const mismatchedBars = countMismatchedBars(doc);
-      return { oldBeats, oldBeatType, newBeats: beats, newBeatType: beatType, mismatchedBars };
+      // Count bars in the affected region (those whose governing meter just changed) that no longer fill
+      // the new meter, for the announce (MID-3). Scoped, not whole-piece, so other regions are not
+      // mis-attributed. Recompute the region AFTER the edit (the declaration now lives in the target).
+      const mismatchedBars = targets.reduce(
+        (sum, t) => sum + countMismatchedBarsIn(timeRegionMeasures(t.part, t.measureEl)),
+        0,
+      );
+      return {
+        oldBeats: here.beats,
+        oldBeatType: here.beatType,
+        newBeats: beats,
+        newBeatType: beatType,
+        mismatchedBars,
+        targetMeasure: atMeasure,
+        measures,
+      };
     },
     restoreTime(record: SetTimeRecord): void {
-      // Restore the prior <beats>/<beat-type> verbatim (the byte-exact inverse). The <time> element is the
-      // same node (only its numeral text is rewritten), so the document returns to its pre-edit bytes.
+      // MID-PIECE invert: restore the snapshotted target measure(s)' children (re-adds a removed <time>,
+      // reverts an edit/add). For a START edit `measures` is empty and we fall to the in-place numeral
+      // restore below.
+      if (record.measures.length > 0) {
+        restoreMeasureChildren(record.measures);
+        reindexHandles();
+        return;
+      }
+      // START (v1) invert: restore the prior <beats>/<beat-type> verbatim. The <time> element is the same
+      // node (only its numeral text is rewritten), so the document returns to its pre-edit bytes.
       const timeEl = initialTimeEl(doc);
       if (!timeEl) return;
       const beatsEl = timeEl.getElementsByTagName("beats").item(0);
@@ -1748,6 +2029,271 @@ function readInitialTime(doc: Document): { beats: number; beatType: number } {
   const beatType = num(timeEl.getElementsByTagName("beat-type").item(0), 0);
   if (beats > 0 && beatType > 0) return { beats, beatType };
   return { beats: 4, beatType: 4 };
+}
+
+// ===== MID-PIECE signature editing (v2) helpers =====
+//
+// These resolve a TARGET measure (by its SCORE @number), read what signature is in effect just BEFORE
+// and AT it, and add/edit/remove a per-measure <key>/<time> following the MID-2 single rule. Signatures
+// in MusicXML are per-part and persist until changed, so the target / region work is done PER PART (a
+// single-part piano OMR has one measure per number; a multi-part score gets the same edit applied to
+// the same-numbered measure in each part, keeping the parts consistent).
+
+// Every <measure> across every <part>, in document order. The set the v1 (start) key edit snapshots.
+function allMeasures(doc: Document): Element[] {
+  const out: Element[] = [];
+  for (const part of Array.from(doc.getElementsByTagName("part"))) {
+    out.push(...Array.from(part.getElementsByTagName("measure")));
+  }
+  return out;
+}
+
+// Deep-clone each measure's child NODES (incl. whitespace text) for a byte-exact undo snapshot, keyed
+// by the live (stable) <measure> element. Shared by the key + mid-piece time edits. restore is
+// restoreMeasureChildren.
+function snapshotMeasures(measures: Element[]): Array<{ el: Element; childrenBefore: Node[] }> {
+  return measures.map((m) => ({
+    el: m,
+    childrenBefore: Array.from(m.childNodes).map((c) => c.cloneNode(true)),
+  }));
+}
+
+// Invert a measure snapshot: drop each measure's live children and re-append its cloned snapshot, so the
+// measure returns to its pre-edit bytes. Each <measure> node is the same element (children replaced in
+// place), so handles survive a re-index after.
+function restoreMeasureChildren(measures: Array<{ el: Element; childrenBefore: Node[] }>): void {
+  for (const { el, childrenBefore } of measures) {
+    while (el.firstChild) el.removeChild(el.firstChild);
+    for (const c of childrenBefore) el.appendChild(c.cloneNode(true));
+  }
+}
+
+// For each handle, its ACTUAL (sounding) alter under `fifths`, keyed by the <note> element. A bare
+// note's actual alter is the key's default for its letter; an explicit <alter>/<accidental> overrides.
+// Captured BEFORE a key declaration changes so the per-note pass can pin the pitch (MIDI never moves).
+function captureActualAlters(handleList: NoteHandle[], fifths: number): Map<Element, number> {
+  const m = new Map<Element, number>();
+  for (const h of handleList) m.set(h.el, effectiveAlter(h.el, h.pitch, fifths));
+  return m;
+}
+
+// Re-print each handle's accidental for `newFifths`, preserving its captured actual alter: bare when the
+// new key's default for the letter already equals the actual alter, else an explicit accidental (incl. a
+// natural). Returns how many notes' printed accidental changed (diagnostic). <step>/<octave> untouched.
+function applyKeyToNotes(
+  handleList: NoteHandle[],
+  actualAlterByEl: Map<Element, number>,
+  newFifths: number,
+): number {
+  let changedCount = 0;
+  for (const h of handleList) {
+    const actualAlter = actualAlterByEl.get(h.el) ?? 0;
+    const before = serializeNoteAccidental(h.el, h.pitchEl);
+    applyKeyAwareAccidental(h.el, h.pitchEl, h.pitch.step, actualAlter, newFifths);
+    if (serializeNoteAccidental(h.el, h.pitchEl) !== before) changedCount++;
+  }
+  return changedCount;
+}
+
+// The <measure number="n"> element in `part`, or null. `getAttribute("number")` is the score number
+// the parse walk records on each handle, so this is the inverse of measureNumberForHandle.
+function measureByNumber(part: Element, n: number): Element | null {
+  for (const m of Array.from(part.getElementsByTagName("measure"))) {
+    if (num2(m.getAttribute("number"), NaN) === n) return m;
+  }
+  return null;
+}
+
+// A measure's DIRECT-CHILD <attributes> element (NOT a recursive search: a nested element must not be
+// mistaken for the measure's own attributes), or null. Creating it is `ensureAttributes`.
+function ownAttributes(measureEl: Element): Element | null {
+  for (const c of Array.from(measureEl.children)) {
+    if (c.tagName.toLowerCase() === "attributes") return c;
+  }
+  return null;
+}
+
+// A measure's own <key> / <time> (declared in ITS direct-child <attributes>), or null. "Own" means the
+// measure DECLARES the signature (a region START), as opposed to inheriting it from an earlier measure.
+function ownKeyEl(measureEl: Element): Element | null {
+  const attrs = ownAttributes(measureEl);
+  if (!attrs) return null;
+  for (const c of Array.from(attrs.children)) {
+    if (c.tagName.toLowerCase() === "key") return c;
+  }
+  return null;
+}
+function ownTimeEl(measureEl: Element): Element | null {
+  const attrs = ownAttributes(measureEl);
+  if (!attrs) return null;
+  for (const c of Array.from(attrs.children)) {
+    if (c.tagName.toLowerCase() === "time") return c;
+  }
+  return null;
+}
+
+// The fifths declared by a measure's OWN <key>, or null when it declares none (it inherits). Reads the
+// direct-child <attributes><key><fifths> only, so an inherited key is not reported as "own".
+function ownFifths(measureEl: Element): number | null {
+  const keyEl = ownKeyEl(measureEl);
+  if (!keyEl) return null;
+  const f = keyEl.getElementsByTagName("fifths").item(0);
+  return f ? num(f, 0) : null;
+}
+
+// The meter declared by a measure's OWN <time>, or null when it declares none (it inherits).
+function ownMeter(measureEl: Element): MeterSig | null {
+  const timeEl = ownTimeEl(measureEl);
+  if (!timeEl) return null;
+  const beats = num(timeEl.getElementsByTagName("beats").item(0), 0);
+  const beatType = num(timeEl.getElementsByTagName("beat-type").item(0), 0);
+  if (beats > 0 && beatType > 0) return { beats, beatType };
+  return null;
+}
+
+// The fifths IN EFFECT just BEFORE `targetMeasureEl` in its part: the last own <key> fifths strictly
+// before it (the value the target would INHERIT if it declared no key of its own). 0 (C major) when no
+// earlier measure declares a key. This is MID-2's `prior` for the KEY axis.
+function fifthsBefore(part: Element, targetMeasureEl: Element): number {
+  let prior = 0;
+  for (const m of Array.from(part.getElementsByTagName("measure"))) {
+    if (m === targetMeasureEl) break;
+    const f = ownFifths(m);
+    if (f !== null) prior = f;
+  }
+  return prior;
+}
+
+// The meter IN EFFECT just BEFORE `targetMeasureEl` in its part (the value it would INHERIT), or null
+// when no earlier measure declares a <time>. MID-2's `prior` for the TIME axis.
+function meterBefore(part: Element, targetMeasureEl: Element): MeterSig | null {
+  let prior: MeterSig | null = null;
+  for (const m of Array.from(part.getElementsByTagName("measure"))) {
+    if (m === targetMeasureEl) break;
+    const meter = ownMeter(m);
+    if (meter) prior = meter;
+  }
+  return prior;
+}
+
+// Ensure `measureEl` has a direct-child <attributes>, creating + inserting it in valid position if
+// absent (FIRST child of the measure, before any note/barline), and return it. MusicXML allows
+// <attributes> only at a measure's start, so a created one goes to the front.
+function ensureAttributes(measureEl: Element): Element {
+  const existing = ownAttributes(measureEl);
+  if (existing) return existing;
+  const attrs = measureEl.ownerDocument.createElement("attributes");
+  measureEl.insertBefore(attrs, measureEl.firstChild);
+  return attrs;
+}
+
+// Insert a <key><fifths> into `attrs` in valid MusicXML order: <key> comes after <divisions> and
+// before <time>/<clef>/<staves>. Place before an existing <time> if present, else before <clef>, else
+// append. Returns the new <key>.
+function insertKey(attrs: Element, fifths: number): Element {
+  const doc = attrs.ownerDocument;
+  const keyEl = doc.createElement("key");
+  const fifthsEl = doc.createElement("fifths");
+  fifthsEl.textContent = String(fifths);
+  keyEl.appendChild(fifthsEl);
+  const anchor =
+    attrs.getElementsByTagName("time").item(0) ?? attrs.getElementsByTagName("clef").item(0);
+  if (anchor && anchor.parentNode === attrs) attrs.insertBefore(keyEl, anchor);
+  else attrs.appendChild(keyEl);
+  return keyEl;
+}
+
+// Insert a <time><beats>/<beat-type> into `attrs` in valid MusicXML order: <time> comes after <key>
+// and before <clef>/<staves>. Place before an existing <clef> if present, else append. Returns it.
+function insertTime(attrs: Element, beats: number, beatType: number): Element {
+  const doc = attrs.ownerDocument;
+  const timeEl = doc.createElement("time");
+  const beatsEl = doc.createElement("beats");
+  beatsEl.textContent = String(beats);
+  const beatTypeEl = doc.createElement("beat-type");
+  beatTypeEl.textContent = String(beatType);
+  timeEl.appendChild(beatsEl);
+  timeEl.appendChild(beatTypeEl);
+  const clef = attrs.getElementsByTagName("clef").item(0);
+  if (clef && clef.parentNode === attrs) attrs.insertBefore(timeEl, clef);
+  else attrs.appendChild(timeEl);
+  return timeEl;
+}
+
+// Drop `attrs` from its measure if it has become EMPTY (no element children left after a removal), so a
+// removed mid-piece signature does not leave an inert empty <attributes>. Whitespace-only text children
+// are removed with it. Leaves a non-empty <attributes> (e.g. one that still carries a <clef>) intact.
+function dropAttributesIfEmpty(attrs: Element): void {
+  const hasElementChild = Array.from(attrs.children).length > 0;
+  if (!hasElementChild) attrs.parentNode?.removeChild(attrs);
+}
+
+// The measures of `part` in the affected KEY region for a mid-piece edit at `targetMeasureEl`: the
+// half-open range `[M, nextKeyChange)`, i.e. the target plus every following measure UP TO (not
+// including) the next measure that declares its OWN <key>. These are the only bars whose governing key
+// changes, so the bare-vs-explicit accidental pass + the undo snapshot scope to exactly them (MID-3).
+function keyRegionMeasures(part: Element, targetMeasureEl: Element): Element[] {
+  const all = Array.from(part.getElementsByTagName("measure"));
+  const start = all.indexOf(targetMeasureEl);
+  if (start < 0) return [];
+  const region: Element[] = [all[start]];
+  for (let i = start + 1; i < all.length; i++) {
+    if (ownKeyEl(all[i]) !== null) break; // the next key change ends the region
+    region.push(all[i]);
+  }
+  return region;
+}
+
+// The measures of `part` in the affected TIME region for a mid-piece edit at `targetMeasureEl`:
+// `[M, nextTimeChange)`, parallel to keyRegionMeasures but keyed on <time>. The mismatched-bar count
+// scopes to these (the only bars whose governing meter just changed), not the whole piece (MID-3).
+function timeRegionMeasures(part: Element, targetMeasureEl: Element): Element[] {
+  const all = Array.from(part.getElementsByTagName("measure"));
+  const start = all.indexOf(targetMeasureEl);
+  if (start < 0) return [];
+  const region: Element[] = [all[start]];
+  for (let i = start + 1; i < all.length; i++) {
+    if (ownTimeEl(all[i]) !== null) break; // the next time change ends the region
+    region.push(all[i]);
+  }
+  return region;
+}
+
+// Count bars in `measures` whose musical length does NOT equal their governing meter's capacity. Same
+// rule as countMismatchedBars (extent vs measureCapacityDivs, empty bars skipped, float-safe) but SCOPED
+// to a measure list (the affected time region), and it resolves each bar's live divisions itself via the
+// measure's own/inherited <divisions> (measureCapacityDivs reads the in-effect <time> for the capacity).
+function countMismatchedBarsIn(measures: Element[]): number {
+  const EPS = 1e-6;
+  let mismatched = 0;
+  for (const measure of measures) {
+    const divisions = divisionsInEffect(measure);
+    const extent = voiceFilledDivsMax(measure);
+    if (extent <= EPS) continue;
+    const capacity = measureCapacityDivs(measure, divisions);
+    if (capacity <= EPS) continue;
+    if (Math.abs(extent - capacity) > EPS) mismatched++;
+  }
+  return mismatched;
+}
+
+// The <divisions> per quarter in effect for `measureEl`: the last <divisions> at or before it in its
+// part (divisions persist like a signature), falling back to 1. Mirrors the parse walk's per-part
+// divisions tracking, used by countMismatchedBarsIn so a scoped count resolves capacity correctly even
+// when the affected measure does not itself re-declare <divisions>.
+function divisionsInEffect(measureEl: Element): number {
+  const part = ancestorNamed(measureEl, "part");
+  if (!part) {
+    const d = child(measureEl, "divisions");
+    return d ? num(d, 1) : 1;
+  }
+  let divisions = 1;
+  for (const m of Array.from(part.getElementsByTagName("measure"))) {
+    const d = child(m, "divisions");
+    if (d) divisions = num(d, divisions);
+    if (m === measureEl) break;
+  }
+  return divisions;
 }
 
 // Count bars whose musical length does NOT equal the capacity of the meter in scope (its LIVE <time>),

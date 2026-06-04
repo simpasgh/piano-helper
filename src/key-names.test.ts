@@ -8,6 +8,8 @@ import {
   keyMajorName,
   accidentalCountPhrase,
   keyRowLabel,
+  keyPillLabel,
+  keyPillAria,
 } from "./key-names";
 
 describe("CIRCLE_OF_FIFTHS", () => {
@@ -66,6 +68,32 @@ describe("keyRowLabel (the spoken option name)", () => {
       const label = keyRowLabel(k.fifths);
       expect(label).not.toContain("—");
       expect(label).not.toContain("–");
+    }
+  });
+});
+
+describe("keyPillLabel / keyPillAria (region-aware pill, MID-1)", () => {
+  it("the INITIAL region (atMeasure 1 / undefined) keeps the clean v1 label + aria", () => {
+    expect(keyPillLabel(0)).toBe("C major");
+    expect(keyPillLabel(2, 1)).toBe("D major"); // measure 1 = the initial region, no qualifier
+    expect(keyPillAria(0)).toBe("Key signature: C major. Change the key.");
+    expect(keyPillAria(2, 1)).toBe("Key signature: D major. Change the key.");
+  });
+
+  it("a MID-PIECE region (atMeasure > 1) adds the (m. N) qualifier + names the region in aria", () => {
+    expect(keyPillLabel(2, 5)).toBe("D major (m. 5)");
+    expect(keyPillAria(2, 5)).toBe(
+      "Key signature: D major, in effect from measure 5. Change the key from measure 5.",
+    );
+    expect(keyPillLabel(-3, 12)).toBe("E flat major (m. 12)");
+  });
+
+  it("the region-aware strings are em-dash and en-dash free (project style rule)", () => {
+    for (const m of [1, 3, 7]) {
+      for (const k of CIRCLE_OF_FIFTHS) {
+        expect(keyPillLabel(k.fifths, m)).not.toMatch(/[—–]/);
+        expect(keyPillAria(k.fifths, m)).not.toMatch(/[—–]/);
+      }
     }
   });
 });

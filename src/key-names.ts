@@ -46,6 +46,22 @@ export function keyMajorName(fifths: number): string {
   return keyForFifths(fifths).major;
 }
 
+// The REGION-AWARE key pill LABEL + ARIA (Smart Edit MID-1). When `atMeasure` > 1 the in-effect key was
+// introduced by a mid-piece change there, so the label carries a `(m. N)` qualifier and the aria names
+// the region; for the initial region (atMeasure 1 / undefined) the pill stays clean with the v1 strings.
+// Pure + DOM-free so the toolbar + the DOM test read the SAME strings. No em dashes (project style).
+export function keyPillLabel(fifths: number, atMeasure = 1): string {
+  const name = keyMajorName(fifths);
+  return atMeasure > 1 ? `${name} (m. ${atMeasure})` : name;
+}
+export function keyPillAria(fifths: number, atMeasure = 1): string {
+  const name = keyMajorName(fifths);
+  if (atMeasure > 1) {
+    return `Key signature: ${name}, in effect from measure ${atMeasure}. Change the key from measure ${atMeasure}.`;
+  }
+  return `Key signature: ${name}. Change the key.`;
+}
+
 // The accidental-count phrase for a signature: "no sharps or flats" (0), "1 sharp"/"2 sharps" (+),
 // "1 flat"/"3 flats" (-). Leads the spoken row label so the count is heard first (SIG-4 rows read
 // "2 sharps, D major or B minor").
