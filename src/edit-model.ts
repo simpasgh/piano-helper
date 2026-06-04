@@ -390,6 +390,23 @@ export interface SetKeyRecord {
   changedCount: number;
 }
 
+// What a SET-TIME captured, so it can be inverted EXACTLY (the OLD <beats> + <beat-type> text). A time
+// edit (SIG-3) is DECLARATION-ONLY: it rewrites the INITIAL <time>'s <beats>/<beat-type> and re-engraves;
+// it never moves a barline, splits a note, or touches a duration. So unlike the key edit (which rewrites
+// per-note accidentals across every bar) the time edit touches ONE <time> element, and its record is tiny:
+// the prior <beats>/<beat-type> text, restored verbatim by restoreTime. The OMR-correction model is that
+// the scan read the bars right and only mislabeled the meter, so relabeling is the whole fix; bars that no
+// longer sum to the new capacity are REPORTED (mismatchedBars), never auto-fixed. `oldBeats`/`oldBeatType`
+// name the prior meter for the announce + the byte-exact invert; `newBeats`/`newBeatType` the target;
+// `mismatchedBars` is how many bars do not fill the NEW meter (the SIG-3 guardrail readout).
+export interface SetTimeRecord {
+  oldBeats: number;
+  oldBeatType: number;
+  newBeats: number;
+  newBeatType: number;
+  mismatchedBars: number;
+}
+
 // The editable score model. Holds the parsed DOM and the ordered pitched-note handles. Edits
 // mutate the DOM through handles; serialize() re-emits MusicXML for Verovio.
 //
@@ -468,6 +485,28 @@ export interface ScoreModel {
   // Invert a set-key: restore the snapshotted measure children (the prior <fifths> + accidentals) and
   // re-index, returning the score byte-for-byte to its pre-edit state.
   restoreKey(record: SetKeyRecord): void;
+  // SET-TIME (SIG-3): rewrite the INITIAL (piece-level) <time>'s <beats> + <beat-type> to the new meter,
+  // DECLARATION-ONLY. The signature is OMR-corrected: the scan read the bars right but mislabeled the
+  // meter, so NO barline moves, NO note is split, NO duration changes; only the declared <time> changes.
+  // Bars that no longer sum to the NEW capacity are NOT auto-fixed (the user corrects durations with the
+  // duration editor, which reads the LIVE <time> for its bar capacity, so a lengthen/shorten/dot/tie after
+  // this edit clamps/ties at the NEW barline); the count of such bars is returned for the announce. Only
+  // the INITIAL <time> is rewritten (mid-piece meter changes are v2; a score with no <time> is a no-op).
+  // Returns the record needed to invert (the old beats/beat-type + the mismatched-bar count), or null when
+  // there is no initial <time> or the meter is unchanged (a no-op). Note handle ids are STABLE (no pitched
+  // note is added, removed, or retimed), so the selection + the falling notes are untouched.
+  setTimeSignature(beats: number, beatType: number): SetTimeRecord | null;
+  // Invert a set-time: restore the prior <beats>/<beat-type> verbatim (a tiny, byte-exact inverse).
+  restoreTime(record: SetTimeRecord): void;
+  // The current INITIAL (piece-level) time signature, for seeding the toolbar pill + the popover's
+  // selected cell on entering edit mode. Falls back to 4/4 (a sane default) when the score declares no
+  // <time> (then setTimeSignature is a no-op and the pill reads 4/4).
+  initialTime(): { beats: number; beatType: number };
+  // The number of bars whose summed (musical) length does NOT equal the capacity of the meter
+  // CURRENTLY declared (its initial <time>). Declaration-only means a relabel can leave bars over/under
+  // full; this is the SIG-3 guardrail count surfaced in the announce, not a hard stop. 0 when every bar
+  // fits (the common OMR-correction case: the bars were right, only the label was wrong).
+  barsNotMatchingMeter(): number;
   // The current INITIAL (piece-level) key signature in fifths, for seeding the toolbar pill + the
   // popover's checked row on entering edit mode. 0 (C major / A minor) when the score declares no key.
   initialFifths(): number;
@@ -1637,6 +1676,45 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
       }
       reindexHandles();
     },
+    initialTime(): { beats: number; beatType: number } {
+      return readInitialTime(doc);
+    },
+    barsNotMatchingMeter(): number {
+      return countMismatchedBars(doc);
+    },
+    setTimeSignature(beats: number, beatType: number): SetTimeRecord | null {
+      const timeEl = initialTimeEl(doc);
+      if (!timeEl) return null; // no initial <time> to rewrite (declaration-only edit, MVP)
+      const beatsEl = timeEl.getElementsByTagName("beats").item(0);
+      const beatTypeEl = timeEl.getElementsByTagName("beat-type").item(0);
+      if (!beatsEl || !beatTypeEl) return null; // malformed <time> with no beats/beat-type
+      const oldBeats = num(beatsEl, 0);
+      const oldBeatType = num(beatTypeEl, 0);
+      if (beats === oldBeats && beatType === oldBeatType) return null; // no change: push no command
+
+      // DECLARATION-ONLY: rewrite the initial <time>'s numerals only. No barline, note, or duration is
+      // touched, so handles/onsets are unchanged and the falling notes do not move. We still re-index so
+      // the duration editor's live-meter capacity (measureCapacityDivs reads this <time>) takes effect
+      // immediately, even though no handle's geometry changed (the re-index is a cheap, safe no-op here).
+      beatsEl.textContent = String(beats);
+      beatTypeEl.textContent = String(beatType);
+      reindexHandles();
+      // Count bars that no longer fill the NEW meter, for the SIG-3 announce. Declaration-only, so this is
+      // a non-blocking readout (the user fixes durations with the duration editor); never auto-fixed here.
+      const mismatchedBars = countMismatchedBars(doc);
+      return { oldBeats, oldBeatType, newBeats: beats, newBeatType: beatType, mismatchedBars };
+    },
+    restoreTime(record: SetTimeRecord): void {
+      // Restore the prior <beats>/<beat-type> verbatim (the byte-exact inverse). The <time> element is the
+      // same node (only its numeral text is rewritten), so the document returns to its pre-edit bytes.
+      const timeEl = initialTimeEl(doc);
+      if (!timeEl) return;
+      const beatsEl = timeEl.getElementsByTagName("beats").item(0);
+      const beatTypeEl = timeEl.getElementsByTagName("beat-type").item(0);
+      if (beatsEl) beatsEl.textContent = String(record.oldBeats);
+      if (beatTypeEl) beatTypeEl.textContent = String(record.oldBeatType);
+      reindexHandles();
+    },
     serialize(): string {
       return serializer.serializeToString(doc);
     },
@@ -1651,6 +1729,53 @@ function initialFifthsEl(doc: Document): Element | null {
   const key = doc.getElementsByTagName("key").item(0);
   if (!key) return null;
   return key.getElementsByTagName("fifths").item(0);
+}
+
+// The initial (piece-level) <time> element: the FIRST <time> in document order (measure 1's
+// <attributes><time>). SIG-3 edits only this one declaration; mid-piece meter changes are v2. Null when
+// the score declares no <time> (then setTimeSignature is a no-op and the pill reads the 4/4 default).
+function initialTimeEl(doc: Document): Element | null {
+  return doc.getElementsByTagName("time").item(0);
+}
+
+// The current INITIAL meter, for seeding the pill + the popover's selected cell. Reads the first <time>'s
+// beats/beat-type; falls back to 4/4 when there is no <time> or it is malformed (a sane default meter, the
+// same shape the pill shows when setTimeSignature would be a no-op).
+function readInitialTime(doc: Document): { beats: number; beatType: number } {
+  const timeEl = initialTimeEl(doc);
+  if (!timeEl) return { beats: 4, beatType: 4 };
+  const beats = num(timeEl.getElementsByTagName("beats").item(0), 0);
+  const beatType = num(timeEl.getElementsByTagName("beat-type").item(0), 0);
+  if (beats > 0 && beatType > 0) return { beats, beatType };
+  return { beats: 4, beatType: 4 };
+}
+
+// Count bars whose musical length does NOT equal the capacity of the meter in scope (its LIVE <time>),
+// across every part. Declaration-only (SIG-3): a relabeled meter can leave existing bars over/under full;
+// this is the guardrail count surfaced in the announce, never an auto-fix. A bar's musical length is its
+// furthest cursor (voiceFilledDivsMax, mirroring the parse walk over <backup>/<forward>/chords); its
+// capacity comes from measureCapacityDivs, which reads the live <time> + this measure's <divisions>. We
+// track divisions per part exactly as the parse walk does (a mid-piece <divisions> change stays correct).
+// Bars with NO musical content (extent 0, e.g. a section break) are skipped: an empty bar is not a
+// "doesn't fill the meter" case to flag (and would always mismatch a non-zero capacity). Float-safe.
+function countMismatchedBars(doc: Document): number {
+  const EPS = 1e-6;
+  let mismatched = 0;
+  for (const part of Array.from(doc.getElementsByTagName("part"))) {
+    let divisions = 1; // <divisions> per quarter; updated by <attributes>, as in the parse walk
+    for (const measure of Array.from(part.getElementsByTagName("measure"))) {
+      // child() is a recursive getElementsByTagName, so this finds the <divisions> nested in this
+      // measure's <attributes> (the same value the parse walk reads). Absent until a measure declares it.
+      const div = child(measure, "divisions");
+      if (div) divisions = num(div, divisions);
+      const extent = voiceFilledDivsMax(measure);
+      if (extent <= EPS) continue; // an empty bar is not flagged
+      const capacity = measureCapacityDivs(measure, divisions);
+      if (capacity <= EPS) continue; // no usable capacity (no <time> + empty): nothing to compare
+      if (Math.abs(extent - capacity) > EPS) mismatched++;
+    }
+  }
+  return mismatched;
 }
 
 // A stable string of a note's printed accidental state (<alter> + <accidental>), so setKeyFifths can

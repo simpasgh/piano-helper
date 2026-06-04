@@ -65,16 +65,19 @@ export function keyRowLabel(fifths: number): string {
 }
 
 // Build ONE key-picker option button (SIG-2): a brass check column (shown only on the current key) +
-// the spoken row label, with the fifths on data-fifths and aria-checked tracking the current key. The
-// builder is pure given a Document, so the toolbar can populate the popover AND the DOM test can assert
-// the option structure (incl. aria-checked) without pulling in main.ts's module-load side effects.
-export function buildKeyOptionButton(doc: Document, fifths: number, checked: boolean): HTMLButtonElement {
+// the spoken row label, with the fifths on data-fifths and aria-selected tracking the current key. The
+// row is a listbox OPTION (role="option" + aria-selected), the idiomatic single-select pattern shared
+// with the time picker and consistent with the export-menu's flat container + per-option roling (and
+// correct, unlike the prior dialog+menuitemradio mismatch). The builder is pure given a Document, so the
+// toolbar can populate the popover AND the DOM test can assert the option structure (incl. aria-selected)
+// without pulling in main.ts's module-load side effects.
+export function buildKeyOptionButton(doc: Document, fifths: number, selected: boolean): HTMLButtonElement {
   const btn = doc.createElement("button");
   btn.type = "button";
   btn.className = "edit-sig-item";
   btn.dataset.fifths = String(fifths);
-  btn.setAttribute("role", "menuitemradio");
-  btn.setAttribute("aria-checked", String(checked));
+  btn.setAttribute("role", "option");
+  btn.setAttribute("aria-selected", String(selected));
   btn.setAttribute("aria-label", keyRowLabel(fifths));
   const svgNs = "http://www.w3.org/2000/svg";
   const check = doc.createElementNS(svgNs, "svg");

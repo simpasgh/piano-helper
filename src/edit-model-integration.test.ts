@@ -729,3 +729,91 @@ describe("SET-KEY (SIG-4): a key edit on real reverie engraves the new signature
     expect(restored.idToVisIndex.size).toBe(restored.notes.length);
   });
 });
+
+// ----- SET-TIME (SIG-3) through the REAL engine on the real reverie file -----
+//
+// A time-signature edit rewrites <time><beats>/<beat-type>, DECLARATION-ONLY. Verovio must engrave the
+// NEW meter WITHOUT a "unsupported note-type-value" warning (no <type> was touched), reverie must stay
+// 185/185 (the click map is unchanged because no note moved or retimed), and the rendered meter must
+// show. This is the in-engine proof that the declaration-only meter relabel engraves correctly on real
+// OMR. The falling notes are passed through unchanged (the app does the same on a declaration-only edit).
+
+describe("SET-TIME (SIG-3): a time edit on real reverie engraves the new meter with no warning", () => {
+  let toolkit: VerovioToolkit;
+  beforeAll(async () => {
+    toolkit = await loadVerovioToolkit();
+  }, 60000);
+
+  it("correcting reverie to 3/4 engraves the meter, stays 185/185, no engine warning, notes unmoved", () => {
+    const model = parseScoreModel(REVERIE_XML);
+    expect(model.handles.length).toBe(185);
+
+    // The falling notes the app derives BEFORE the time edit (declaration-only means these never move).
+    const visBefore = model.handles
+      .filter((h) => !h.isTieContinuation)
+      .map((h) => ({ midi: h.midi, time: h.onsetSec, duration: 0.5, hand: "right" as const }));
+
+    const rec = model.setTimeSignature(3, 4);
+    expect(rec).not.toBeNull();
+    const xml = model.serialize();
+    expect(xml.includes("<beats>3</beats>")).toBe(true); // the new meter is declared
+    expect(xml.includes("<beat-type>4</beat-type>")).toBe(true);
+
+    // DECLARATION-ONLY: every handle's MIDI + onset is unchanged, so the SAME vis derives + the map holds.
+    const visAfter = model.handles
+      .filter((h) => !h.isTieContinuation)
+      .map((h) => ({ midi: h.midi, time: h.onsetSec, duration: 0.5, hand: "right" as const }));
+    expect(visAfter.map((n) => ({ midi: n.midi, time: n.time }))).toEqual(
+      visBefore.map((n) => ({ midi: n.midi, time: n.time })),
+    );
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let render;
+    try {
+      render = renderMusicXml(toolkit, xml, visAfter, 800);
+    } finally {
+      const allOutput = [...logSpy.mock.calls, ...warnSpy.mock.calls]
+        .flat()
+        .map((a) => String(a))
+        .join("\n");
+      logSpy.mockRestore();
+      warnSpy.mockRestore();
+      // The meter rewrite never touches a <type>, so no blank/unsupported note-type-value warning.
+      expect(allOutput).not.toContain("note-type-value");
+    }
+
+    // 185/185: every rendered notehead resolves to a VisNote and the handle map is complete.
+    expect(render!.notes).toHaveLength(185);
+    expect(render!.idToVisIndex.size).toBe(render!.notes.length);
+    const handleMap = buildHandleToVisIndex(model.handles, visAfter);
+    expect(handleMap.size).toBe(visAfter.length);
+
+    // The engraved SVG shows a meter signature (Verovio draws a <g class="meterSig"> for the new time).
+    expect(render!.svg).toMatch(/class="[^"]*\bmeterSig\b/);
+
+    // Every note still carries a <type> (the meter rewrite touched the <time> numerals only).
+    const doc = new DOMParser().parseFromString(xml, "application/xml");
+    const pitched = Array.from(doc.getElementsByTagName("note")).filter(
+      (n) => n.getElementsByTagName("rest").length === 0,
+    );
+    for (const n of pitched) {
+      expect(n.getElementsByTagName("type").item(0)?.textContent ?? "").not.toBe("");
+    }
+  });
+
+  it("a time edit + undo round-trips reverie back to the original render (185/185)", () => {
+    const model = parseScoreModel(REVERIE_XML);
+    const before = model.serialize();
+    const rec = model.setTimeSignature(6, 8)!; // relabel to 6/8
+    expect(model.serialize()).not.toBe(before);
+    model.restoreTime(rec);
+    expect(model.serialize()).toBe(before); // byte-exact undo
+    const vis = model.handles
+      .filter((h) => !h.isTieContinuation)
+      .map((h) => ({ midi: h.midi, time: h.onsetSec, duration: 0.5, hand: "right" as const }));
+    const restored = renderMusicXml(toolkit, model.serialize(), vis, 800);
+    expect(restored.notes).toHaveLength(185);
+    expect(restored.idToVisIndex.size).toBe(restored.notes.length);
+  });
+});
