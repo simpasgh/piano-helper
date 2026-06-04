@@ -980,7 +980,7 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
           childrenBefore,
           outcome: clamped ? "clamped" : "stepped",
           fromName,
-          toName: clamped ? durationValueName(newDivs, divisions) : DURATION_LADDER[curIndex].type,
+          toName: clamped ? durationValueName(newDivs, divisions) : noteValueName(DURATION_LADDER[curIndex].type, 0),
           dottedSnap,
           direction,
         };
@@ -1020,7 +1020,7 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
         childrenBefore,
         outcome: "stepped",
         fromName,
-        toName: DURATION_LADDER[curIndex].type,
+        toName: noteValueName(DURATION_LADDER[curIndex].type, 0),
         dottedSnap,
         direction,
       };

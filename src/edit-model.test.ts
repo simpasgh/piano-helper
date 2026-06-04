@@ -1106,6 +1106,23 @@ describe("ScoreModel.changeDuration ladder step (both <duration> and <type>, dot
     }
   });
 
+  it("announces the spelled value name on a step (toName matches the readout, incl. the sixteenth rung)", () => {
+    // The screen-reader announce (rec.toName) must use the SAME spelled form as the visible readout
+    // (durationValueName), so a step landing on a 16th says "sixteenth", not the raw "16th" token.
+    // The other rungs already coincide (their <type> token is the spelled word); the 16th was the gap.
+    const oneNote = (dur: number, type: string) => `<?xml version="1.0"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+<part id="P1"><measure number="1">
+  <attributes><divisions>4</divisions><time><beats>8</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+  <note><pitch><step>C</step><octave>5</octave></pitch><duration>${dur}</duration><voice>1</voice><type>${type}</type></note>
+  <note><rest/><duration>${32 - dur}</duration><voice>1</voice><type>whole</type></note>
+</measure></part></score-partwise>`;
+    const down = parseScoreModel(oneNote(2, "eighth")).changeDuration(0, "shorter");
+    expect(down?.toName).toBe("sixteenth");
+    const up = parseScoreModel(oneNote(1, "16th")).changeDuration(0, "longer");
+    expect(up?.toName).toBe("eighth");
+  });
+
   it("REMOVES existing <dot> children on a plain-rung step", () => {
     // A note that arrives dotted (dotted quarter = 6) gets its dot stripped when stepped; the result
     // is a clean plain rung with zero dots (the dotted-arrival snap also runs, see the snap tests).
