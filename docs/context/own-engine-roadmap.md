@@ -4,6 +4,48 @@ Self-contained plan so any session (esp. the one on the GPU PC) can pick up and 
 without the prior machine's local memory. Newest status at the top. NO em dashes in generated
 text (project rule). Ship every code change through the gated flow (see "Constraints" below).
 
+## STATUS: FULL-SYMBOL DECODE built (durations/key/accidentals/clefs/rests from glyphs); detector training + eval in flight (2026-06-04)
+
+Step 3 of the full-symbol detector. The DECODE that reads musical content from the trained
+multi-class detector's glyph boxes is code-complete and merged research-only (nothing in worker.py
+calls it yet; deploy is a later gated decision after the real-score eval, mirroring how geom_omr
+shipped pre-deploy). The CODE (gated PR `feat/full-symbol-decode`):
+- `geom_omr.decode_symbols_to_musicxml(staves, symbols, key_fifths=None, gray=None)` + helpers:
+  reads DURATIONS (head fill open/filled + stem presence + beam/flag COUNT + augmentation dots ->
+  whole/half/quarter/eighth/16th/dotted via `decode_note_duration`), KEY SIGNATURE (the
+  clef-anchored run of accidental glyphs, bounded by the timesig / first note, via
+  `_detect_key_fifths`), per-note ACCIDENTALS (a glyph immediately left of a head overrides the
+  keyed alter), CLEFS (leftmost clef glyph sets each staff's pitch reference, removing the
+  treble/bass-by-index assumption; a later clef glyph is a mid-score change applied per-note; a
+  clef-LESS staff falls back to the by-index sign so pitch and the printed clef cannot desync), and
+  RESTS. Shares decode_pitch / _interline / detect_barlines / keyed_alter / the llm_omr builder
+  with the notehead-only path. NEVER raises. key_fifths=None DETECTS the key; an int pins it (eval).
+- `geom_detector.detect_symbols()` (all classes) + `transcribe_with_symbols()` + a `--symbols` CLI
+  flag so the engine runs as a subprocess (for the box eval + eventual deploy).
+- `train_detector.py --workers` (default 0; the documented Windows dataloader-hang fix).
+- Tests: test_geom_symbols.py (durations/key/accidentals/clefs/rests/chords/never-raise),
+  test_train_detector.py; a taxonomy-sync test guards geom_omr.CLASS_NAMES vs synth_render's.
+
+DATASET + TRAINING (heavy, OUTSIDE the repo under ~/omr-train, gitignored): the full multi-class
+set is built (synth 1500/200 `symbols_full` + DeepScores multi-class `ds_symbols` 1362/352 = 2862
+train; combined_symbols.yaml). DeepScores supplies the proof's weak classes from REAL data: clef_c
+~1950 (was 42), double accidentals ~4.5k each (synthetic supplies these; DeepScores has ~0), ottava
+~432, tie ~16.5k, per-segment beams ~88k. Training yolov8s imgsz 1536 / batch 4 / workers=0 / 60ep
+patience 15 on the GPU PC (in flight). GOTCHA relearned: imgsz 1536 + mosaic on a batch of 4 DENSE
+DeepScores pages SPILLS past the 16G card (~19.8G, ~10x slowdown); fix = `mosaic=0` (same as the
+notehead_real run). Also: PowerShell `;` is not `&&`, so a failed `Set-Location` still ran the next
+`python ...` and left an orphan training process competing for the GPU; relaunch cleanly.
+
+SUBDIVISION caveat (measured, see memory full-symbol-duration-geometry): fill+stem give
+whole/half/quarter cleanly, but 8th-vs-16th rides on beam/flag COUNT, and the synthetic render
+UNIONS a beam group into ONE box (so synthetic 16ths under-read to eighths) while DeepScores is
+per-segment. So GATE subdivision on the real-score eval (real_eval), not synthetic. Even the coarse
+read takes geom's duration_acc from 0.0 (every note is currently duration:1) to a real number.
+
+NEXT: per-class eval (confirm clef_c/double-acc/ottava/stem/dot improved) -> end-to-end eval with
+the new decode (eval_detector, key now DETECTED not oracle) -> photo-augment + retrain -> real_eval
+on the box (`GEOM_SRC=/dir`, `--symbols`) -> deploy to cx33 ONLY if it beats the geom+Clarity fusion.
+
 ## STATUS: fusion keeps 4/4 for cut-time-equivalent meters (a Clarity 2/2 misread no longer relabels 4/4) (2026-06-04)
 
 Follow-up to PR #191. `fusion.fuse` now keeps the 4/4 default when Clarity's borrowed meter is
