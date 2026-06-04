@@ -576,6 +576,192 @@ def detect_barlines(gray, staves: List[List[float]]) -> List[List[float]]:
         return [[] for _ in staves]
 
 
+# --- Ottava (8va / 8vb) bracket detection (numpy) ----------------------------------------
+#
+# WHY THIS EXISTS. An ottava bracket (8va above / 8vb below, the dashed rule + "8") shifts every
+# note under it by an octave WITHOUT changing its written staff position. geom decodes the WRITTEN
+# position (decode_pitch), so a note under an 8va comes out 12 semitones too LOW (the user's reverie
+# bug: it plays an octave low in the bracketed region). reverie's truth has 8va spanners drawn as a
+# dashed segment per system on both staves; geom must read them and shift the sounding octave.
+#
+# This is the NOTEHEAD-ONLY path's detector (the deployed path has only notehead centers, no symbol
+# boxes, so the bracket cannot come from a detected glyph class here). It is a classical CPU detector
+# in the spirit of detect_barlines: scan a tight band just ABOVE the staff top (8va) and just BELOW
+# the staff bottom (8vb) for the bracket's dashed horizontal rule.
+#
+# DISCRIMINATORS (measured on reverie at 300 DPI, see the spike C:\tmp\ottava_diag7.py). The dashed
+# rule is, on its densest row:
+#   - made of SHORT runs: the longest dark run is <= ~1.6 interline (a solid BEAM is one long run,
+#     so longest-run rejects beams cleanly),
+#   - MANY of them: >= 15 short runs (sparse stray ink along a row -- e.g. a few notehead/stem tops
+#     poking into the band -- has only a handful, so the run COUNT rejects it),
+#   - spanning a FULL SYSTEM width: the short-run span is >= 40 interlines (LOCAL clutter such as a
+#     hairpin or a rehearsal mark spans only a few interlines, so span rejects it).
+# On reverie this fires on all the clearly-bracketed staves (5 of 6; the 6th's bracket ends very
+# early in the final system and is conservatively skipped) and on NEITHER non-bracketed staff. It is
+# deliberately CONSERVATIVE: a missed bracket leaves that note at the written octave (today's
+# behavior, no worse), while a FALSE bracket would shift correct notes an octave (a regression), so
+# the thresholds favor precision. NEVER raises (returns a safe default on any failure).
+#
+# SIZE (8 vs 15) is out of scope: reading the engraved "8"/"15" digit needs glyph recognition the
+# notehead-only path lacks. The magnitude is always 1 octave (size 8), which is by far the common
+# case; a 15ma would be under-shifted by one octave, documented as a follow-up.
+
+_OTT_MAX_RUN_IL = 1.6      # a dash is <= this many interlines long; a longer run is a solid beam.
+_OTT_MIN_SHORT_RUNS = 15   # a dashed rule has many dashes; fewer is stray ink.
+_OTT_MIN_SPAN_IL = 40.0    # the bracket spans most of a system; a few interlines is local clutter.
+_OTT_MIN_FILL = 0.12       # dashes fill >= this fraction of their span; sparse stem/ledger fringe
+#                            below a staff fills only ~0.05 (a key 8vb precision guard, see below).
+_OTT_BELOW_CLEAR_IL = 10.0  # only scan the 8vb band below a staff when the next staff is at least
+#                             this far down (open margin). A treble's "below" is the ~6.5-interline
+#                             inter-staff gap, where an 8vb is ambiguous with the BASS staff's 8va
+#                             (its above-band overlaps), so we skip it there to avoid a false shift.
+
+
+def _dash_runs(rowmask) -> List[Tuple[int, int]]:
+    """Contiguous True (dark) runs in a 1D boolean row, as (start, end_inclusive). PURE-ish (numpy
+    row in, python list out). NEVER raises."""
+    try:
+        out: List[Tuple[int, int]] = []
+        n = int(rowmask.shape[0])
+        x = 0
+        while x < n:
+            if rowmask[x]:
+                s = x
+                while x < n and rowmask[x]:
+                    x += 1
+                out.append((s, x - 1))
+            else:
+                x += 1
+        return out
+    except Exception:
+        return []
+
+
+def _scan_dashed_rule(gray, y0: int, y1: int, xcut: int, sp: float) -> Optional[Tuple[float, float]]:
+    """Scan rows [y0, y1) of `gray` for the densest dashed-rule row (an ottava bracket). Returns the
+    bracket x-extent (x0, x1) of the best qualifying row, or None if none qualifies. A row qualifies
+    when its dark runs are all SHORT (<= _OTT_MAX_RUN_IL interlines, i.e. not a beam), there are
+    >= _OTT_MIN_SHORT_RUNS of them, their span is >= _OTT_MIN_SPAN_IL interlines, AND the dashes FILL
+    >= _OTT_MIN_FILL of that span. The fill gate is what separates a real dashed rule (dash + gap,
+    fill ~0.2-0.5) from the sparse fringe of stem/ledger BOTTOMS in the row just outside a staff
+    (~48 tiny marks at fill ~0.05). The far-left margin (clef/key/the "8" glyph) is excluded by xcut
+    so the span measures the dashes only. NEVER raises."""
+    if not GEOM_AVAILABLE or gray is None:
+        return None
+    try:
+        h, w = gray.shape
+        y0 = max(0, min(int(y0), h))
+        y1 = max(0, min(int(y1), h))
+        if y1 - y0 < 1 or sp <= 0:
+            return None
+        max_run = _OTT_MAX_RUN_IL * sp
+        min_span = _OTT_MIN_SPAN_IL * sp
+        best: Optional[Tuple[int, float, float]] = None  # (n_short, x0, x1)
+        for r in range(y0, y1):
+            row = (gray[r, :] < 0.5).copy()
+            if xcut > 0:
+                row[:xcut] = False
+            runs = _dash_runs(row)
+            if len(runs) < _OTT_MIN_SHORT_RUNS:
+                continue
+            # a single long run (a beam / thick rule) disqualifies the whole row.
+            if max((e - s + 1) for (s, e) in runs) > max_run:
+                continue
+            short = [(s, e) for (s, e) in runs if (e - s + 1) <= max_run]
+            if len(short) < _OTT_MIN_SHORT_RUNS:
+                continue
+            span = short[-1][1] - short[0][0]
+            if span < min_span:
+                continue
+            ink = sum((e - s + 1) for (s, e) in short)
+            if (ink / span) < _OTT_MIN_FILL:
+                continue
+            if best is None or len(short) > best[0]:
+                best = (len(short), float(short[0][0]), float(short[-1][1]))
+        if best is None:
+            return None
+        return best[1], best[2]
+    except Exception:
+        return None
+
+
+def detect_ottavas(gray, staves: List[List[float]]) -> List[List[Tuple[float, float, int]]]:
+    """Detect ottava (8va / 8vb) brackets per staff. Returns a list index-aligned with `staves`:
+    out[i] is a list of spans (x0, x1, delta) on staff i, where delta = +1 for an 8va (a dashed rule
+    ABOVE the staff top: the notes SOUND an octave higher, so sounding = written + 1 octave) and
+    delta = -1 for an 8vb (a dashed rule BELOW the staff bottom: sounding = written - 1 octave). A
+    note whose x falls in [x0, x1] is shifted by delta octaves (see ottava_delta_at).
+
+    Each staff is scanned independently because the bracket is engraved per system on each staff it
+    covers (reverie draws it on both the treble and bass of every spanned system). At most one 8va
+    and one 8vb span are returned per staff (a system rarely stacks two on one staff); the magnitude
+    is always 1 octave (size 8) -- reading the "8 vs 15" digit is out of scope for the notehead-only
+    path. NEVER raises; returns [[] for _ in staves] on any failure so the decode is unchanged."""
+    out: List[List[Tuple[float, float, int]]] = [[] for _ in staves]
+    if not GEOM_AVAILABLE or gray is None or not staves:
+        return out
+    try:
+        h, w = gray.shape
+        # Each staff's top line y, so we can tell how far the NEXT staff sits below (to gate 8vb).
+        tops = [sorted(float(v) for v in lines)[0] for lines in staves]
+        for i, lines in enumerate(staves):
+            sl = sorted(float(v) for v in lines)
+            sp = _interline(sl)
+            if sp is None:
+                continue
+            top, bottom = sl[0], sl[-1]
+            # Exclude the far-left clef / key / "8" margin so the span measures the dashes only.
+            xcut = int(round(min(w * 0.12, 4.0 * sp)))
+            spans: List[Tuple[float, float, int]] = []
+            # 8va: a dashed rule in a tight band ABOVE the top staff line (~0.4 .. 4 interlines up).
+            # The above-band is always safe to scan: it is either the open margin above the system or
+            # the wide inter-system gap, neither of which holds another staff's content at this y.
+            above = _scan_dashed_rule(gray, int(round(top - 4.0 * sp)),
+                                      int(round(top - 0.4 * sp)), xcut, sp)
+            if above is not None:
+                spans.append((above[0], above[1], 1))
+            # 8vb: a dashed rule in a tight band BELOW the bottom staff line. ONLY scanned when the
+            # next staff is far below (open margin). For the TREBLE of a grand staff the "below" band
+            # is the ~6.5-interline inter-staff gap, whose content (and the BASS staff's own 8va,
+            # whose above-band overlaps here) would be misread as a treble 8vb and shift correct
+            # notes DOWN an octave (a regression). Skipping the crowded gap keeps the detector
+            # precise; a genuine treble-staff 8vb in that gap is the rare case we forgo to never
+            # fabricate a shift (the conservative tradeoff the contract demands).
+            next_top = tops[i + 1] if i + 1 < len(tops) else None
+            below_is_open = next_top is None or (next_top - bottom) >= _OTT_BELOW_CLEAR_IL * sp
+            if below_is_open:
+                below = _scan_dashed_rule(gray, int(round(bottom + 0.4 * sp)),
+                                          int(round(bottom + 4.0 * sp)), xcut, sp)
+                if below is not None:
+                    spans.append((below[0], below[1], -1))
+            out[i] = spans
+        return out
+    except Exception:
+        return [[] for _ in staves]
+
+
+def ottava_delta_at(rep_x: float, spans: List[Tuple[float, float, int]]) -> int:
+    """The summed octave shift (in octaves) of every ottava span containing rep_x. PURE and
+    unit-testable. Normally 0 (no bracket) or a single span's delta (+1 for an 8va, -1 for an 8vb);
+    summed for the rare stacked case. A note's sounding octave = written octave + this value.
+    NEVER raises; returns 0 on any failure."""
+    try:
+        x = float(rep_x)
+        total = 0
+        for span in spans or []:
+            try:
+                x0, x1, delta = float(span[0]), float(span[1]), int(span[2])
+            except (TypeError, ValueError, IndexError):
+                continue
+            lo, hi = (x0, x1) if x0 <= x1 else (x1, x0)
+            if lo <= x <= hi:
+                total += delta
+        return total
+    except Exception:
+        return 0
+
+
 # --- Full pipeline -----------------------------------------------------------------------
 
 def _clef_for_staff_index(idx_in_system: int) -> str:
@@ -615,6 +801,15 @@ def _decode_staves_to_musicxml(
     """
     try:
         barlines = detect_barlines(gray, staves) if gray is not None else [[] for _ in staves]
+        # Ottava (8va / 8vb) brackets per staff: a note under one SOUNDS an octave higher (8va) or
+        # lower (8vb) than its written staff position. geom decodes the WRITTEN position, so without
+        # this shift a bracketed note is an octave off (the reverie bug). We emit the SOUNDING octave
+        # directly (no <octave-shift> direction): reconcile.to_events + OSMD + the scorer all read
+        # <octave>, so the audio, falling notes, and grading are all correct, with zero risk of OSMD
+        # double-applying a bracket. The tradeoff is the sheet shows the real high notes with ledger
+        # lines instead of a low position + an 8va bracket (acceptable, arguably clearer). When no
+        # bracket is detected the shift is +0, so non-ottava output is byte-identical to before.
+        ottava_spans = detect_ottavas(gray, staves) if gray is not None else [[] for _ in staves]
 
         def staff_chords(idx, clef):
             # [(rep_x, [pitch...]), ...] for one staff, x-ordered. Keeping each chord's center x
@@ -625,6 +820,7 @@ def _decode_staves_to_musicxml(
             if sp is None:
                 return []
             heads = per_staff_heads[idx] if idx < len(per_staff_heads) else []
+            spans = ottava_spans[idx] if idx < len(ottava_spans) else []
             out = []
             for chord in group_chords(heads, sp):
                 pitches, xs = [], []
@@ -634,7 +830,12 @@ def _decode_staves_to_musicxml(
                         pitches.append(p)
                         xs.append(x)
                 if pitches:
-                    out.append((sum(xs) / len(xs), pitches))
+                    rep_x = sum(xs) / len(xs)
+                    # Apply the ottava shift at the chord's rep_x: sounding octave = written + delta.
+                    shift = ottava_delta_at(rep_x, spans)
+                    if shift:
+                        pitches = [(s, a, o + shift) for (s, a, o) in pitches]
+                    out.append((rep_x, pitches))
             return out
 
         # Process each grand-staff PAIR (treble=2i, bass=2i+1) as one system, segmenting its chords
@@ -974,6 +1175,30 @@ def _group_heads_into_chords(heads, sp):
         return []
 
 
+def _ottava_spans_from_boxes(syms, staff_lines, sp):
+    """Ottava spans for the FULL-SYMBOL path, derived from the detected `ottava` class boxes (the
+    notehead-only path has no glyph boxes and uses detect_ottavas on the raster instead). Each box's
+    x-range is the bracket span; its center-y vs the staff's line span sets the direction: a box
+    centered ABOVE the top line is an 8va (+1, notes sound an octave higher), BELOW the bottom line
+    is an 8vb (-1). Returns [(x0, x1, delta), ...] for ottava_delta_at. NEVER raises."""
+    try:
+        sl = sorted(float(v) for v in staff_lines)
+        if len(sl) < 2:
+            return []
+        top, bottom = sl[0], sl[-1]
+        spans = []
+        for (x, y, w, h) in syms.get("ottava", []):
+            cy = y + h / 2.0
+            # Direction from the box's vertical placement relative to the staff. A box that overlaps
+            # the staff body (neither clearly above nor below) is ambiguous; default to 8va (the
+            # common case) so a slightly-low-detected 8va box still shifts up rather than nullifying.
+            delta = -1 if cy > bottom + 0.5 * sp else 1
+            spans.append((float(x), float(x + w), delta))
+        return spans
+    except Exception:
+        return []
+
+
 def _decode_staff(staff_lines, syms, fifths, default_sign="G"):
     """Decode one staff's glyphs into (events, opening_clef_sign, clef_changes):
       events        : [(rep_x, event_dict), ...] x-ordered (notes/chords with duration+type+dots+
@@ -1016,6 +1241,10 @@ def _decode_staff(staff_lines, syms, fifths, default_sign="G"):
         beams = syms.get("beam", [])
         flags = syms.get("flag", [])
         dots = syms.get("dot", [])
+        # Ottava brackets from the detected `ottava` glyph boxes: a note under one sounds an octave
+        # higher (8va) or lower (8vb) than its written position. Same SOUNDING-octave-only treatment
+        # as the notehead-only path (we shift <octave>, emit no <octave-shift> direction).
+        ottava_spans = _ottava_spans_from_boxes(syms, staff_lines, sp)
         heads = ([(b[0], b[1], b[2], b[3], True) for b in syms.get("notehead_filled", [])]
                  + [(b[0], b[1], b[2], b[3], False) for b in syms.get("notehead_open", [])])
 
@@ -1047,6 +1276,11 @@ def _decode_staff(staff_lines, syms, fifths, default_sign="G"):
                 pitches.append(pd)
             if not pitches:
                 continue
+            # Ottava shift at this chord's rep_x: written octave -> sounding octave.
+            shift = ottava_delta_at(rep_x, ottava_spans)
+            if shift:
+                for pd in pitches:
+                    pd["octave"] = int(pd.get("octave", 4)) + shift
             chord_cy = sum(h[1] + h[3] / 2.0 for h in chord) / len(chord)
             stem = None
             for h in chord:
