@@ -4,6 +4,44 @@ Self-contained plan so any session (esp. the one on the GPU PC) can pick up and 
 without the prior machine's local memory. Newest status at the top. NO em dashes in generated
 text (project rule). Ship every code change through the gated flow (see "Constraints" below).
 
+## STATUS: FULL-SYMBOL detector TRAINED + evaluated; KEY-detection works, duration decode made stem-independent; real_eval is the ship gate (2026-06-04)
+
+Step 3's model bake + decode hardening (GPU PC). The multi-class detector is trained and the
+full-symbol decode is evaluated end-to-end. Research-only still (prod path is notehead-only, see
+memory [[geom-deployed-path-notehead-only]]); deploy is gated on a box real_eval vs the fusion.
+
+TRAINED MODEL (`~/omr-train/runs/symbols_full/weights/best.pt`, yolov8s, NOT committed -- 85 MB, goes
+to the box like notehead.pt): combined data = 1500 synthetic (symbols_full) + 860 DeepScores
+(ds_symbols_filt, pages <=600 objects). Peak val mAP50 0.79 / mAP50-95 0.64. Per-class wins over the
+proof: clef_c 0.0 -> 0.96 (DeepScores real data), double_sharp 0.30 -> 0.73, double_flat 0.89, clefs
+/heads/flags/rests 0.87-1.0. WEAK: `stem` recall 0.054 (thin 1-2px glyph, brutal IoU); `dot`/`ottava`
+/`tie` 0.44-0.59.
+
+END-TO-END synthetic eval (200 held-out, `~/omr-train/eval_symbols.py`): full-symbol note_f1 **0.627**
+(vs notehead-only-on-same-detector 0.552) + chord_recall 0.522 (vs 0.444). KEY DETECTION WORKS:
+detected-key == oracle-key, byte-identical metrics -> the oracle-key assumption is gone. DURATION on
+synthetic is MISLEADING (synthetic is 16th-dense and the unioned synthetic beam under-reads 16ths,
+while the old `duration:1` placeholder coincidentally matches 16ths) -> gate duration on real_eval,
+NOT synthetic.
+
+DECODE HARDENING (this PR): the `stem` class detects too poorly to gate rhythm on, so
+`_count_beams_flags` now associates beams/flags with the notehead's X-COLUMN (not the detected stem),
+and a classical CV probe `_has_stem_cv` recovers the open-head half-vs-whole. Lifted synthetic
+duration_acc 0.306 -> 0.410 (eighths recovered) with pitch/key/chords unchanged.
+
+TRAINING GOTCHAS (cost hours; see memory [[deploy-geom-cx33]] env): imgsz 1536 was NOT usable on the
+16G card -- the DENSE DeepScores pages (median 510, max 2039 objects) x the 18-class TaskAlignedAssigner
+OOM the loss. Two needed fixes: (1) FILTER DeepScores to <=600-object pages (`~/omr-train/filter_ds.py`;
+the dropped orchestral pages are non-piano anyway); (2) the CUDA caching allocator's RESERVED memory
+balloons unboundedly mid-epoch (8G -> 30G) until a hard OOM -- `expandable_segments` (the Linux fix) is
+UNSUPPORTED on Windows, so a callback calling `torch.cuda.empty_cache()` when reserved > 12G keeps it
+bounded. Settled config: imgsz 1024 / batch 4 / workers=0 / mosaic 0 / the cache callback. Run training
+DETACHED (`Start-Process`), which survives turn boundaries (a `run_in_background` job does NOT).
+
+SHIP GATE (not done): copy best.pt to cx33, run `real_eval` with `--symbols` (the new
+`geom_detector.transcribe_with_symbols`) vs the geom+Clarity fusion on the 4 MuseScore pieces. Deploy
+ONLY if it wins, AND wire the worker to call the `--symbols` path (prod currently runs notehead-only).
+
 ## STATUS: fusion held-note UNDER-read FIXED (a lone unmatched geom chord now fills its bar) (2026-06-04)
 
 Branch `fix/fusion-held-note-fill` (off main). RHYTHM lever, prod-primary fusion path. The INVERSE of

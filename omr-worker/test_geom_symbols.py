@@ -215,6 +215,20 @@ class TestDecodeSymbolsToMusicxml:
         assert out is not None
         assert b"<type>16th</type>" in out
 
+    def test_beamed_eighth_without_a_detected_stem_still_reads_eighth(self):
+        # The trained `stem` class detects poorly (~20-30% of beamed heads), so the duration decode
+        # must associate a beam by the notehead's x-COLUMN, not via the stem. A filled head with a
+        # beam in its column and NO stem box must still read eighth, not fall back to quarter.
+        symbols = [
+            box("clef_g", 15, 140, 20, 60),
+            box("notehead_filled", 200, 170),   # filled head, no stem detected
+            box("beam", 195, 140, 30, 6),        # a beam ~1.5 interlines above, in the head column
+        ]
+        out = geom_omr.decode_symbols_to_musicxml([TREBLE], symbols, key_fifths=0)
+        assert out is not None
+        assert b"<type>eighth</type>" in out
+        assert b"<type>quarter</type>" not in out
+
     def test_chord_stacks_pitches_with_shared_duration(self):
         # two heads at the same x (a chord) share one stem -> one event, two <pitch>, one <chord/>.
         symbols = [
