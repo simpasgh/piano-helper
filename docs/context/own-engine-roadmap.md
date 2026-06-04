@@ -4,6 +4,27 @@ Self-contained plan so any session (esp. the one on the GPU PC) can pick up and 
 without the prior machine's local memory. Newest status at the top. NO em dashes in generated
 text (project rule). Ship every code change through the gated flow (see "Constraints" below).
 
+## STATUS: KEY FIX SHIPPED -- the fusion re-decodes geom under Clarity's detected key on non-C pieces (the assumed-C-major accidentals are fixed) (2026-06-04)
+
+Implemented + shipped the validated key lever. The worker fusion path now re-decodes geom under
+Clarity's DETECTED key when Clarity reports a NON-ZERO key (`worker._rekey_geom` + geom's
+`--key-fifths` threaded through geom_command -> run_geom -> _geom_body / _geom_page_body), so geom
+reads the key-signature accidentals correctly instead of assuming C major. Covers all 3 fusion paths:
+the block-stream FINAL fuse (the LIVE prod path, OMR_PROGRESSIVE_BLOCKS=1), fast-then-refine, and
+per-page. GUARDED: a key of 0 / no Clarity / any failure returns geom's original C-assumed bytes, so
+C-major uploads (the common case) are BYTE-IDENTICAL = never-worse. Mirrors the time-sig borrow
+(PR #191): intrinsic fusion behavior, no new engine flag. Only non-C pieces pay one extra fast geom
+decode after Clarity (the partials keep geom's fast C-assumed pitch; only the complete result re-keys).
+
+MEASURED end-to-end on the box (`fusion_key_eval.py`, BEFORE geom@C vs AFTER geom@clarity-key, fused +
+rhythm_repair, scored vs truth):
+- C major (all 4 real pieces liminality/tctab/icarus/reverie): delta 0.000 on EVERY metric (never-worse).
+- non-C (transposed icarus E +4 / Eb -3): note_f1 0.412 -> 0.845 / 0.431 -> 0.842, note_dur_f1 +0.338 /
+  +0.343, chord_recall 0 -> 0.179; Clarity detects the key EXACTLY (4 / -3). (duration_acc emaj -0.028 is
+  a denominator artifact as more notes pitch-match; the strict note_dur_f1 is strongly up.)
+Tests: test_worker.py +4 (geom_command key arg, _rekey_geom unit, fusion re-key on non-C, no-op on C);
+full omr-worker suite 525 passed / 15 torch-skipped. See memory [[full-symbol-trained-eval]].
+
 ## STATUS: KEY DETECTION validated on real non-C engravings -- a LARGE win (prod's C-assumption HALVES non-C note_f1); Clarity is a free key source, so the cheapest fix feeds its key into geom (2026-06-04)
 
 Follow-up to the gate below. The gate found full-symbol loses on rhythm but its KEY detection works; the
@@ -57,6 +78,15 @@ truth on every piece), but rhythm is the whole ballgame here and the fusion's Cl
 confirms the synthetic-eval prediction exactly. (Detected key == oracle on all 4, so the detected-key
 run IS the oracle-key run -- the pitch deltas are genuine detector/decode differences, not a key
 artifact.)
+
+CORRECTION (2026-06-04, surfaced while validating the key fix with FRESH geom): the reverie FUSION
+baseline in the table above (note_f1 0.476 / note_dur_f1 0.476 / chord 0.471) used a STALE pre-ottava
+cached geom. Current main's geom carries the merged ottava fix (`detect_ottavas`, classical CV in the
+notehead path), so the TRUE current fusion reverie is note_f1 0.865 / note_dur_f1 0.865 / chord 0.824.
+So full-symbol LOSES reverie PITCH too (0.480 vs 0.865), not a wash: the full-symbol path's ottava rides
+on the WEAK detected `ottava` class (recall ~0.44-0.59, which missed reverie's brackets) while the
+notehead/fusion path uses the robust classical detector. The other 3 pieces' fusion baselines were
+unaffected (cached == fresh; no ottava). Net: do-not-swap is STRENGTHENED.
 
 KEY DETECTION works on REAL data: detected fifths == oracle == 0 on all 4 (the emitted `<fifths>` is 0),
 so the assumed-C-major limitation is genuinely gone in this path. But it is NOT a free win to ship yet:

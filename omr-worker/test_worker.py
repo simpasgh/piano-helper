@@ -701,6 +701,34 @@ def test_geom_command_shape():
     assert cmd[cmd.index("--weights") + 1] == "/w.pt"
     assert cmd[cmd.index("-o") + 1] == "/out.musicxml"
     assert cmd[cmd.index("--device") + 1] == "cpu"
+    assert "--key-fifths" not in cmd
+
+
+def test_geom_command_key_fifths():
+    # key_fifths=None -> no --key-fifths (geom assumes C major); an int -> --key-fifths <n> so the
+    # decode reads that key. The fusion path passes Clarity's detected key on non-C pieces.
+    assert "--key-fifths" not in worker.geom_command("py", "g.py", "/i.png", "/w.pt", "/o.musicxml")
+    keyed = worker.geom_command("py", "g.py", "/i.png", "/w.pt", "/o.musicxml", key_fifths=4)
+    assert keyed[keyed.index("--key-fifths") + 1] == "4"
+    flat = worker.geom_command("py", "g.py", "/i.png", "/w.pt", "/o.musicxml", key_fifths=-3)
+    assert flat[flat.index("--key-fifths") + 1] == "-3"
+
+
+def test_rekey_geom_unit():
+    # Non-zero Clarity key: rerun_keyed is called with that key and its bytes are used.
+    seen = []
+    out = worker._rekey_geom(b"<s>C</s>", b"<s><fifths>3</fifths></s>",
+                             lambda ck: (seen.append(ck), b"<s>KEYED</s>")[1])
+    assert seen == [3] and out == b"<s>KEYED</s>"
+
+    # C major (fifths 0): no rerun, original C-assumed geom bytes (the common case stays identical).
+    def _no_rerun(ck):
+        raise AssertionError("must not re-run geom on a C-major (fifths 0) piece")
+    assert worker._rekey_geom(b"<s>C</s>", b"<s><fifths>0</fifths></s>", _no_rerun) == b"<s>C</s>"
+
+    # No Clarity bytes, or a re-run that fails (None) -> original geom bytes; never raises.
+    assert worker._rekey_geom(b"<s>C</s>", None, _no_rerun) == b"<s>C</s>"
+    assert worker._rekey_geom(b"<s>C</s>", b"<s><fifths>2</fifths></s>", lambda ck: None) == b"<s>C</s>"
 
 
 def test_run_geom_returns_none_without_env(tmp_path, monkeypatch):
@@ -920,6 +948,85 @@ def test_geom_fusion_fuses_geom_and_clarity(tmp_path, monkeypatch):
     assert client.put_body == b"<score>fused</score>"
     assert seen["g"] == b"<score>geom</score>"      # geom bytes handed to the fusion
     assert seen["c"] == b"<score>clarity</score>"   # clarity bytes handed to the fusion
+
+
+def test_geom_fusion_rekeys_geom_under_clarity_key(tmp_path, monkeypatch):
+    # Non-C piece: Clarity detects the key (here 4 sharps); the worker re-decodes geom under that key
+    # so geom's pitch carries the right accidentals, and the RE-KEYED geom bytes are what gets fused.
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    geom_c = tmp_path / "geom_c.musicxml"; geom_c.write_text("<score>geomC</score>")
+    geom_k = tmp_path / "geom_k.musicxml"; geom_k.write_text("<score>geomKEYED</score>")
+    clar = tmp_path / "clarity.musicxml"; clar.write_text("<score><fifths>4</fifths></score>")
+    monkeypatch.setattr(worker, "rasterize_if_pdf", lambda p, w: ("/fake/stitched.png", True))
+    keys = []
+
+    def fake_run_geom(image, workdir, **k):
+        keys.append(k.get("key_fifths"))
+        return str(geom_k) if k.get("key_fifths") else str(geom_c)
+
+    monkeypatch.setattr(worker, "run_geom", fake_run_geom)
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clar))
+    seen = {}
+
+    def fake_fuse(g, c):
+        seen["g"], seen["c"] = g, c
+        return b"<score>fused</score>"
+
+    monkeypatch.setattr(worker.fusion, "fuse", fake_fuse)
+
+    def must_not_run(*a, **k):
+        raise AssertionError("no later engine runs when fusion produced a result")
+
+    monkeypatch.setattr(worker, "_select_ensemble", must_not_run)
+    monkeypatch.setattr(worker, "_select_legacy", must_not_run)
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"%PDF-1.4 fake")
+    _drive_process_job(monkeypatch, client, is_pdf=True)
+    assert client.put_body == b"<score>fused</score>"
+    assert 4 in keys                                  # geom re-decoded under Clarity's detected key
+    assert seen["g"] == b"<score>geomKEYED</score>"   # the re-keyed geom bytes were fused
+
+
+def test_geom_fusion_cmajor_does_not_rekey(tmp_path, monkeypatch):
+    # Clarity reports C major (fifths 0): geom is NOT re-decoded; the C-assumed geom bytes are fused
+    # unchanged, so the common case stays byte-identical (the key fix is never-worse).
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    geom_c = tmp_path / "geom_c.musicxml"; geom_c.write_text("<score>geomC</score>")
+    clar = tmp_path / "clarity.musicxml"; clar.write_text("<score><fifths>0</fifths></score>")
+    monkeypatch.setattr(worker, "rasterize_if_pdf", lambda p, w: ("/fake/stitched.png", True))
+
+    def fake_run_geom(image, workdir, **k):
+        if k.get("key_fifths"):
+            raise AssertionError("geom must not be re-run for a C-major (fifths 0) piece")
+        return str(geom_c)
+
+    monkeypatch.setattr(worker, "run_geom", fake_run_geom)
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clar))
+    seen = {}
+
+    def fake_fuse(g, c):
+        seen["g"] = g
+        return b"<score>fused</score>"
+
+    monkeypatch.setattr(worker.fusion, "fuse", fake_fuse)
+
+    def must_not_run(*a, **k):
+        raise AssertionError("no later engine runs when fusion produced a result")
+
+    monkeypatch.setattr(worker, "_select_ensemble", must_not_run)
+    monkeypatch.setattr(worker, "_select_legacy", must_not_run)
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"%PDF-1.4 fake")
+    _drive_process_job(monkeypatch, client, is_pdf=True)
+    assert seen["g"] == b"<score>geomC</score>"       # C-assumed geom bytes fused unchanged
 
 
 def test_geom_fusion_non_pdf_uses_geom_alone(tmp_path, monkeypatch):

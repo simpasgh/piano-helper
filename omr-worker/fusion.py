@@ -22,9 +22,11 @@ on pitch). Beyond per-note durations, fusion also adopts Clarity's declared TIME
 fakes 4/4), so a non-4/4 piece declares its real meter: this renders it at true width and lets the
 rhythm-repair post-transform corroborate the bar capacity instead of bailing on a wrong meter. The
 time sig does not affect the rhythm/pitch metric (omr_eval keys on meter-agnostic per-(measure,staff)
-(midi,dur16) multisets), so adopting the real meter cannot regress note_f1/note_dur_f1. Borrowing
-Clarity's KEY SIGNATURE (to fix geom's faked key on non-C pieces) is still a deliberate later
-enhancement, validated on a non-C piece first (all current eval pieces are C major, fifths=0).
+(midi,dur16) multisets), so adopting the real meter cannot regress note_f1/note_dur_f1. geom's KEY
+SIGNATURE is fixed UPSTREAM of fuse: the worker re-decodes geom under Clarity's detected key on a
+non-C piece (worker._rekey_geom; validated 2026-06-04 on transposed E/Eb pieces, non-C note_f1
+~0.41 -> ~0.84 with C major byte-identical), so by the time fuse() runs geom's pitch AND key are
+already correct and fuse just reads the key from geom (_read_fifths), never from Clarity directly.
 
 PURE stdlib + the existing pure helpers (reconcile.to_events, omr_eval._dur16,
 llm_omr.score_json_to_musicxml). NEVER raises: on ANY failure returns the geom MusicXML unchanged
@@ -313,8 +315,9 @@ def fuse(geom_xml, clarity_xml) -> Optional[bytes]:
     capacity 16 at divisions=4) is normalised to 4/4, so a Clarity cut-time MISREAD of a genuine
     4/4 piece cannot relabel it (the borrow was already metric-neutral there: this fixes only the
     printed glyph). Genuinely-different meters (2/4, 3/4, 6/8, ...) still borrow Clarity's real one.
-    The key still comes from geom (a non-C key borrow is a deliberate later enhancement, validated
-    on a non-C piece first). Returns fused MusicXML bytes. NEVER raises: on any failure returns
+    The key comes from geom (_read_fifths), which the worker now re-decodes under Clarity's detected
+    key on non-C pieces UPSTREAM of fuse (worker._rekey_geom), so geom's key here is already correct.
+    Returns fused MusicXML bytes. NEVER raises: on any failure returns
     geom_xml (never worse than geom alone); returns clarity_xml if geom produced nothing, and None
     only if both are empty."""
     try:

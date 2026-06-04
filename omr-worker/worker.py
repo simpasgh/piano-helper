@@ -745,11 +745,13 @@ def run_clarity_stream(pdf_path, workdir, on_system, timeout=None):
     return final_bytes
 
 
-def geom_command(python, script, image_path, weights, out_path, device="cpu"):
+def geom_command(python, script, image_path, weights, out_path, device="cpu", key_fifths=None):
     """Build the trained-geometric-engine argv. Pure so it is unit-testable without running the
     engine (mirrors clarity_command). Runs geom_detector.py's CLI on a RASTER image (a PDF is
-    rasterized first, like oemer)."""
-    return [
+    rasterized first, like oemer). key_fifths (when not None) pins the key signature for the decode
+    via --key-fifths so geom reads non-C accidentals correctly instead of assuming C major; the
+    fusion path supplies Clarity's detected key on non-C pieces. None keeps geom's C-major default."""
+    cmd = [
         python,
         script,
         image_path,
@@ -760,13 +762,18 @@ def geom_command(python, script, image_path, weights, out_path, device="cpu"):
         "--device",
         device,
     ]
+    if key_fifths is not None:
+        cmd += ["--key-fifths", str(int(key_fifths))]
+    return cmd
 
 
-def run_geom(image_path, workdir, timeout=None):
+def run_geom(image_path, workdir, timeout=None, key_fifths=None):
     """Run our trained geometric engine as a subprocess in its OWN torch venv. Returns the output
     .musicxml path or None on ANY failure (env unset/missing, subprocess error, timeout, or exit 2
     = nothing recognized) so the caller falls back to the existing engines. Never raises into
-    process_job. Gated by GEOM_PYTHON + GEOM_WEIGHTS being set and present on disk."""
+    process_job. Gated by GEOM_PYTHON + GEOM_WEIGHTS being set and present on disk. key_fifths (when
+    not None) is forwarded to the geom CLI's --key-fifths so the decode uses that key instead of
+    assuming C major (the fusion path passes Clarity's detected key on non-C pieces)."""
     python = os.environ.get(GEOM_PYTHON_ENV)
     weights = os.environ.get(GEOM_WEIGHTS_ENV)
     if not python or not weights:
@@ -778,7 +785,7 @@ def run_geom(image_path, workdir, timeout=None):
     out_path = os.path.join(workdir, "geom.musicxml")
     try:
         subprocess.run(
-            geom_command(python, script, image_path, weights, out_path),
+            geom_command(python, script, image_path, weights, out_path, key_fifths=key_fifths),
             check=True,
             cwd=workdir,
             timeout=timeout,
@@ -793,6 +800,28 @@ def run_geom(image_path, workdir, timeout=None):
     if os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
         return out_path
     return None
+
+
+def _rekey_geom(geom_bytes, clarity_bytes, rerun_keyed):
+    """Re-decode geom under Clarity's detected key on a NON-C piece, else return geom unchanged.
+
+    The notehead geom decode assumes C major, so on a non-C piece it reads the key-signature
+    accidentals a semitone off (validated 2026-06-04 on transposed pieces: non-C note_f1 ~0.41 vs
+    ~0.84 at the right key). Clarity (already in the fusion) detects the key reliably, so when it
+    reports a NON-ZERO key we re-run geom with that key (rerun_keyed(fifths) -> bytes or None) and
+    fuse the re-keyed pitch. A key of 0 / no Clarity / any failure returns the original C-assumed
+    geom bytes, so C-major uploads (the common case) stay BYTE-IDENTICAL and this is never-worse.
+    NEVER raises."""
+    try:
+        if not geom_bytes or not clarity_bytes:
+            return geom_bytes
+        ck = fusion._read_fifths(clarity_bytes)
+        if not ck:  # 0 (C major) or unreadable -> no change
+            return geom_bytes
+        rekeyed = rerun_keyed(ck)
+        return rekeyed or geom_bytes
+    except Exception:
+        return geom_bytes
 
 
 # --- Pure MusicXML post-transforms -------------------------------------------------------
@@ -1408,9 +1437,11 @@ def split_pdf_pages(input_path, workdir):
     return pages
 
 
-def _geom_page_body(page_pdf, page_dir):
+def _geom_page_body(page_pdf, page_dir, key_fifths=None):
     """Rasterize a single-page PDF and run geom on it, returning its MusicXML bytes or None. NEVER
-    raises (mirrors process_job._geom_body for the per-page path)."""
+    raises (mirrors process_job._geom_body for the per-page path). key_fifths (when set) is forwarded
+    to geom's decode so the per-page fusion can re-key it under Clarity's detected key on a non-C
+    page."""
     try:
         image, _ = rasterize_if_pdf(page_pdf, page_dir)
     except Exception as err:
@@ -1418,7 +1449,7 @@ def _geom_page_body(page_pdf, page_dir):
         return None
     if image is None:
         return None
-    gp = run_geom(image, page_dir)
+    gp = run_geom(image, page_dir, key_fifths=key_fifths)
     if not gp:
         return None
     try:
@@ -1448,6 +1479,10 @@ def _transcribe_one_page(page_pdf, page_dir):
                 clarity_bytes = None
         if not geom_bytes and not clarity_bytes:
             return None
+        # Non-C page: re-decode geom under Clarity's detected key (notehead geom otherwise assumes
+        # C major and reads key-signature accidentals a semitone off). No-op on C major.
+        geom_bytes = _rekey_geom(geom_bytes, clarity_bytes,
+                                 lambda ck: _geom_page_body(page_pdf, page_dir, key_fifths=ck))
         fused = fusion.fuse(geom_bytes, clarity_bytes)
         if not fused:
             return None
@@ -1521,6 +1556,10 @@ def _fusion_block_stream(job_id, input_path, workdir, geom_body, publish_partial
                 log("%s block-stream: geom failed at final (%r)" % (job_id, err))
                 geom_holder["bytes"] = None
         geom_bytes = geom_holder.get("bytes")
+        # Non-C piece: re-decode geom under Clarity's whole-file key for the final fuse. The
+        # per-system partials keep geom's fast C-assumed pitch; only the complete result is re-keyed.
+        geom_bytes = _rekey_geom(geom_bytes, clarity_whole,
+                                 lambda ck: geom_body(key_fifths=ck))
         fused_final = fusion.fuse(geom_bytes, clarity_whole)
         if not fused_final:
             return None
@@ -1637,9 +1676,11 @@ def process_job(client, bucket, job_id):
                 log("geom input copy failed for %s (%r); geom disabled this job" % (job_id, err))
                 geom_input_png = None
 
-        def _geom_body():
+        def _geom_body(key_fifths=None):
             """Run geom on this upload (raster prep + run_geom) and return its MusicXML bytes, or
-            None on decline/failure. Shared by the primary and fallback positions below."""
+            None on decline/failure. Shared by the primary and fallback positions below. key_fifths
+            (when set) is forwarded to geom's decode so the fusion can re-key it under Clarity's
+            detected key on a non-C piece."""
             try:
                 geom_image = (
                     rasterize_if_pdf(input_path, workdir)[0] if is_pdf_input else geom_input_png
@@ -1649,7 +1690,7 @@ def process_job(client, bucket, job_id):
                 return None
             if geom_image is None:
                 return None
-            gp = run_geom(geom_image, workdir)
+            gp = run_geom(geom_image, workdir, key_fifths=key_fifths)
             if not gp:
                 return None
             with open(gp, "rb") as fh:
@@ -1708,6 +1749,10 @@ def process_job(client, bucket, job_id):
                             log("fusion: clarity read failed for %s (%r)" % (job_id, err))
                 else:
                     geom_bytes = _geom_body()
+                # On a non-C piece, re-decode geom under Clarity's detected key (notehead geom
+                # otherwise assumes C major and reads key-signature accidentals a semitone off).
+                geom_bytes = _rekey_geom(geom_bytes, clarity_bytes,
+                                         lambda ck: _geom_body(key_fifths=ck))
                 fused = fusion.fuse(geom_bytes, clarity_bytes)
                 if fused:
                     body, source = fused, "fusion"
