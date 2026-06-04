@@ -14,6 +14,9 @@ import progressive
 _PARTIAL_RE = re.compile(r'name="omr-status"\s*>\s*partial')
 _FAILED_RE = re.compile(r'name="omr-status"\s*>\s*failed')
 _VERSION_RE = re.compile(r'name="omr-version"\s*>\s*(\d+)')
+# The system-frontier regexes the client (src/omr.ts) uses for the block-by-block loader.
+_SYS_TOTAL_RE = re.compile(r'name="omr-systems-total"\s*>\s*(\d+)')
+_SYS_DONE_RE = re.compile(r'name="omr-systems-done"\s*>\s*(\d+)')
 
 
 def _xml(measures, divisions=4):
@@ -75,6 +78,52 @@ def test_stamp_partial_returns_input_unchanged_on_garbage():
     # result rather than corrupt anything).
     junk = b"not xml at all"
     assert progressive.stamp_partial(junk, 1) == junk
+
+
+def test_stamp_partial_stamps_system_frontier_when_given():
+    # The block-by-block path passes the frontier (total systems + how many are done in this partial)
+    # so the client knows how many skeleton rows to draw and which system is active.
+    stamped = progressive.stamp_partial(_xml(_one_note_measures(["C"])), 1,
+                                        systems_total=6, systems_done=2)
+    text = stamped.decode("utf-8")
+    assert _SYS_TOTAL_RE.search(text).group(1) == "6"
+    assert _SYS_DONE_RE.search(text).group(1) == "2"
+    # The status/version markers still ride alongside the frontier.
+    assert _PARTIAL_RE.search(text)
+    assert _VERSION_RE.search(text).group(1) == "1"
+
+
+def test_stamp_partial_omits_frontier_when_not_given():
+    # The fast-then-refine and per-page partials carry the WHOLE page so far, with no frontier; those
+    # fields must be ABSENT so the client falls back to its full-stage loader for them.
+    stamped = progressive.stamp_partial(_xml(_one_note_measures(["C"])), 1)
+    text = stamped.decode("utf-8")
+    assert _SYS_TOTAL_RE.search(text) is None
+    assert _SYS_DONE_RE.search(text) is None
+
+
+def test_stamp_partial_omits_frontier_when_only_one_side_given():
+    # Defensive: both halves of the frontier are required; a lone total (or lone done) is not enough
+    # to lay out the loader, so neither field is stamped.
+    only_total = progressive.stamp_partial(_xml(_one_note_measures(["C"])), 1, systems_total=6)
+    only_done = progressive.stamp_partial(_xml(_one_note_measures(["C"])), 1, systems_done=2)
+    for stamped in (only_total, only_done):
+        text = stamped.decode("utf-8")
+        assert _SYS_TOTAL_RE.search(text) is None
+        assert _SYS_DONE_RE.search(text) is None
+
+
+def test_stamp_partial_frontier_is_idempotent_on_restamp():
+    once = progressive.stamp_partial(_xml(_one_note_measures(["C"])), 1,
+                                     systems_total=6, systems_done=1)
+    twice = progressive.stamp_partial(once, 2, systems_total=6, systems_done=2)
+    fields = ET.fromstring(twice).findall("identification/miscellaneous/miscellaneous-field")
+    by_name = {}
+    for f in fields:
+        by_name.setdefault(f.get("name"), []).append(f.text)
+    # Exactly one of each frontier field, updated in place (no duplicates on re-stamp).
+    assert by_name.get("omr-systems-total") == ["6"]
+    assert by_name.get("omr-systems-done") == ["2"]
 
 
 def test_is_partial_marked_detects_the_in_body_marker():

@@ -1983,15 +1983,22 @@ def test_fusion_block_stream_final_equals_whole_file_fusion(tmp_path, monkeypatc
             return fh.read()
 
     published = []
-    final = worker._fusion_block_stream("job", "in.pdf", str(tmp_path), geom_body,
-                                        lambda b: published.append(b))
+    final = worker._fusion_block_stream(
+        "job", "in.pdf", str(tmp_path), geom_body,
+        lambda b, systems_total=None, systems_done=None: published.append(
+            (b, systems_total, systems_done)))
 
     # The complete body is byte-identical to the whole-file fusion path.
     assert final == worker.fusion.fuse(geom_whole, clarity_whole)
     # Exactly one partial was published (system 1; the last system is the returned complete).
     assert len(published) == 1
-    # The partial is a real, non-empty grand-staff score (geom's full pitch shown, system-1 rhythm).
-    assert _mcount(published[0]) == 2  # geom's measures all present from the first partial
+    body, total, done = published[0]
+    # FINISHED-ONLY: the partial contains ONLY the first system's measure (the Clarity prefix had 1
+    # measure), not all of geom's 2 measures. The pending system is absent so the client skeletons it.
+    assert _mcount(body) == 1
+    # The frontier is stamped raw on the partial body (worker.publish_partial stamps it into XML; here
+    # the raw body is handed straight through, so we assert the kwargs the callback forwarded).
+    assert (total, done) == (2, 1)
 
 
 def test_fusion_block_stream_stream_unavailable_returns_none(tmp_path, monkeypatch):
@@ -2028,8 +2035,9 @@ def test_progressive_blocks_wired_into_process_job(tmp_path, monkeypatch):
     monkeypatch.setenv("OMR_PROGRESSIVE_BLOCKS", "1")
 
     def fake_block_stream(job_id, input_path, workdir, geom_body, publish_partial):
-        publish_partial(_pg_xml(["C"]))        # system 1 partial
-        publish_partial(_pg_xml(["C", "D"]))   # system 2 partial
+        # Each partial holds ONLY the finished systems + carries the frontier (total, done).
+        publish_partial(_pg_xml(["C"]), systems_total=3, systems_done=1)        # system 1 partial
+        publish_partial(_pg_xml(["C", "D"]), systems_total=3, systems_done=2)   # system 2 partial
         return _pg_xml(["C", "D", "E"])        # final -> complete
 
     monkeypatch.setattr(worker, "_fusion_block_stream", fake_block_stream)
@@ -2049,6 +2057,13 @@ def test_progressive_blocks_wired_into_process_job(tmp_path, monkeypatch):
     # Monotonic omr-version on the partials (1 then 2), in the body the browser reads.
     assert b'name="omr-version">1' in client.puts[0]["body"]
     assert b'name="omr-version">2' in client.puts[1]["body"]
+    # The system FRONTIER is stamped INTO each partial body so the client lays out the loader.
+    assert b'name="omr-systems-total">3' in client.puts[0]["body"]
+    assert b'name="omr-systems-done">1' in client.puts[0]["body"]
+    assert b'name="omr-systems-total">3' in client.puts[1]["body"]
+    assert b'name="omr-systems-done">2' in client.puts[1]["body"]
+    # The COMPLETE write carries no frontier (it is the whole score, no per-system loader).
+    assert b'omr-systems-total' not in client.puts[2]["body"]
     assert _mcount(client.puts[2]["body"]) == 3
 
 

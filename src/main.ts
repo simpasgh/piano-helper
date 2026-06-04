@@ -54,12 +54,22 @@ function pitchLabel(midi: number, spelling?: { letter: import("./piano").NoteLet
   const mode = labelMode === "off" ? "letters" : labelMode;
   return midiToBarLabel(midi, mode, spelling);
 }
-import { submitOmr, pollOmrResult, isCancelled } from "./omr";
+import {
+  submitOmr,
+  pollOmrResult,
+  isCancelled,
+  type SystemFrontier,
+} from "./omr";
 import {
   scanOverlayTitle,
   shouldApplyResult,
   type ScanOverlayKind,
 } from "./scan-overlay";
+import { shouldShowSystemLoader } from "./streaming-loader";
+import {
+  renderStreamOverlay,
+  clearStreamOverlay,
+} from "./sheet-stream-overlay";
 import { chooseVideoFormat, buildExportFilename } from "./recorder";
 import {
   uniqueOnsets,
@@ -1587,6 +1597,11 @@ async function loadScoreXml(
     return;
   }
 
+  // A FRESH (non-upgrade) load replaces the score entirely, so drop any leftover streaming loader
+  // from a previous job. The streaming partials after the first are upgrades (returned above), so
+  // their per-partial loader render is not disturbed; only a genuinely new score clears here.
+  clearStreamOverlay(sheetContainer);
+
   // Issue #44: default the sheet name to the MusicXML title when present, else the file name.
   // `osmd.Sheet.TitleString` is the parsed work title; guard defensively in case a score has
   // no title metadata.
@@ -1619,6 +1634,7 @@ async function loadAudioFile(file: File, shouldApply: () => boolean): Promise<vo
     // Nothing was rendered yet; clearing is a no-op.
   }
   renderSheetLabels(osmd, sheetContainer, labelMode); // empties the overlay too
+  clearStreamOverlay(sheetContainer); // audio has no per-system stream; drop any leftover loader
 
   // Lazy-load the transcription module (TensorFlow.js + Basic Pitch is ~3 MB) so it is
   // fetched only when a user actually transcribes audio, not on every page load.
@@ -1937,6 +1953,9 @@ function cancelScanOverlay(): void {
   if (scanOverlay.hidden) return;
   cancelRequested = true;
   hideScanOverlay();
+  // Drop any per-system streaming loader so its skeleton rows do not linger over the restored slot
+  // (a cancel after the first streaming partial leaves the loader up otherwise).
+  clearStreamOverlay(sheetContainer);
   setBusyUI(false);
   restoreSheetName();
 }
@@ -1972,7 +1991,7 @@ async function scanSheet(file: File): Promise<void> {
       // keeps polling after the overlay is gone (the controls are re-enabled on the first partial),
       // so a stale loop must stop once the user starts another scan.
       isCancelledRequested: () => cancelRequested || generation !== jobGeneration,
-      onPartial: async (partialXml) => {
+      onPartial: async (partialXml, _version, frontier) => {
         if (!shouldApplyResult(generation, jobGeneration, cancelRequested)) return;
         // First partial: drop the blocking overlay and re-enable the controls so the user can see
         // and play the score-so-far while the rest is still being recognized.
@@ -1982,11 +2001,32 @@ async function scanSheet(file: File): Promise<void> {
         }
         await loadScoreXml(partialXml, file.name, { upgrade: shownPartial });
         shownPartial = true;
-        showStatus("Showing notes. Refining the rest...");
+        // Block-by-block streaming partial: it carries the system FRONTIER and contains ONLY the
+        // finished systems, so the per-system "recognition scan-line" loader REPLACES the #86
+        // blocking overlay for the sheet pane (the user watches the page fill in). Drawn AFTER the
+        // partial engraves so the finished systems exist to measure. A frontier-less partial
+        // (fast-then-refine) keeps the old generic status and shows no per-system loader.
+        if (shouldShowSystemLoader(frontier)) {
+          const f = frontier as SystemFrontier;
+          renderStreamOverlay(osmd, sheetContainer, f.done, f.total);
+          // The active system is the one after the finished ones (1-based for the reader); once all
+          // are finalized the next complete write lands momentarily.
+          const active = Math.min(f.done + 1, f.total);
+          showStatus(
+            f.done >= f.total
+              ? "Finishing the score..."
+              : `Recognizing system ${active} of ${f.total}...`,
+          );
+        } else {
+          clearStreamOverlay(sheetContainer);
+          showStatus("Showing notes. Refining the rest...");
+        }
       },
     });
     if (!shouldApplyResult(generation, jobGeneration, cancelRequested)) return;
     await loadScoreXml(xml, file.name, { upgrade: shownPartial });
+    // The complete score is engraved; tear down the per-system loader so no skeleton rows linger.
+    clearStreamOverlay(sheetContainer);
     if (shownPartial) restoreSheetName(); // the refine is done; drop the "Refining..." line.
   } catch (err) {
     // Superseded by a newer scan: drop this one silently so its late settle cannot stomp the new
@@ -1998,6 +2038,9 @@ async function scanSheet(file: File): Promise<void> {
     // the slot quietly.
     if (shownPartial && !isCancelled(err)) {
       console.error("Scan refine failed; keeping the partial result:", err);
+      // The refine is over (it failed), so no more systems are coming; drop the per-system loader so
+      // the last partial's skeleton rows do not linger forever over the kept result.
+      clearStreamOverlay(sheetContainer);
       showStatus("Showing notes (could not refine the rest).");
       return;
     }

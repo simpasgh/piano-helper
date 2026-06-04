@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Piano Helper - OMR streaming loader concepts</title>
+<style>
+  /* ---- Nocturne tokens (mirrors src/style.css :root) ------------------- */
+  :root {
+    --bg: #0b0a0d;            /* warm ebony */
+    --accent: #d8a23a;        /* brass */
+    --accent-deep: #a9761f;   /* deep brass */
+    --accent-glow: rgba(216, 162, 58, 0.55);
+    --focus-ring: #f0c66b;
+    --text: #efe9dc;          /* warm ivory */
+    --text-muted: rgba(239, 233, 220, 0.62);
+    --text-faint: rgba(239, 233, 220, 0.40);
+    --bar-surface: rgba(20, 18, 14, 0.92);
+    --bar-border: rgba(239, 233, 220, 0.10);
+    --ghost-bg: rgba(239, 233, 220, 0.03);
+    --ghost-bg-hover: rgba(216, 162, 58, 0.13);
+    --ghost-border: rgba(239, 233, 220, 0.14);
+    --ghost-border-hover: rgba(216, 162, 58, 0.55);
+
+    /* Sheet pane "real paper" cream + brass-brown ink (from #sheet) */
+    --paper: #f6f1e6;
+    --ink: #20242b;           /* near-black engraving ink, close to Verovio's */
+    --ink-soft: #6b4f1f;      /* brass-brown annotation ink */
+    --staff-line: rgba(32, 36, 43, 0.78);
+
+    /* Loader-specific tokens proposed in the spec */
+    --scan-line: var(--accent);
+    --scan-glow: var(--accent-glow);
+    --skeleton-base: rgba(107, 79, 31, 0.16);   /* brass-brown wash on paper */
+    --skeleton-sheen: rgba(216, 162, 58, 0.42); /* brass sheen sweep */
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { height: 100%; }
+  body {
+    background:
+      radial-gradient(1200px 500px at 50% -10%, #15131a 0%, var(--bg) 60%);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 1.5rem clamp(0.75rem, 4vw, 3rem) 3rem;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1 {
+    font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    font-weight: 600;
+    font-size: 1.35rem;
+    letter-spacing: 0.02em;
+    color: var(--accent);
+    text-shadow: 0 0 10px var(--accent-glow);
+  }
+  .sub { color: var(--text-muted); font-size: 0.88rem; margin-top: 0.3rem; max-width: 60ch; line-height: 1.5; }
+
+  /* ---- control bar ----------------------------------------------------- */
+  .toolbar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem;
+    margin: 1.1rem 0 0.4rem;
+    padding: 0.6rem 0.7rem;
+    background: var(--bar-surface);
+    border: 1px solid var(--bar-border);
+    border-radius: 12px;
+  }
+  .toolbar .label { color: var(--text-faint); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; margin-right: 0.2rem; }
+  .seg { display: inline-flex; gap: 0.25rem; }
+  button.opt {
+    appearance: none; cursor: pointer;
+    background: var(--ghost-bg);
+    color: var(--text);
+    border: 1px solid var(--ghost-border);
+    border-radius: 8px;
+    padding: 0.45rem 0.8rem;
+    font-size: 0.82rem; font-weight: 600;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+  }
+  button.opt:hover { background: var(--ghost-bg-hover); border-color: var(--ghost-border-hover); }
+  button.opt:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+  button.opt[aria-pressed="true"] {
+    background: rgba(216, 162, 58, 0.20);
+    border-color: var(--accent);
+    color: var(--focus-ring);
+    box-shadow: 0 0 14px rgba(216, 162, 58, 0.25);
+  }
+  .spacer { flex: 1 1 8px; }
+  .readout { color: var(--text-muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+  .readout b { color: var(--text); font-weight: 600; }
+
+  /* concept blurb under the toolbar */
+  .blurb {
+    margin: 0.2rem 0 0.9rem;
+    color: var(--text-muted);
+    font-size: 0.84rem; line-height: 1.5;
+    min-height: 2.4em;
+    max-width: 78ch;
+  }
+  .blurb b { color: var(--accent); font-weight: 600; }
+
+  /* ---- the sheet pane (cream paper, like #sheet) ----------------------- */
+  .sheet {
+    position: relative;
+    background: var(--paper);
+    border-radius: 10px;
+    padding: 1.4rem 1.6rem;
+    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(0,0,0,0.25);
+    overflow: hidden;
+  }
+  /* a faint top sheen so it reads like paper under a stage lamp */
+  .sheet::before {
+    content: "";
+    position: absolute; inset: 0;
+    background: radial-gradient(120% 60% at 50% -20%, rgba(255,255,255,0.55), transparent 60%);
+    pointer-events: none;
+  }
+
+  .systems { position: relative; display: flex; flex-direction: column; gap: 26px; }
+
+  /* one system = one staff-line row (a Verovio <g class="system">) */
+  .system { position: relative; height: 86px; }
+
+  /* the grand staff: two 5-line staves (treble + bass) drawn with gradients */
+  .staff {
+    position: absolute; left: 0; right: 0;
+    height: 33px;
+    background-image: repeating-linear-gradient(
+      to bottom,
+      transparent 0, transparent 7px,
+      var(--staff-line) 7px, var(--staff-line) 8px
+    );
+  }
+  .staff.treble { top: 6px; }
+  .staff.bass { bottom: 6px; }
+  /* the brace + barlines at the edges, so an empty system still reads as music ruling */
+  .system .barline { position: absolute; top: 6px; bottom: 6px; width: 1.5px; background: var(--staff-line); }
+  .system .barline.l { left: 0; }
+  .system .barline.r { right: 0; }
+  .system .brace { position: absolute; left: -7px; top: 4px; bottom: 4px; width: 3px; border-radius: 3px; background: var(--ink); opacity: 0.55; }
+  .system .clef { position: absolute; left: 6px; color: var(--ink); font-size: 26px; line-height: 1; opacity: 0.85; }
+  .system .clef.treble { top: 2px; }
+  .system .clef.bass { bottom: 0px; font-size: 22px; }
+
+  /* a real notehead (an ellipse) + stem, materialized when a system locks in */
+  .note {
+    position: absolute;
+    width: 11px; height: 8px;
+    border-radius: 50%;
+    transform: rotate(-20deg);
+  }
+  .note .stem { position: absolute; right: -0.5px; bottom: 2px; width: 1.6px; height: 22px; background: currentColor; transform: rotate(20deg); transform-origin: bottom; }
+  .note.down .stem { right: auto; left: -0.5px; bottom: auto; top: 2px; transform: rotate(20deg); transform-origin: top; }
+
+  /* ===================================================================== */
+  /*  Per-state base: the JS sets data-state on each .system               */
+  /*    done     -> crisp real notes, no animation                          */
+  /*    active   -> the system currently being decoded                      */
+  /*    pending  -> empty/skeleton staff, animated loading                  */
+  /* ===================================================================== */
+
+  /* DONE: notes are full-ink, fully opaque. Staff lines at full strength. */
+  .system[data-state="done"] .note { color: var(--ink); opacity: 1; }
+  .system[data-state="done"] .staff { opacity: 1; }
+
+  /* notes start invisible; they fade/scale in the moment their system locks */
+  .note { color: var(--ink); opacity: 0; }
+  .system[data-state="done"] .note { animation: note-pop 360ms cubic-bezier(0.2, 0.9, 0.3, 1) both; }
+  @keyframes note-pop {
+    from { opacity: 0; transform: translateY(3px) rotate(-20deg) scale(0.6); }
+    to   { opacity: 1; transform: translateY(0)   rotate(-20deg) scale(1); }
+  }
+
+  /* PENDING + ACTIVE staff lines read fainter than a finished system */
+  .system[data-state="pending"] .staff,
+  .system[data-state="active"] .staff { opacity: 0.5; }
+  .system[data-state="pending"] .brace,
+  .system[data-state="pending"] .clef,
+  .system[data-state="active"] .brace,
+  .system[data-state="active"] .clef { opacity: 0.35; }
+
+  /* ===================================================================== */
+  /*  CONCEPT A - "Recognition scan-line" (RECOMMENDED)                     */
+  /*  A brass sweep rides down the active system; a brass-brown skeleton    */
+  /*  shimmer fills the pending systems below.                              */
+  /* ===================================================================== */
+
+  /* active system: a horizontal brass beam sweeps top->bottom, leaving a
+     faint brass wash above it (the "recognized so far" band). */
+  .concept-scan .system[data-state="active"] .scanband {
+    position: absolute; left: 0; right: 0; top: 0; height: 100%;
+    pointer-events: none; overflow: hidden;
+  }
+  .concept-scan .system[data-state="active"] .scanband::before {
+    /* the recognized wash that grows from the top as the beam descends */
+    content: ""; position: absolute; left: 0; right: 0; top: 0;
+    background: linear-gradient(to bottom, rgba(216,162,58,0.16), rgba(216,162,58,0.04));
+    height: 100%;
+    transform-origin: top;
+    animation: scan-wash 2.4s ease-in-out infinite;
+  }
+  .concept-scan .system[data-state="active"] .scanband::after {
+    /* the bright sweep beam itself */
+    content: ""; position: absolute; left: -4%; right: -4%; height: 10px;
+    top: 0;
+    background: linear-gradient(to bottom, transparent, var(--scan-line) 45%, #fff6e2 50%, var(--scan-line) 55%, transparent);
+    filter: drop-shadow(0 0 6px var(--scan-glow));
+    border-radius: 6px;
+    animation: scan-beam 2.4s ease-in-out infinite;
+  }
+  @keyframes scan-beam {
+    0%   { top: -6px; opacity: 0; }
+    12%  { opacity: 1; }
+    88%  { opacity: 1; }
+    100% { top: calc(100% - 4px); opacity: 0; }
+  }
+  @keyframes scan-wash {
+    0%   { transform: scaleY(0.02); }
+    100% { transform: scaleY(1); }
+  }
+
+  /* pending systems: skeleton shimmer bars sitting ON the staff (note-shaped
+     blocks, NOT fake notes - clearly placeholder rounded blocks), with a
+     brass sheen sweeping left->right. Reads as "content loading here". */
+  .concept-scan .system[data-state="pending"] .skel,
+  .concept-shimmer .system[data-state="pending"] .skel,
+  .concept-shimmer .system[data-state="active"] .skel {
+    position: absolute;
+    height: 9px; border-radius: 5px;
+    background: var(--skeleton-base);
+    overflow: hidden;
+  }
+  .concept-scan .system[data-state="pending"] .skel::after,
+  .concept-shimmer .system[data-state="pending"] .skel::after,
+  .concept-shimmer .system[data-state="active"] .skel::after {
+    content: ""; position: absolute; inset: 0;
+    background: linear-gradient(100deg, transparent 20%, var(--skeleton-sheen) 50%, transparent 80%);
+    transform: translateX(-130%);
+    animation: skel-sheen 1.8s ease-in-out infinite;
+  }
+  /* stagger the sheen so the whole page ripples instead of pulsing in lockstep */
+  .system:nth-child(2) .skel::after { animation-delay: 0.15s; }
+  .system:nth-child(3) .skel::after { animation-delay: 0.30s; }
+  .system:nth-child(4) .skel::after { animation-delay: 0.45s; }
+  .system:nth-child(5) .skel::after { animation-delay: 0.60s; }
+  .system:nth-child(6) .skel::after { animation-delay: 0.75s; }
+  @keyframes skel-sheen {
+    0%   { transform: translateX(-130%); }
+    60%  { transform: translateX(130%); }
+    100% { transform: translateX(130%); }
+  }
+
+  /* The scan beam lives ONLY on the active system in concept A. Hidden everywhere else
+     (all other concepts, and the pending/done systems within concept A). */
+  .scanband { display: none; }
+  .concept-scan .system[data-state="active"] .scanband { display: block; }
+  /* In concept A the active system uses the scan beam, NOT skeleton bars, so hide its skeletons;
+     pending systems use skeletons (above), with no scan beam. */
+  .concept-scan .system[data-state="active"] .skel { display: none; }
+
+  /* ===================================================================== */
+  /*  CONCEPT B - "Skeleton shimmer" (alternative)                         */
+  /*  Modern content-loader. Every not-done system (pending AND active)     */
+  /*  shows shimmering note-shaped skeleton blocks; the active one shimmers */
+  /*  brighter + faster to read as "this row is being worked on now".      */
+  /* ===================================================================== */
+  .concept-shimmer .scanband { display: none; }
+  .concept-shimmer .system[data-state="active"] .skel { background: rgba(216, 162, 58, 0.22); }
+  .concept-shimmer .system[data-state="active"] .skel::after { animation-duration: 1.1s; }
+  .concept-shimmer .system[data-state="active"] { outline: none; }
+  /* a thin brass left-edge marker shows which row is active in concept B */
+  .concept-shimmer .system[data-state="active"]::before {
+    content: ""; position: absolute; left: -10px; top: 2px; bottom: 2px; width: 3px;
+    border-radius: 3px; background: var(--accent);
+    box-shadow: 0 0 10px var(--accent-glow);
+    animation: edge-pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes edge-pulse { 0%,100% { opacity: 0.55; } 50% { opacity: 1; } }
+
+  /* ===================================================================== */
+  /*  CONCEPT C - "Blink / pulse" (alternative, calmest)                   */
+  /*  No sweep, no shimmer. Empty staves gently breathe in opacity; the     */
+  /*  active row breathes a touch brighter with a brass tint. Slow (well    */
+  /*  under 3 Hz): a 2.6s cycle = ~0.38 Hz.                                 */
+  /* ===================================================================== */
+  .concept-blink .scanband { display: none; }
+  .concept-blink .system[data-state="pending"] .skel,
+  .concept-blink .system[data-state="active"] .skel { display: none; }
+
+  .concept-blink .system[data-state="pending"] .staff {
+    animation: staff-breathe 2.6s ease-in-out infinite;
+  }
+  .concept-blink .system[data-state="active"] .staff {
+    animation: staff-breathe-active 2.0s ease-in-out infinite;
+  }
+  .system:nth-child(2) .staff { animation-delay: 0.12s; }
+  .system:nth-child(3) .staff { animation-delay: 0.24s; }
+  .system:nth-child(4) .staff { animation-delay: 0.36s; }
+  .system:nth-child(5) .staff { animation-delay: 0.48s; }
+  .system:nth-child(6) .staff { animation-delay: 0.60s; }
+  @keyframes staff-breathe {
+    0%, 100% { opacity: 0.28; }
+    50%      { opacity: 0.62; }
+  }
+  @keyframes staff-breathe-active {
+    0%, 100% { opacity: 0.45; filter: none; }
+    50%      { opacity: 0.85; filter: drop-shadow(0 0 5px var(--accent-glow)); }
+  }
+  /* tint the active staff brass in concept C so it stands apart from pending */
+  .concept-blink .system[data-state="active"] .staff {
+    background-image: repeating-linear-gradient(
+      to bottom, transparent 0, transparent 7px,
+      var(--accent) 7px, var(--accent) 8px);
+  }
+
+  /* ===================================================================== */
+  /*  REDUCED MOTION - calm, non-animated fallback for every concept.      */
+  /*  Toggled by .reduce-motion on the stage (the demo's manual switch);   */
+  /*  the real app keys this off @media (prefers-reduced-motion: reduce).  */
+  /* ===================================================================== */
+  .reduce-motion * { animation: none !important; transition: none !important; }
+  /* pending: a single static brass-brown wash band on the empty staff +
+     a small static "decoding" dot row, no movement. */
+  .reduce-motion .system[data-state="pending"] .skel { display: block; background: var(--skeleton-base); }
+  .reduce-motion .system[data-state="pending"] .skel::after { display: none; }
+  /* active: a static brass left marker + a static, slightly brighter wash,
+     so "this row now" is still legible without motion. */
+  .reduce-motion .system[data-state="active"] .skel { display: block; background: rgba(216,162,58,0.20); }
+  .reduce-motion .system[data-state="active"]::before {
+    content: ""; position: absolute; left: -10px; top: 2px; bottom: 2px; width: 3px;
+    border-radius: 3px; background: var(--accent);
+  }
+  .reduce-motion .scanband { display: none; }
+  /* notes appear instantly when done (no pop) under reduced motion */
+  .reduce-motion .system[data-state="done"] .note { opacity: 1; }
+
+  /* legend chips */
+  .legend { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 0.9rem; color: var(--text-muted); font-size: 0.78rem; }
+  .legend span { display: inline-flex; align-items: center; gap: 0.4rem; }
+  .chip { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+  .chip.done { background: var(--ink); }
+  .chip.active { background: var(--accent); }
+  .chip.pending { background: var(--skeleton-base); border: 1px solid rgba(107,79,31,0.4); }
+
+  .foot { margin-top: 1.2rem; color: var(--text-faint); font-size: 0.74rem; line-height: 1.6; max-width: 80ch; }
+  .foot code { color: var(--text-muted); }
+</style>
+</head>
+<body>
+  <h1>Piano Helper - OMR streaming loader</h1>
+  <p class="sub">
+    The score renders system by system as the engine recognizes it, top to bottom. Finished systems
+    show crisp real notes; the system being decoded right now gets an "active" treatment; systems still
+    pending below show an animated loading state on empty staves (no fake notes). Toggle the concepts
+    and watch a fake 6-system score go from all-pending to all-done on a ~30s loop.
+  </p>
+
+  <div class="toolbar" role="group" aria-label="Loader concept controls">
+    <span class="label">Concept</span>
+    <div class="seg" id="concepts">
+      <button class="opt" data-concept="scan" aria-pressed="true">A. Scan-line (recommended)</button>
+      <button class="opt" data-concept="shimmer" aria-pressed="false">B. Skeleton shimmer</button>
+      <button class="opt" data-concept="blink" aria-pressed="false">C. Blink / pulse</button>
+    </div>
+    <span class="spacer"></span>
+    <button class="opt" id="rm-toggle" aria-pressed="false" title="Simulate prefers-reduced-motion">Reduced motion</button>
+    <button class="opt" id="pace-toggle" aria-pressed="false" title="Speed the loop up for quick review">Fast preview</button>
+    <span class="readout" id="readout">System <b>0</b> / 6</span>
+  </div>
+
+  <p class="blurb" id="blurb"></p>
+
+  <div class="sheet">
+    <div class="systems" id="systems"><!-- systems injected by JS --></div>
+  </div>
+
+  <div class="legend">
+    <span><i class="chip done"></i> done (real notes)</span>
+    <span><i class="chip active"></i> decoding now (active)</span>
+    <span><i class="chip pending"></i> pending (loading, no fake notes)</span>
+  </div>
+
+  <p class="foot">
+    Timing mirrors prod CPU: a <code>~28s</code> blank lead-in, then a system finalizes about every
+    <code>~9s</code>. This demo compresses that to a ~30s loop (lead-in ~5s, ~4s per system) so the
+    motion is reviewable; "Fast preview" compresses further. Attachment point for the real build:
+    an overlay layer inside <code>#sheet</code>, one absolutely-positioned box per
+    <code>&lt;g class="system"&gt;</code> bounding box, marked done / active / pending from the stream's
+    <code>k</code> of <code>total</code>. CSS animation only (transform + opacity), no layout thrash.
+  </p>
+
+<script>
+(function () {
+  "use strict";
+
+  var TOTAL = 6;
+  var NOTES_PER_STAFF = 7; // how many real noteheads we draw per staff when a system locks
+
+  // Each system gets a fixed pseudo-random melody so "done" looks like real music, not noise.
+  // Values are vertical offsets (px) within a staff and a stem direction.
+  function seededNotes(systemIndex, staffName) {
+    var notes = [];
+    var seed = systemIndex * 31 + (staffName === "bass" ? 7 : 0);
+    for (var i = 0; i < NOTES_PER_STAFF; i++) {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      var step = (seed >> 8) % 9;            // 0..8 -> line/space within the 5-line staff
+      var y = 2 + step * 3.5;                // px from staff top
+      var down = ((seed >> 4) & 1) === 1;
+      // pitch class for color (only used on the active/done notehead fill via hue)
+      var pc = (systemIndex * 3 + i * 2 + (staffName === "bass" ? 5 : 0)) % 12;
+      notes.push({ y: y, down: down, pc: pc });
+    }
+    return notes;
+  }
+
+  // Nocturne pitch hue: hue = (40 + pc*30) % 360 ; bar fill hsl(hue,85%,62%).
+  // For engraving ink we keep notes near-black (real noteheads are ink, not rainbow);
+  // a faint pitch tint on the just-landed note is a nice touch, kept subtle.
+  function noteColor(pc) {
+    return "var(--ink)";
+  }
+
+  var systemsEl = document.getElementById("systems");
+
+  function buildSystem(index) {
+    var sys = document.createElement("div");
+    sys.className = "system";
+    sys.setAttribute("data-state", "pending");
+    sys.setAttribute("data-index", String(index));
+
+    // brace + edge barlines (always visible ruling, even when empty)
+    var brace = document.createElement("div"); brace.className = "brace"; sys.appendChild(brace);
+    var bl = document.createElement("div"); bl.className = "barline l"; sys.appendChild(bl);
+    var br = document.createElement("div"); br.className = "barline r"; sys.appendChild(br);
+
+    ["treble", "bass"].forEach(function (staffName) {
+      var staff = document.createElement("div");
+      staff.className = "staff " + staffName;
+      sys.appendChild(staff);
+
+      var clef = document.createElement("div");
+      clef.className = "clef " + staffName;
+      clef.textContent = staffName === "treble" ? "𝄞" : "𝄢"; // G clef / F clef
+      sys.appendChild(clef);
+
+      // real noteheads (hidden until done; revealed via CSS when data-state=done)
+      var notes = seededNotes(index, staffName);
+      var topOffset = staffName === "treble" ? 6 : null;
+      notes.forEach(function (n, i) {
+        var note = document.createElement("div");
+        note.className = "note" + (n.down ? " down" : "");
+        note.style.left = (54 + i * 11.5) + "%";
+        if (staffName === "treble") {
+          note.style.top = (6 + n.y) + "px";
+        } else {
+          note.style.bottom = (6 + (33 - n.y)) + "px";
+        }
+        note.style.color = noteColor(n.pc);
+        var stem = document.createElement("div"); stem.className = "stem";
+        note.appendChild(stem);
+        sys.appendChild(note);
+      });
+
+      // skeleton blocks (note-shaped placeholders) on this staff for pending/active loaders
+      for (var s = 0; s < NOTES_PER_STAFF; s++) {
+        var skel = document.createElement("div");
+        skel.className = "skel";
+        skel.style.left = (54 + s * 11.5) + "%";
+        skel.style.width = "9px";
+        if (staffName === "treble") {
+          skel.style.top = (6 + 12) + "px";
+        } else {
+          skel.style.bottom = (6 + 12) + "px";
+        }
+        sys.appendChild(skel);
+      }
+    });
+
+    // the scan-line band (concept A) - one per system, shown only when active in concept A
+    var band = document.createElement("div");
+    band.className = "scanband";
+    sys.appendChild(band);
+
+    return sys;
+  }
+
+  for (var i = 0; i < TOTAL; i++) systemsEl.appendChild(buildSystem(i));
+
+  var systemNodes = Array.prototype.slice.call(systemsEl.querySelectorAll(".system"));
+
+  // ---- timeline driver -------------------------------------------------
+  // done count k advances 0..TOTAL; the system at index k is "active" (decoding);
+  // indices > k are "pending". When k == TOTAL everything is done, hold, then loop.
+  var LEAD_IN_MS = 5000;     // blank lead-in (compressed from ~28s)
+  var PER_SYSTEM_MS = 4000;  // a system finalizes (compressed from ~9s)
+  var HOLD_DONE_MS = 2500;   // pause on the fully-rendered score before looping
+  var fast = false;
+
+  function pace(ms) { return fast ? ms * 0.4 : ms; }
+
+  var startTime = performance.now();
+
+  function applyState(k) {
+    for (var i = 0; i < TOTAL; i++) {
+      var state = i < k ? "done" : (i === k ? "active" : "pending");
+      if (systemNodes[i].getAttribute("data-state") !== state) {
+        systemNodes[i].setAttribute("data-state", state);
+      }
+    }
+    var shown = Math.min(k, TOTAL);
+    document.querySelector("#readout b").textContent = String(shown);
+  }
+
+  function frame(now) {
+    var elapsed = now - startTime;
+    var leadIn = pace(LEAD_IN_MS);
+    var per = pace(PER_SYSTEM_MS);
+    var hold = pace(HOLD_DONE_MS);
+    var total = leadIn + per * TOTAL + hold;
+
+    var t = elapsed % total;
+    var k;
+    if (t < leadIn) {
+      k = 0; // nothing decoded yet; system 0 is active (being decoded)
+    } else {
+      k = Math.floor((t - leadIn) / per);
+      if (k > TOTAL) k = TOTAL;
+    }
+    applyState(k);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // ---- concept switching ----------------------------------------------
+  var stage = systemsEl; // we toggle the concept class on .systems
+  var BLURBS = {
+    scan: "<b>A. Recognition scan-line (recommended).</b> A brass beam sweeps top to bottom across the active system, leaving a faint brass wash above it - it mirrors what the engine literally does, reading the staff line by line. Pending systems below carry a quiet brass-brown skeleton shimmer on the empty staves. This is the most on-theme: the animation IS the recognition.",
+    shimmer: "<b>B. Skeleton shimmer.</b> The modern content-loader. Every not-yet-done system shows note-shaped skeleton blocks with a brass sheen sweeping across; the active row shimmers brighter and faster with a brass left-edge marker. Clean and familiar, but generic - it does not say 'optical recognition' the way the scan-line does.",
+    blink: "<b>C. Blink / pulse.</b> The calmest option: no sweep, no shimmer. Empty staves gently breathe in opacity (~0.38 Hz, well under any flash risk); the active row breathes a touch brighter and tints brass. Lowest energy and lowest risk, but it reads as 'waiting' rather than 'working', and gives the least sense of progress."
+  };
+  function setConcept(name) {
+    stage.classList.remove("concept-scan", "concept-shimmer", "concept-blink");
+    stage.classList.add("concept-" + name);
+    Array.prototype.forEach.call(document.querySelectorAll("#concepts .opt"), function (b) {
+      b.setAttribute("aria-pressed", String(b.getAttribute("data-concept") === name));
+    });
+    document.getElementById("blurb").innerHTML = BLURBS[name];
+  }
+  Array.prototype.forEach.call(document.querySelectorAll("#concepts .opt"), function (b) {
+    b.addEventListener("click", function () { setConcept(b.getAttribute("data-concept")); });
+  });
+  setConcept("scan");
+
+  // ---- reduced motion + pace toggles ----------------------------------
+  var rmBtn = document.getElementById("rm-toggle");
+  rmBtn.addEventListener("click", function () {
+    var on = rmBtn.getAttribute("aria-pressed") !== "true";
+    rmBtn.setAttribute("aria-pressed", String(on));
+    stage.classList.toggle("reduce-motion", on);
+  });
+  // reflect the OS setting on load (so the page is honest by default)
+  if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    rmBtn.click();
+  }
+
+  var paceBtn = document.getElementById("pace-toggle");
+  paceBtn.addEventListener("click", function () {
+    fast = paceBtn.getAttribute("aria-pressed") !== "true";
+    paceBtn.setAttribute("aria-pressed", String(fast));
+    startTime = performance.now(); // restart the loop so the new pace reads cleanly
+  });
+})();
+</script>
+</body>
+</html>

@@ -26,6 +26,14 @@ const PARTIAL_SENTINEL_RE = /name="omr-status"\s*>\s*partial/;
 // The monotonic version the worker stamps beside the status, so the client re-renders a partial
 // only when it actually changed (a repeat poll of the same partial is a no-op).
 const PARTIAL_VERSION_RE = /name="omr-version"\s*>\s*(\d+)/;
+// The SYSTEM FRONTIER for the block-by-block streaming loader: how many staff systems the page has
+// in total, and how many are finalized in THIS partial. The partial MusicXML contains ONLY the
+// finished systems, so the renderer draws (total - done) skeleton rows below the engraved ones and
+// marks the system at index == done as actively decoding. Only the block-streaming partials carry
+// these (a fast-then-refine / per-page partial has no frontier); their absence => no per-system
+// loader. Kept byte-compatible with omr-worker/progressive.py stamp_partial.
+const PARTIAL_SYSTEMS_TOTAL_RE = /name="omr-systems-total"\s*>\s*(\d+)/;
+const PARTIAL_SYSTEMS_DONE_RE = /name="omr-systems-done"\s*>\s*(\d+)/;
 
 export function isPartial(xml: string): boolean {
   return PARTIAL_SENTINEL_RE.test(xml);
@@ -34,6 +42,28 @@ export function isPartial(xml: string): boolean {
 function partialVersion(xml: string): number {
   const match = xml.match(PARTIAL_VERSION_RE);
   return match ? Number(match[1]) : 0;
+}
+
+// The system frontier carried by a block-by-block streaming partial, or null if this partial has
+// none (every non-streaming partial, and any malformed/partial-only-one-field case). `total` is the
+// page's system count; `done` is how many are finalized in this partial (so the active system is at
+// index `done`, and there are `total - done` pending rows). Exported for the renderer + tests.
+export interface SystemFrontier {
+  total: number;
+  done: number;
+}
+
+export function partialFrontier(xml: string): SystemFrontier | null {
+  const totalMatch = xml.match(PARTIAL_SYSTEMS_TOTAL_RE);
+  const doneMatch = xml.match(PARTIAL_SYSTEMS_DONE_RE);
+  if (!totalMatch || !doneMatch) return null;
+  const total = Number(totalMatch[1]);
+  const done = Number(doneMatch[1]);
+  // Defensive sanity: a usable frontier needs at least one system and a done count within it. A
+  // garbage frontier degrades to "no per-system loader" rather than laying out nonsense rows.
+  if (!Number.isFinite(total) || !Number.isFinite(done)) return null;
+  if (total < 1 || done < 0 || done > total) return null;
+  return { total, done };
 }
 
 // Sentinel thrown by pollOmrResult when the caller abandons the wait (the #86 Cancel
@@ -83,12 +113,19 @@ export interface PollOptions {
   // when it returns true the loop rejects with OMR_CANCELLED.
   isCancelledRequested?: () => boolean;
   // Called for each PROGRESSIVE partial result (omr-status="partial") so the caller can render the
-  // score-so-far while polling continues. Receives the MusicXML and its monotonic version, and is
-  // invoked only when the version increases (an unchanged partial is not re-rendered). Awaited, so
-  // the caller can serialize an async render before the next poll. The poll still RESOLVES only on
-  // the final complete result (or rejects on failure / cancel / timeout), so a caller that omits
-  // onPartial simply waits for the complete result exactly as before.
-  onPartial?: (xml: string, version: number) => void | Promise<void>;
+  // score-so-far while polling continues. Receives the MusicXML, its monotonic version, and the
+  // system FRONTIER (omr-systems-total / omr-systems-done) when the block-by-block streaming path
+  // supplied one, else null (every non-streaming partial). The frontier lets the caller drive the
+  // per-system loading overlay (k done + total - k pending rows). Invoked only when the version
+  // increases (an unchanged partial is not re-rendered). Awaited, so the caller can serialize an
+  // async render before the next poll. The poll still RESOLVES only on the final complete result
+  // (or rejects on failure / cancel / timeout), so a caller that omits onPartial simply waits for
+  // the complete result exactly as before.
+  onPartial?: (
+    xml: string,
+    version: number,
+    frontier: SystemFrontier | null,
+  ) => void | Promise<void>;
 }
 
 const defaultSleep = (ms: number): Promise<void> =>
@@ -139,7 +176,7 @@ export async function pollOmrResult(
         const version = partialVersion(xml);
         if (onPartial && version > lastPartialVersion) {
           lastPartialVersion = version;
-          await onPartial(xml, version);
+          await onPartial(xml, version, partialFrontier(xml));
         }
         // Fall through to the wait below (200 does not match the non-2xx error checks).
       } else {

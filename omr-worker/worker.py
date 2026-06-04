@@ -1464,12 +1464,15 @@ def _transcribe_one_page(page_pdf, page_dir):
 def _fusion_block_stream(job_id, input_path, workdir, geom_body, publish_partial):
     """BLOCK-BY-BLOCK progressive fusion (OMR_PROGRESSIVE_BLOCKS, PDF only). geom runs ONCE over the
     whole page for pitch; Clarity streams REAL rhythm per staff SYSTEM from ONE warm invocation
-    (run_clarity_stream). For each system k, fuse geom's whole-page pitch with Clarity's CUMULATIVE
-    rhythm prefix for systems 1..k (fusion.fuse keeps all geom notes and borrows durations where the
-    prefix aligns; geom notes past the prefix keep a neutral quarter until their system lands), then
-    merge to a grand staff and publish a partial. The FINAL system's fuse is geom-whole + Clarity-
-    whole, i.e. byte-equivalent to today's whole-file fusion path, so this is a pure refinement of
-    WHEN the rhythm appears, never a different final result.
+    (run_clarity_stream). For each system k, publish a partial that holds ONLY the FINISHED systems:
+    geom truncated to the Clarity prefix's measure count, fused with the Clarity prefix for systems
+    1..k (fusion.fuse_prefix). The pending (not-yet-decoded) systems are ABSENT from the partial
+    MusicXML, so the client draws their loading skeletons rather than geom placeholder rhythm. Each
+    partial is stamped with the system FRONTIER (total, done=k) so the client knows how many skeleton
+    rows to draw and which system is active.
+
+    The FINAL write is geom-WHOLE + Clarity-WHOLE = today's whole-file fusion path, byte-equivalent,
+    so this is a pure refinement of WHEN/which rows appear, never a different final result.
 
     geom and the Clarity stream run CONCURRENTLY (geom ~5s finishes well before Clarity's first
     system ~28s), so the geom future is ready by the first fuse. Returns the final fused MusicXML
@@ -1493,13 +1496,16 @@ def _fusion_block_stream(job_id, input_path, workdir, geom_body, publish_partial
                 geom_bytes = geom_holder.get("bytes")
                 if not geom_bytes and not clarity_prefix_bytes:
                     return
-                fused = fusion.fuse(geom_bytes, clarity_prefix_bytes)
+                # FINISHED-ONLY partial: geom truncated to the Clarity prefix's measure count + the
+                # Clarity prefix, so the pending systems are absent (the client skeletons them).
+                fused = fusion.fuse_prefix(geom_bytes, clarity_prefix_bytes)
                 if not fused:
                     return
                 # Collapse to ONE grand-staff part like the per-page path: a clarity-only prefix (geom
                 # produced nothing) can be 2 parts, which publish_partial's own merge would also fix,
-                # but doing it here keeps the partial shape identical to the complete write.
-                publish_partial(merge_to_grand_staff(fused))
+                # but doing it here keeps the partial shape identical to the complete write. The
+                # frontier (total systems, done=index) lets the client lay out the skeleton rows.
+                publish_partial(merge_to_grand_staff(fused), systems_total=total, systems_done=index)
                 log("%s block-stream published system %d/%d" % (job_id, index, total))
 
             clarity_whole = run_clarity_stream(input_path, workdir, on_system)
@@ -1591,7 +1597,7 @@ def process_job(client, bucket, job_id):
         # the job, and the final complete write still happens at the end of process_job.
         partial_version = [0]
 
-        def publish_partial(raw_body):
+        def publish_partial(raw_body, systems_total=None, systems_done=None):
             try:
                 partial_version[0] += 1
                 # Same post-transform chain as the complete write (merge -> normalize -> rhythm
@@ -1599,7 +1605,12 @@ def process_job(client, bucket, job_id):
                 finalized = rhythm_repair.repair_measure_durations(
                     normalize_ties(merge_to_grand_staff(raw_body))
                 )
-                stamped = progressive.stamp_partial(finalized, partial_version[0])
+                # The block-by-block path supplies the system FRONTIER (total + done) so the client
+                # draws the per-system loader; the other progressive paths pass neither (a whole-page
+                # partial has no frontier), and stamp_partial then omits those fields.
+                stamped = progressive.stamp_partial(
+                    finalized, partial_version[0], systems_total, systems_done
+                )
                 # The client reads partial-vs-complete from the IN-BODY marker (the result endpoint
                 # drops object metadata), so NEVER write an unmarked body to the result key mid-job: an
                 # unmarked body reads as a COMPLETE result and stops the client polling early. If

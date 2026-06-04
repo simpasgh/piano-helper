@@ -4,6 +4,7 @@ import {
   pollOmrResult,
   isFailureSentinel,
   isPartial,
+  partialFrontier,
   isCancelled,
   OMR_CANCELLED,
 } from "./omr";
@@ -213,6 +214,21 @@ const partialXml = (version: number, body = "<part/>") =>
   `<miscellaneous-field name="omr-version">${version}</miscellaneous-field>` +
   `</miscellaneous></identification>${body}</score-partwise>`;
 
+// A block-by-block streaming partial: it ALSO carries the system frontier (omr-systems-total /
+// omr-systems-done) the worker stamps for the per-system loader.
+const partialXmlWithFrontier = (
+  version: number,
+  total: number,
+  done: number,
+  body = "<part/>",
+) =>
+  `<score-partwise><identification><miscellaneous>` +
+  `<miscellaneous-field name="omr-status">partial</miscellaneous-field>` +
+  `<miscellaneous-field name="omr-version">${version}</miscellaneous-field>` +
+  `<miscellaneous-field name="omr-systems-total">${total}</miscellaneous-field>` +
+  `<miscellaneous-field name="omr-systems-done">${done}</miscellaneous-field>` +
+  `</miscellaneous></identification>${body}</score-partwise>`;
+
 describe("isPartial", () => {
   it("detects the worker's partial marker", () => {
     expect(isPartial(partialXml(1))).toBe(true);
@@ -221,6 +237,46 @@ describe("isPartial", () => {
   it("does not flag a complete score or the failure sentinel", () => {
     expect(isPartial("<score-partwise><part/></score-partwise>")).toBe(false);
     expect(isPartial(SENTINEL_XML)).toBe(false);
+  });
+});
+
+describe("partialFrontier", () => {
+  it("parses the system frontier a block-streaming partial carries", () => {
+    expect(partialFrontier(partialXmlWithFrontier(2, 6, 3))).toEqual({
+      total: 6,
+      done: 3,
+    });
+  });
+
+  it("returns null for a partial with no frontier (fast-then-refine / per-page)", () => {
+    expect(partialFrontier(partialXml(1))).toBeNull();
+  });
+
+  it("returns null when only one frontier field is present", () => {
+    const onlyTotal =
+      `<score-partwise><identification><miscellaneous>` +
+      `<miscellaneous-field name="omr-systems-total">6</miscellaneous-field>` +
+      `</miscellaneous></identification></score-partwise>`;
+    expect(partialFrontier(onlyTotal)).toBeNull();
+  });
+
+  it("accepts done == 0 (lead-in: nothing finalized, system 0 active)", () => {
+    expect(partialFrontier(partialXmlWithFrontier(1, 4, 0))).toEqual({
+      total: 4,
+      done: 0,
+    });
+  });
+
+  it("accepts done == total (all systems finalized in this partial)", () => {
+    expect(partialFrontier(partialXmlWithFrontier(3, 4, 4))).toEqual({
+      total: 4,
+      done: 4,
+    });
+  });
+
+  it("rejects a nonsensical frontier (done past total, or zero systems)", () => {
+    expect(partialFrontier(partialXmlWithFrontier(1, 4, 5))).toBeNull();
+    expect(partialFrontier(partialXmlWithFrontier(1, 0, 0))).toBeNull();
   });
 });
 
@@ -253,6 +309,32 @@ describe("pollOmrResult progressive partials", () => {
     expect(sleep).toHaveBeenCalledTimes(2);
   });
 
+  it("forwards the system frontier of a block-streaming partial to onPartial", async () => {
+    const responses = [
+      textResponse(partialXmlWithFrontier(1, 6, 1), 200), // system 1 of 6 finalized
+      textResponse(partialXmlWithFrontier(2, 6, 2), 200), // system 2 of 6 finalized
+      textResponse("<score-partwise><part/></score-partwise>", 200),
+    ];
+    let i = 0;
+    const fetchFn = vi.fn(async () => responses[i++]) as unknown as typeof fetch;
+    const frontiers: Array<{ total: number; done: number } | null> = [];
+
+    await pollOmrResult("job-1", {
+      fetchFn,
+      sleep: async () => {},
+      now: () => 0,
+      onPartial: (_xml, _version, frontier) => {
+        frontiers.push(frontier);
+      },
+    });
+
+    // The frontier advances with the stream (1 done, then 2 done), out of 6 total.
+    expect(frontiers).toEqual([
+      { total: 6, done: 1 },
+      { total: 6, done: 2 },
+    ]);
+  });
+
   it("does not re-render a repeated partial of the same version", async () => {
     const responses = [
       textResponse(partialXml(1), 200),
@@ -271,7 +353,8 @@ describe("pollOmrResult progressive partials", () => {
     });
 
     expect(onPartial).toHaveBeenCalledTimes(1);
-    expect(onPartial).toHaveBeenCalledWith(expect.stringContaining("partial"), 1);
+    // The frontier-less partial passes null as the third arg (no per-system loader).
+    expect(onPartial).toHaveBeenCalledWith(expect.stringContaining("partial"), 1, null);
   });
 
   it("keeps polling past a partial even when no onPartial handler is given", async () => {
