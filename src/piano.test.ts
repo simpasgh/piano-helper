@@ -4,6 +4,7 @@ import {
   LAST_MIDI,
   isBlackKey,
   buildKeyLayout,
+  keyAtX,
   midiToName,
   midiToLabel,
   midiToBarLabel,
@@ -105,6 +106,30 @@ describe("buildKeyLayout", () => {
     const last = whites[whites.length - 1];
     expect(last.x + last.width).toBeCloseTo(WIDTH, 6);
     expect(whites[0].width).toBeCloseTo(whiteWidth, 6);
+  });
+});
+
+describe("keyAtX (Smart Edit P1: the key column under a canvas x, for the pitch drag)", () => {
+  const WIDTH = 880;
+  const layout = buildKeyLayout(WIDTH);
+
+  it("returns the white key whose column contains x", () => {
+    const c4 = layout.find((k) => k.midi === 60 && !k.black)!;
+    // A point in the middle of C4's column, but avoid an overlapping black key (C#4 sits at the
+    // right edge of C4): sample near the LEFT third where no black key overlaps.
+    const x = c4.x + c4.width * 0.2;
+    expect(keyAtX(layout, x)).toBe(60);
+  });
+
+  it("a black key wins where it overlaps a white key (it sits on top)", () => {
+    const cSharp4 = layout.find((k) => k.midi === 61)!; // C#4 is a black key
+    const x = cSharp4.x + cSharp4.width / 2;
+    expect(keyAtX(layout, x)).toBe(61);
+  });
+
+  it("returns null outside the keybed", () => {
+    expect(keyAtX(layout, -5)).toBeNull();
+    expect(keyAtX(layout, WIDTH + 50)).toBeNull();
   });
 });
 

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   timemapStepTimes,
   buildIdToVisNoteIndex,
+  buildVisIndexToId,
   notesAtScoreTime,
   parseSvgNoteIds,
   type VerovioNote,
@@ -112,6 +113,36 @@ describe("buildIdToVisNoteIndex", () => {
     const visNotes: VisNote[] = [vis({ midi: 60, time: 0 })];
     const verovio: VerovioNote[] = [vn("x", 5, 99)];
     expect(buildIdToVisNoteIndex(verovio, visNotes).size).toBe(0);
+  });
+});
+
+describe("buildVisIndexToId", () => {
+  it("inverts the id->index map so a canvas selection can find its staff notehead", () => {
+    const idToIndex = new Map<string, number>([
+      ["n1", 0],
+      ["n2", 1],
+      ["n3", 2],
+    ]);
+    const inverse = buildVisIndexToId(idToIndex);
+    expect(inverse.get(0)).toBe("n1");
+    expect(inverse.get(1)).toBe("n2");
+    expect(inverse.get(2)).toBe("n3");
+    expect(inverse.size).toBe(3);
+  });
+
+  it("first id wins when two ids map to one VisNote index (a unison)", () => {
+    // Insertion order is the tie-break, mirroring id->index's first-wins rule.
+    const idToIndex = new Map<string, number>([
+      ["first", 4],
+      ["second", 4],
+    ]);
+    const inverse = buildVisIndexToId(idToIndex);
+    expect(inverse.get(4)).toBe("first");
+    expect(inverse.size).toBe(1);
+  });
+
+  it("is empty for an empty map", () => {
+    expect(buildVisIndexToId(new Map()).size).toBe(0);
   });
 });
 

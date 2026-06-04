@@ -57,6 +57,23 @@ export function buildKeyLayout(
   return keys;
 }
 
+// The MIDI of the key column under an x coordinate (canvas px), or null when x is outside the
+// keybed. Black keys sit ON TOP of whites, so a black key wins where it overlaps a white. Used
+// by Smart Edit Mode's CANVAS pitch drag: the falling-notes view draws pitch HORIZONTALLY (key
+// columns), so dragging a bar sideways to a new key is the chromatic pitch edit (time, the
+// vertical axis, is fixed). Pure + canvas-free so it is unit-testable.
+export function keyAtX(keys: readonly KeyGeometry[], x: number): number | null {
+  let hit: number | null = null;
+  // Whites first so a later black-key match overrides where they overlap.
+  for (const k of keys) {
+    if (!k.black && x >= k.x && x <= k.x + k.width) hit = k.midi;
+  }
+  for (const k of keys) {
+    if (k.black && x >= k.x && x <= k.x + k.width) hit = k.midi;
+  }
+  return hit;
+}
+
 export function midiToName(midi: number): string {
   const names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
   const octave = Math.floor(midi / 12) - 1;

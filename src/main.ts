@@ -3,8 +3,21 @@ import * as Tone from "tone";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { Visualizer, type VisNote } from "./visualizer";
 import { extractScore, type ScoreData } from "./score";
-import { nudgePitch, deleteNote, recomputeDuration, hasEdits } from "./note-edit";
+import { recomputeDuration } from "./note-edit";
 import { midiToBarLabel } from "./piano";
+import {
+  parseScoreModel,
+  buildHandleToVisIndex,
+  diatonicStep,
+  chromaticStep,
+  octaveStep,
+  pitchFromMidi,
+  midiFromPitch,
+  spellingFromPitch,
+  type ScoreModel,
+  type ModelPitch,
+} from "./edit-model";
+import { CommandStack, type SetPitchCommand } from "./edit-commands";
 
 // Label a note for the edit readout + announcements. Falls back to letter-mode names when the
 // label mode is "off" (which midiToBarLabel returns as an empty string), so the edit cluster and
@@ -12,6 +25,13 @@ import { midiToBarLabel } from "./piano";
 function editNoteLabel(note: VisNote): string {
   const mode = labelMode === "off" ? "letters" : labelMode;
   return midiToBarLabel(note.midi, mode, note.spelling);
+}
+
+// Label a MIDI + spelling pair for announcements (the from/to pitch tokens). Same name source
+// as editNoteLabel so the announcement matches what is on screen.
+function pitchLabel(midi: number, spelling?: { letter: import("./piano").NoteLetter; alter: number }): string {
+  const mode = labelMode === "off" ? "letters" : labelMode;
+  return midiToBarLabel(midi, mode, spelling);
 }
 import { submitOmr, pollOmrResult, isCancelled } from "./omr";
 import {
@@ -83,15 +103,15 @@ function reflectHandMute(btn: HTMLButtonElement, muted: boolean): void {
     ? `${name}: muted. Click to unmute.`
     : `${name}: audible. Click to mute.`;
 }
-const correctBtn = document.getElementById("correct-btn") as HTMLButtonElement;
 const editBtn = document.getElementById("edit-btn") as HTMLButtonElement;
 const verovioCredit = document.getElementById("verovio-credit") as HTMLAnchorElement;
-const staffEditLive = document.getElementById("staff-edit-live") as HTMLSpanElement;
+const editToolbar = document.getElementById("edit-toolbar") as HTMLDivElement;
+const undoBtn = document.getElementById("undo-btn") as HTMLButtonElement;
+const redoBtn = document.getElementById("redo-btn") as HTMLButtonElement;
 const noteEdit = document.getElementById("note-edit") as HTMLDivElement;
 const noteEditReadout = document.getElementById("note-edit-readout") as HTMLSpanElement;
 const pitchDownBtn = document.getElementById("pitch-down-btn") as HTMLButtonElement;
 const pitchUpBtn = document.getElementById("pitch-up-btn") as HTMLButtonElement;
-const deleteNoteBtn = document.getElementById("delete-note-btn") as HTMLButtonElement;
 const editLive = document.getElementById("edit-live") as HTMLSpanElement;
 const tempoSlider = document.getElementById("tempo-slider") as HTMLInputElement;
 const tempoReadout = document.getElementById("tempo-readout") as HTMLButtonElement;
@@ -157,56 +177,60 @@ const handMuted = { left: false, right: false };
 // early before velocity is ever computed. "unknown" notes ignore balance (always full).
 let handBalance = BALANCE_DEFAULT;
 
-// OMR correction UI (issue #6, first slice: pitch nudge + delete). `correctMode` is an
-// explicit toggle, OFF by default; entering it pauses playback so the player edits a still
-// target. `selectedIndex` is the note picked for editing, or null. Editing is allowed only
-// while in Correct mode (which implies paused); pressing Play clears the selection so a moving
-// target is never edited. The sheet stays AUTHORITATIVE and unchanged: edits diverge the
-// falling-notes model only, marked per-note with `edited` and surfaced once in #track-status.
-let correctMode = false;
-let selectedIndex: number | null = null;
-
-// Smart Edit Mode P0 (read-only Verovio viewer + notehead selection; NO editing yet). The
-// source MusicXML is retained per load so edit mode can hand it to Verovio; loadScoreXml used
-// to discard it (it was a local). Cleared for audio loads, which have no MusicXML to engrave.
+// Smart Edit Mode P1 (DUAL-SURFACE pitch editing on one source-of-truth model). The source
+// MusicXML is retained per load so edit mode can hand it to Verovio and build the editable
+// model; cleared for audio loads, which have no MusicXML to engrave.
 let sourceMusicXml: string | null = null;
-// True while the Verovio staff view is showing in place of the OSMD sheet. Lazy state below is
-// allocated on first entry only, so non-editing users never load the ~7MB toolkit.
+// True while edit mode is on (the Verovio staff replaces the OSMD sheet and BOTH surfaces are
+// editable). Lazy state below is allocated on first entry only, so non-editing users never
+// load the ~7MB Verovio toolkit.
 let editMode = false;
 let verovioToolkit: VerovioToolkit | null = null;
 let verovioRender: VerovioRender | null = null;
 let verovioHost: HTMLDivElement | null = null;
-// The currently-selected notehead's MEI id (also its SVG <g> id), or null. Distinct from the
-// falling-canvas `selectedIndex`: edit mode selects on the staff, not the canvas.
-let staffSelectedId: string | null = null;
-// Note ids in musical order (onset, then pitch) for Left/Right selection stepping.
-let staffNavIds: string[] = [];
-// Ids currently tinted as "playing" so the rAF loop only touches the DOM when the set changes.
-let staffPlayingIds: string[] = [];
 // Guard against overlapping enter-edit-mode loads (the lazy import is async).
 let editModeLoading = false;
 
-// Reflect the current selection on screen + to assistive tech, and show/hide the edit cluster.
-// The cluster is visible only in Correct mode WITH a note selected (Designer decision #4).
-function reflectSelection(announce?: string): void {
-  visualizer.setSelected(selectedIndex);
-  const note = score && selectedIndex !== null ? score.notes[selectedIndex] : null;
-  noteEdit.hidden = !(correctMode && note !== null);
-  if (note) {
-    noteEditReadout.textContent = editNoteLabel(note);
-  }
-  if (announce) editLive.textContent = announce;
-}
+// The editable notation model (single source of truth) + its invertible command stack, built
+// on entering edit mode from the retained MusicXML. Pitch edits on EITHER surface mutate the
+// model through a command; the staff re-renders from the model and the falling notes + audio
+// re-derive, so the two surfaces never diverge. Null when not in edit mode.
+let scoreModel: ScoreModel | null = null;
+let commandStack: CommandStack | null = null;
+// The ONE shared selection (Designer P1-1): a model note keyed by its stable HANDLE id (which
+// survives re-renders, unlike a VisNote index, which a delete would shift). Both surfaces show
+// it at once. Null = nothing selected.
+let selectedHandle: number | null = null;
+// Maps rebuilt after every edit: handle id <-> VisNote index. The handle is the durable spine;
+// the VisNote index drives the canvas highlight and (via verovioRender.visIndexToId) the staff.
+let handleToVisIndex = new Map<number, number>();
+let visIndexToHandle = new Map<number, number>();
+// Ids currently tinted as "playing" so the rAF loop only touches the DOM when the set changes.
+let staffPlayingIds: string[] = [];
 
-// Move the selection by +-1 within the note list (Up/Down arrows; Left/Right/Space are taken
-// by transport). Wraps at the ends so repeated arrows cycle the whole score. No-op with no notes.
-function moveSelection(delta: 1 | -1): void {
-  if (!score || score.notes.length === 0) return;
-  const n = score.notes.length;
-  const base = selectedIndex === null ? (delta > 0 ? -1 : 0) : selectedIndex;
-  selectedIndex = ((base + delta) % n + n) % n;
-  const note = score.notes[selectedIndex];
-  reflectSelection(`Selected ${editNoteLabel(note)}`);
+// Active pitch-drag state (Smart Edit P1). A drag previews ONLY on the active surface and
+// commits ONE coalesced command on release; the mirror surface holds the pre-edit state
+// de-emphasized. `surface` says which surface owns the gesture; `handleId` is the note being
+// dragged; `beforePitch` is the pre-drag pitch (the command's `before`); `lastPreviewMidi`
+// tracks the last previewed pitch so we only re-render on a real change.
+interface DragState {
+  surface: "staff" | "canvas";
+  handleId: number;
+  beforePitch: ModelPitch;
+  startClientX: number;
+  startClientY: number;
+  startMidi: number;
+  pxPerStep: number; // staff only: vertical px per diatonic step (from the notehead bbox)
+  lastPreviewMidi: number;
+  moved: boolean;
+}
+let drag: DragState | null = null;
+
+// The VisNote index the current selection maps to, or null. Derived from the shared handle via
+// the post-edit map; a tie continuation or a deleted note can leave a handle with no VisNote.
+function selectedVisIndex(): number | null {
+  if (selectedHandle === null) return null;
+  return handleToVisIndex.get(selectedHandle) ?? null;
 }
 
 // Sync the readout text to the current balance. The slider position is set separately so
@@ -346,11 +370,12 @@ function loadNotes(data: ScoreData, name: string, sheet: boolean): void {
   reflectBalance();
   handMutes.hidden = false;
 
-  // Issue #6: a fresh load drops any prior correction state. Selection clears, Correct mode
-  // turns off, and the "Edited" status note is allowed to reappear only after the next edit.
-  selectedIndex = null;
-  exitCorrectMode();
-  reflectSelection();
+  // A fresh load drops any prior edit state: exit edit mode (the loaders below also clear the
+  // retained model) and clear the shared selection so a previous score's edit view never
+  // carries over.
+  if (editMode) exitEditMode();
+  selectedHandle = null;
+  visualizer.setSelected(null);
 
   stepIndex = 0;
   onsets = uniqueOnsets(score.notes);
@@ -379,8 +404,10 @@ function loadNotes(data: ScoreData, name: string, sheet: boolean): void {
 // rebuilds what depends on score.notes: disposes + rebuilds the Tone.Part, recomputes the onset
 // list and the total duration, refreshes the visualizer notes + the note-count readout. Pause
 // and restore the transport position around the Part rebuild so the swap is inaudible (a Part
-// rebuild while playing would reschedule mid-flight and click). The sheet/cursor are left as-is:
-// edits diverge the falling notes from the authoritative scan on purpose (Designer decision #1).
+// rebuild while playing would reschedule mid-flight and click). In Smart Edit Mode P1 this is
+// the audio/canvas half of the edit round-trip: pitch edits keep every note's TIME, so stepTimes
+// are unchanged and the sync invariant holds (the falling notes and the cursor still read from
+// one timeline). The staff is re-engraved separately from the model by the caller.
 function reloadNotes(notes: VisNote[]): void {
   if (!score) return;
   const transport = Tone.getTransport();
@@ -406,9 +433,6 @@ function reloadNotes(notes: VisNote[]): void {
   noteCount = score.notes.length;
   renderSheetName(); // refresh the note-count readout next to the name
   if (wasPlaying) transport.start();
-  // Issue #6 divergence note: once the score carries any edit, show one quiet line so the user
-  // knows the sheet below still reflects the original scan. Cleared on a fresh load.
-  if (hasEdits(score.notes)) showEditedStatus();
   updateSeekUI(Tone.getTransport().seconds * tempoRate);
 }
 
@@ -443,84 +467,13 @@ function upgradeNotes(data: ScoreData): void {
   updateSeekUI(scoreTime);
 }
 
-// Apply an edit transform to the selected note and rebuild the playback pipeline. `transform`
-// returns the new immutable notes array. After a nudge the selection stays on the same index;
-// after a delete the index is clamped/cleared so it never points past the shortened array.
-function applyEdit(
-  transform: (notes: VisNote[]) => VisNote[],
-  kind: "nudge" | "delete",
-): void {
-  if (!score || selectedIndex === null || !correctMode) return;
-  const index = selectedIndex;
-  const before = score.notes[index];
-  const next = transform(score.notes);
-  if (kind === "delete") {
-    // Drop the selection if nothing remains, else keep it in range so the player can keep
-    // editing the neighbor that slid into this slot.
-    selectedIndex = next.length === 0 ? null : Math.min(index, next.length - 1);
-  }
-  reloadNotes(next);
-  if (kind === "nudge") {
-    const after = score.notes[index];
-    reflectSelection(
-      `${editNoteLabel(before)} changed to ${editNoteLabel(after)}`,
-    );
-  } else {
-    reflectSelection(
-      `Deleted ${editNoteLabel(before)}`,
-    );
-  }
-}
-
-// Show the one-time divergence line (Designer decision #1). It does not fight an active status
-// message (scanning/transcribing); it only takes the slot when the loaded-piece view is showing.
-function showEditedStatus(): void {
-  if (nameEditing) return;
-  sheetNameBtn.hidden = true;
-  sheetNoteCount.hidden = true;
-  trackStatus.hidden = false;
-  trackStatus.textContent = "Edited. The sheet below still shows the original scan.";
-}
-
-// Enter Correct mode (Designer decision #2): pause playback so the player edits a still target,
-// make the stage a focusable application region for keyboard editing, and reveal the edit cluster
-// if a note is already selected. Pressing Play later clears the selection (handled in togglePlay).
-function enterCorrectMode(): void {
-  if (correctMode) return;
-  correctMode = true;
-  correctBtn.setAttribute("aria-pressed", "true");
-  if (playing) {
-    Tone.getTransport().pause();
-    setPlaying(false);
-  }
-  canvas.setAttribute("tabindex", "0");
-  canvas.setAttribute("role", "application");
-  canvas.setAttribute("aria-label", "Falling notes editor. Up and down arrows select a note; minus and plus nudge its pitch; Delete removes it.");
-  reflectSelection("Correct mode on. Click a note or use the arrow keys to select one.");
-}
-
-// Leave Correct mode: clear the selection, hide the edit cluster, and drop the stage's
-// application role so global transport shortcuts behave normally again.
-function exitCorrectMode(): void {
-  if (!correctMode && selectedIndex === null) {
-    canvas.removeAttribute("tabindex");
-    canvas.removeAttribute("role");
-    return;
-  }
-  correctMode = false;
-  correctBtn.setAttribute("aria-pressed", "false");
-  selectedIndex = null;
-  canvas.removeAttribute("tabindex");
-  canvas.removeAttribute("role");
-  reflectSelection();
-}
-
-// ----- Smart Edit Mode P0 (read-only Verovio viewer + notehead selection) -----
+// ===== Smart Edit Mode P1: DUAL-SURFACE pitch editing on one source-of-truth model =====
 //
-// Edit mode shows the Verovio engraving in place of the OSMD sheet and lets the user click a
-// notehead to select it. There is NO editing yet: this proves the Verovio substrate (render +
-// id-based hit-testing + timemap sync) behind a flag. The OSMD view is hidden, not destroyed,
-// so exiting restores the normal player instantly.
+// Edit mode shows the Verovio engraving in place of the OSMD sheet and makes BOTH the staff and
+// the falling-notes canvas editable surfaces over ONE notation model (scoreModel). A pitch edit
+// on either surface goes through a command, mutates the model, re-engraves the staff from the
+// model, and re-derives the falling notes + audio (reloadNotes), so the two surfaces never
+// diverge. The OSMD view is hidden (not destroyed) so exiting restores the normal player.
 
 // Whether edit mode can be entered: only with a rendered sheet AND retained MusicXML to engrave.
 // Audio-derived scores have neither, so the Edit button stays disabled for them.
@@ -532,42 +485,55 @@ function setEditButtonEnabled(): void {
   editBtn.disabled = !editModeAvailable();
 }
 
-// Enter edit mode: lazy-load the Verovio toolkit + WASM (~7MB) on first use, render the retained
-// MusicXML into the sheet pane, and arm notehead selection. Pauses playback and leaves Correct
-// mode so the two edit surfaces never fight (one surface of truth). Idempotent and guarded
-// against overlapping async loads.
+// Enter edit mode: lazy-load the Verovio toolkit + WASM (~7MB) on first use, build the editable
+// model from the retained MusicXML, render the staff, and arm both surfaces. Pauses playback
+// (editing a moving target is never allowed). Idempotent and guarded against overlapping loads.
 async function enterEditMode(): Promise<void> {
   if (editMode || editModeLoading || !editModeAvailable() || !sourceMusicXml) return;
-  // Editing a moving target is never allowed (Designer decision): pause first.
   if (playing) {
     Tone.getTransport().pause();
     setPlaying(false);
   }
-  // The falling-canvas editor and the staff editor are mutually exclusive.
-  if (correctMode) exitCorrectMode();
-
   editModeLoading = true;
   editBtn.disabled = true;
-  staffEditLive.textContent = "Loading the staff editor...";
+  editLive.textContent = "Loading the editor...";
   try {
     if (!verovioToolkit) verovioToolkit = await loadVerovioToolkit();
     // The score could have been swapped or audio-loaded while the toolkit streamed in; bail if
     // edit mode is no longer applicable so we never engrave a stale/cleared score.
     if (!editModeAvailable() || !sourceMusicXml) {
-      staffEditLive.textContent = "";
+      editLive.textContent = "";
       return;
     }
+    // Build the source-of-truth model + its command stack from the retained MusicXML. Pass the
+    // tempo OSMD used to derive score.notes so the model's onset seconds match the VisNote
+    // seconds exactly (the handle <-> VisNote mapping keys on midi + onset seconds).
+    const bpm = (osmd.Sheet as { DefaultStartTempoInBpm?: number } | undefined)?.DefaultStartTempoInBpm;
+    scoreModel = parseScoreModel(sourceMusicXml, bpm);
+    commandStack = new CommandStack(scoreModel);
+    selectedHandle = null;
+    rederiveMaps();
     renderVerovio();
     editMode = true;
     editBtn.setAttribute("aria-pressed", "true");
+    editBtn.title = "Edit mode on. Click to exit.";
     verovioCredit.hidden = false;
+    editToolbar.hidden = false;
     sheetContainer.classList.add("editing");
-    staffEditLive.textContent =
-      "Edit mode on. Click a notehead to select it, or use Left and Right arrows. This view is read-only for now.";
+    // Both surfaces become focusable application regions, each enumerating ITS keys.
+    canvas.setAttribute("tabindex", "0");
+    canvas.setAttribute("role", "application");
+    canvas.setAttribute(
+      "aria-label",
+      "Falling notes editor. Up and down select a note; plus and minus change its pitch by a semitone; Shift with plus or minus moves an octave; Control Z undoes.",
+    );
+    reflectUndoRedoButtons();
+    reflectSharedSelection();
+    editLive.textContent =
+      "Edit mode on. Click a note on the staff or the falling notes to select it, then edit its pitch.";
   } catch (err) {
     console.error("Failed to enter edit mode:", err);
-    staffEditLive.textContent = "Could not load the staff editor.";
-    // Leave the normal player intact on failure.
+    editLive.textContent = "Could not load the editor.";
     exitEditMode();
   } finally {
     editModeLoading = false;
@@ -575,29 +541,77 @@ async function enterEditMode(): Promise<void> {
   }
 }
 
-// Leave edit mode: restore the OSMD view (un-hide its SVG + overlay), hide the Verovio host +
-// credit, and clear the staff selection. The Verovio toolkit instance is kept for a fast
-// re-entry; only the on-screen render is torn down.
+// Leave edit mode: restore the OSMD view, hide the Verovio host + credit + toolbar, drop both
+// surfaces' application roles, and discard the model + command stack. The Verovio toolkit
+// instance is kept for a fast re-entry; only the on-screen render + edit state are torn down.
 function exitEditMode(): void {
   editMode = false;
   editBtn.setAttribute("aria-pressed", "false");
+  editBtn.title =
+    "Edit mode off. Click to fix wrong notes on the staff or the falling notes.";
   verovioCredit.hidden = true;
+  editToolbar.hidden = true;
   sheetContainer.classList.remove("editing");
-  staffSelectedId = null;
-  staffNavIds = [];
+  scoreModel = null;
+  commandStack = null;
+  selectedHandle = null;
+  handleToVisIndex = new Map();
+  visIndexToHandle = new Map();
   staffPlayingIds = [];
-  if (verovioHost) verovioHost.replaceChildren();
+  drag = null;
+  visualizer.setSelected(null);
+  visualizer.setDragPreview(null);
+  visualizer.setMirrorDeemphasis(null);
+  canvas.removeAttribute("tabindex");
+  canvas.removeAttribute("role");
+  canvas.removeAttribute("aria-label");
+  noteEdit.hidden = true;
+  clearStaffMirror();
+  if (verovioHost) {
+    verovioHost.replaceChildren();
+    // Drop the application role + tab stop so the empty host is not a phantom focus target in
+    // the normal (non-editing) player.
+    verovioHost.removeAttribute("tabindex");
+    verovioHost.removeAttribute("role");
+    verovioHost.removeAttribute("aria-label");
+  }
 }
 
-// Render (or re-render) the retained MusicXML with Verovio into a host div inside #sheet, then
-// rebuild the selection nav order and re-apply any current selection/playhead tint. The host is
-// created once and reused; OSMD's SVG sits beside it (hidden by the `.editing` class).
+// Rebuild the handle <-> VisNote index maps from the current model + falling notes. Called after
+// every edit and on entering edit mode. The handle is the durable selection spine; these maps
+// translate it to the VisNote index (canvas) and, via verovioRender.visIndexToId, the staff id.
+function rederiveMaps(): void {
+  if (!scoreModel || !score) {
+    handleToVisIndex = new Map();
+    visIndexToHandle = new Map();
+    return;
+  }
+  handleToVisIndex = buildHandleToVisIndex(scoreModel.handles, score.notes);
+  visIndexToHandle = new Map();
+  for (const [handleId, visIndex] of handleToVisIndex) {
+    if (!visIndexToHandle.has(visIndex)) visIndexToHandle.set(visIndex, handleId);
+  }
+}
+
+// Render (or re-render) the model with Verovio into a host div inside #sheet, then re-apply the
+// shared selection + playhead tint. The host is created once and reused; OSMD's SVG sits beside
+// it (hidden by the `.editing` class). The SVG is engraved from the model's CURRENT serialized
+// MusicXML, so it always reflects every committed (or mid-drag previewed) edit.
 function renderVerovio(): void {
-  if (!verovioToolkit || !sourceMusicXml || !score) return;
+  if (!verovioToolkit || !scoreModel || !score) return;
   if (!verovioHost) {
     verovioHost = document.createElement("div");
     verovioHost.id = "verovio-host";
   }
+  // A focusable application region so a keyboard user can Tab to the staff and drive its keys.
+  // Set every render (idempotent) since exitEditMode strips these so the empty host is not a
+  // phantom tab stop in the normal player.
+  verovioHost.setAttribute("tabindex", "0");
+  verovioHost.setAttribute("role", "application");
+  verovioHost.setAttribute(
+    "aria-label",
+    "Staff editor. Left and right select a note; up and down change its pitch by a step; Control with up or down changes by a semitone; Shift with up or down by an octave; Control Z undoes.",
+  );
   // Always (re)attach the host to #sheet. OSMD owns #sheet and an osmd.load/render between edit
   // sessions can detach our node, so re-appending here keeps the render going into the live DOM
   // instead of an orphaned div. appendChild is a no-op move when it is already the last child.
@@ -605,15 +619,8 @@ function renderVerovio(): void {
     sheetContainer.appendChild(verovioHost);
   }
   const width = sheetContainer.clientWidth || 800;
-  verovioRender = renderMusicXml(verovioToolkit, sourceMusicXml, score.notes, width);
+  verovioRender = renderMusicXml(verovioToolkit, scoreModel.serialize(), score.notes, width);
   verovioHost.innerHTML = verovioRender.svg;
-  // Musical nav order for Left/Right: by onset, then pitch (low to high within a chord).
-  staffNavIds = verovioRender.notes
-    .slice()
-    .sort((a, b) => a.timeSec - b.timeSec || a.midi - b.midi)
-    .map((n) => n.id);
-  // Re-apply a surviving selection (e.g. after a resize re-render); drop it if the id is gone.
-  if (staffSelectedId && !staffNavIds.includes(staffSelectedId)) staffSelectedId = null;
   applyStaffSelectionHighlight();
   staffPlayingIds = [];
   updateVerovioPlayhead(Tone.getTransport().seconds * tempoRate, true);
@@ -625,47 +632,109 @@ function staffNoteEl(id: string): SVGGElement | null {
   return verovioHost.querySelector<SVGGElement>(`g.note[id="${CSS.escape(id)}"]`);
 }
 
-// Reflect the current staff selection in the SVG: stroke the selected notehead with the brass
-// halo class, clearing it from any previously-selected one. Also surface the mapped VisNote name
-// (when the id maps to one) so selection is consistent with the falling-notes model.
-function applyStaffSelectionHighlight(announce?: string): void {
+// The Verovio notehead id for the current shared selection, or null. handle -> VisNote index ->
+// id, using the render's inverse map. Off-screen-on-the-mirror cases and tie continuations can
+// leave a handle with no staff id (then the staff shows no halo and the canvas carries it).
+function selectedStaffId(): string | null {
+  const visIndex = selectedVisIndex();
+  if (visIndex === null || !verovioRender) return null;
+  return verovioRender.visIndexToId.get(visIndex) ?? null;
+}
+
+// Reflect the shared selection on the STAFF: stroke the selected notehead with the brass halo,
+// clearing any previous one.
+function applyStaffSelectionHighlight(): void {
   if (!verovioHost) return;
   for (const el of verovioHost.querySelectorAll(".ph-selected")) {
     el.classList.remove("ph-selected");
   }
-  if (staffSelectedId) {
-    staffNoteEl(staffSelectedId)?.classList.add("ph-selected");
-  }
-  if (announce) staffEditLive.textContent = announce;
+  const id = selectedStaffId();
+  if (id) staffNoteEl(id)?.classList.add("ph-selected");
 }
 
-// A human label for a selected notehead. Prefer the mapped VisNote (so the staff and falling
-// view agree); fall back to the raw id when the note has no VisNote (e.g. a tie continuation).
-function staffNoteLabel(id: string): string {
-  const index = verovioRender?.idToVisIndex.get(id);
-  if (index !== undefined && score) return editNoteLabel(score.notes[index]);
+// A human label for the shared selection (the from-pitch token in announcements), via its
+// VisNote when mapped, else the model handle's pitch (e.g. a tie continuation with no VisNote).
+function selectedNoteLabel(): string {
+  const visIndex = selectedVisIndex();
+  if (visIndex !== null && score) return editNoteLabel(score.notes[visIndex]);
+  if (selectedHandle !== null && scoreModel) {
+    const h = scoreModel.handles[selectedHandle];
+    if (h) return pitchLabel(h.midi, spellingFromPitch(h.pitch));
+  }
   return "note";
 }
 
-// Select a notehead by id (from a click or a keyboard step) and announce it.
-function selectStaffNote(id: string): void {
-  staffSelectedId = id;
-  applyStaffSelectionHighlight(`Selected ${staffNoteLabel(id)}`);
+// Reflect the ONE shared selection on BOTH surfaces + the edit cluster (Designer P1-1). The
+// cluster (readout + pitch + delete) shows whenever edit mode is on AND a note is selected,
+// regardless of which surface the selection came from, and acts on the one shared selection.
+function reflectSharedSelection(announce?: string): void {
+  const visIndex = selectedVisIndex();
+  visualizer.setSelected(visIndex);
+  applyStaffSelectionHighlight();
+  const hasSelection = selectedHandle !== null;
+  noteEdit.hidden = !(editMode && hasSelection);
+  if (hasSelection) noteEditReadout.textContent = selectedNoteLabel();
+  if (announce) editLive.textContent = announce;
 }
 
-// Step the staff selection to the previous/next notehead in musical order (Left/Right). With no
-// current selection, Right selects the first note and Left the last, so a single arrow always
-// lands somewhere. No-op when the score has no noteheads.
+// Select a model note by HANDLE (the shared spine) and announce it. Used by both surfaces.
+function selectHandle(handleId: number, silent = false): void {
+  selectedHandle = handleId;
+  reflectSharedSelection(silent ? undefined : `Selected ${selectedNoteLabel()}`);
+}
+
+// Select from a CANVAS bar (VisNote index) by mapping to its handle.
+function selectByVisIndex(visIndex: number): void {
+  const handle = visIndexToHandle.get(visIndex);
+  if (handle === undefined) return;
+  selectHandle(handle);
+}
+
+// Handles in musical order (onset, then pitch) for the staff's Left/Right selection stepping.
+// Tie continuations are excluded (they have no VisNote to highlight and the start carries them).
+function staffNavHandles(): number[] {
+  if (!scoreModel) return [];
+  return scoreModel.handles
+    .filter((h) => !h.isTieContinuation)
+    .slice()
+    .sort((a, b) => a.onsetSec - b.onsetSec || a.midi - b.midi)
+    .map((h) => h.id);
+}
+
+// Step the staff selection to the prev/next notehead in musical order (Left/Right). With no
+// current selection, Right selects the first and Left the last, so one arrow always lands.
 function moveStaffSelection(delta: 1 | -1): void {
-  if (staffNavIds.length === 0) return;
+  const order = staffNavHandles();
+  if (order.length === 0) return;
   let next: number;
-  if (staffSelectedId === null) {
-    next = delta > 0 ? 0 : staffNavIds.length - 1;
+  const current = selectedHandle === null ? -1 : order.indexOf(selectedHandle);
+  if (current === -1) {
+    next = delta > 0 ? 0 : order.length - 1;
   } else {
-    const current = staffNavIds.indexOf(staffSelectedId);
-    next = (current + delta + staffNavIds.length) % staffNavIds.length;
+    next = (current + delta + order.length) % order.length;
   }
-  selectStaffNote(staffNavIds[next]);
+  selectHandle(order[next]);
+}
+
+// Step the CANVAS selection by onset to the nearest earlier/later note (Up/Down on the canvas),
+// matching what the falling view's selection nav did before. Operates over VisNote indices in
+// onset order so it walks the score the way the lane shows it. Wraps at the ends.
+function moveCanvasSelection(delta: 1 | -1): void {
+  if (!score || score.notes.length === 0) return;
+  // VisNote indices sorted by onset, then pitch, so stepping is musical.
+  const order = score.notes
+    .map((n, i) => ({ i, time: n.time, midi: n.midi }))
+    .sort((a, b) => a.time - b.time || a.midi - b.midi)
+    .map((o) => o.i);
+  const currentVis = selectedVisIndex();
+  const pos = currentVis === null ? -1 : order.indexOf(currentVis);
+  let nextPos: number;
+  if (pos === -1) {
+    nextPos = delta > 0 ? 0 : order.length - 1;
+  } else {
+    nextPos = (pos + delta + order.length) % order.length;
+  }
+  selectByVisIndex(order[nextPos]);
 }
 
 // Tint the notehead(s) sounding at `scoreTime` so the Verovio staff shows the playhead, mirroring
@@ -686,6 +755,133 @@ function updateVerovioPlayhead(scoreTime: number, force = false): void {
   }
   for (const id of ids) staffNoteEl(id)?.classList.add("ph-playing");
   staffPlayingIds = ids;
+}
+
+// ----- The dual-surface edit operations (pitch + undo/redo) -----
+
+// Commit a discrete pitch edit (a keypress) on the shared selection: build the SetPitchCommand,
+// push it (which applies it to the model), re-engrave the staff, re-derive the falling notes +
+// audio, keep the selection on the same handle, and announce from/to. `next` is the target
+// pitch the surface computed (diatonic / chromatic / octave). No-op without a selected handle.
+function commitPitchEdit(next: ModelPitch): void {
+  if (!scoreModel || !commandStack || selectedHandle === null || !score) return;
+  const handle = scoreModel.handles[selectedHandle];
+  if (!handle) return;
+  const before = handle.pitch;
+  const fromLabel = pitchLabel(midiFromPitch(before), spellingFromPitch(before));
+  const cmd: SetPitchCommand = {
+    kind: "setPitch",
+    handleId: selectedHandle,
+    before,
+    after: next,
+  };
+  commandStack.push(cmd); // applies it to the model
+  const verb = verticalVerb(midiFromPitch(before), midiFromPitch(next));
+  const toLabel = pitchLabel(midiFromPitch(next), spellingFromPitch(next));
+  finishEdit(`${fromLabel} ${verb} ${toLabel}`);
+}
+
+// The directional phrase for an announcement, e.g. "up to", "down to", "up an octave to".
+function verticalVerb(fromMidi: number, toMidi: number): string {
+  const d = toMidi - fromMidi;
+  if (d === 12) return "up an octave to";
+  if (d === -12) return "down an octave to";
+  return d >= 0 ? "up to" : "down to";
+}
+
+// Shared tail of an edit (or undo/redo): re-engrave the staff from the model, re-derive the
+// falling notes from the model's new pitches, rebuild the maps, refresh selection, undo/redo
+// buttons, and announce. The audio + canvas swap goes through reloadNotes (transport-safe).
+function finishEdit(announce: string): void {
+  if (!score) return;
+  // Re-derive every mapped handle's pitch onto the falling notes from the model (covers undo of
+  // a multi-note future too, though P1 edits are one note at a time).
+  let notes = score.notes.slice();
+  if (scoreModel) {
+    for (const h of scoreModel.handles) {
+      const visIndex = handleToVisIndex.get(h.id);
+      if (visIndex !== undefined) {
+        notes[visIndex] = { ...notes[visIndex], midi: h.midi, spelling: spellingFromPitch(h.pitch) };
+      }
+    }
+  }
+  reloadNotes(notes);
+  rederiveMaps();
+  renderVerovio();
+  reflectUndoRedoButtons();
+  reflectSharedSelection(announce);
+}
+
+// Undo / redo: route the model mutation through the same re-render / re-derive path so both
+// surfaces + audio restore together, and re-select the affected note. Empty-stack presses
+// announce so a keyboard/SR user knows the press registered (Designer P1-6).
+function doUndo(): void {
+  if (!commandStack) return;
+  if (!commandStack.canUndo()) {
+    editLive.textContent = "Nothing to undo";
+    return;
+  }
+  const cmd = commandStack.undo();
+  if (!cmd) return;
+  // Re-select the affected note (it now shows its prior pitch) and announce what reversed. Do
+  // NOT rebuild the maps here: finishEdit projects the reverted model pitch onto the falling
+  // notes using the existing (index-stable) map, THEN reloadNotes + rederiveMaps rebuild it
+  // against the updated notes. Rebuilding first would fail to match the just-reverted note (the
+  // model already holds the old pitch while score.notes still holds the new one).
+  selectedHandle = cmd.handleId;
+  const verb = verticalVerb(midiFromPitch(cmd.after), midiFromPitch(cmd.before));
+  const toLabel = pitchLabel(midiFromPitch(cmd.before), spellingFromPitch(cmd.before));
+  finishEdit(`Undid: ${pitchLabel(midiFromPitch(cmd.after), spellingFromPitch(cmd.after))} ${verb} ${toLabel}`);
+}
+
+function doRedo(): void {
+  if (!commandStack) return;
+  if (!commandStack.canRedo()) {
+    editLive.textContent = "Nothing to redo";
+    return;
+  }
+  const cmd = commandStack.redo();
+  if (!cmd) return;
+  // Same map ordering as doUndo: project with the existing map, then rebuild in finishEdit.
+  selectedHandle = cmd.handleId;
+  const verb = verticalVerb(midiFromPitch(cmd.before), midiFromPitch(cmd.after));
+  const toLabel = pitchLabel(midiFromPitch(cmd.after), spellingFromPitch(cmd.after));
+  finishEdit(`Redid: ${pitchLabel(midiFromPitch(cmd.before), spellingFromPitch(cmd.before))} ${verb} ${toLabel}`);
+}
+
+// Dim/enable the undo/redo buttons to match the stacks (Designer P1-6: visibly dimmed +
+// aria-disabled when empty so the user can see whether there is history to move through).
+function reflectUndoRedoButtons(): void {
+  const canUndo = commandStack?.canUndo() ?? false;
+  const canRedo = commandStack?.canRedo() ?? false;
+  undoBtn.disabled = !canUndo;
+  undoBtn.setAttribute("aria-disabled", String(!canUndo));
+  redoBtn.disabled = !canRedo;
+  redoBtn.setAttribute("aria-disabled", String(!canRedo));
+}
+
+// Compute the target pitch for a keyboard pitch step on the STAFF (diatonic / chromatic / octave)
+// or commit it. `mode` selects the axis; reads the selected handle's current pitch + key sig.
+function staffPitchStep(mode: "diatonic" | "chromatic" | "octave", dir: 1 | -1): void {
+  if (!scoreModel || selectedHandle === null) return;
+  const h = scoreModel.handles[selectedHandle];
+  if (!h) return;
+  let next: ModelPitch;
+  if (mode === "diatonic") next = diatonicStep(h.pitch, dir, scoreModel.fifthsForHandle(selectedHandle));
+  else if (mode === "chromatic") next = chromaticStep(h.pitch, dir);
+  else next = octaveStep(h.pitch, dir);
+  commitPitchEdit(next);
+}
+
+// Compute + commit a CHROMATIC keyboard pitch step on the CANVAS (+/- = semitone, Shift = octave).
+// The canvas is chromatic (its native unit is the key/semitone); re-spell from the new MIDI so
+// the staff engraves a sensible accidental.
+function canvasPitchStep(octaveMod: boolean, dir: 1 | -1): void {
+  if (!scoreModel || selectedHandle === null) return;
+  const h = scoreModel.handles[selectedHandle];
+  if (!h) return;
+  const next = octaveMod ? octaveStep(h.pitch, dir) : chromaticStep(h.pitch, dir);
+  commitPitchEdit(next);
 }
 
 // Load MusicXML into OSMD and rebuild the pipeline. Shared by the direct MusicXML file
@@ -883,12 +1079,13 @@ async function togglePlay(): Promise<void> {
     transport.pause();
     setPlaying(false);
   } else {
-    // Pressing Play suspends selection so a moving target is never edited (Designer decision
-    // #2/#3). The selection clears but Correct mode itself stays on; pausing again lets the
-    // player re-select. The edit cluster hides because reflectSelection sees no selection.
-    if (selectedIndex !== null) {
-      selectedIndex = null;
-      reflectSelection();
+    // Pressing Play in edit mode suspends the selection so a moving target is never edited
+    // (Designer decision): the selection clears (hiding the edit cluster) but edit mode stays
+    // on; pausing again lets the player re-select. Any in-flight drag is abandoned.
+    if (editMode && selectedHandle !== null) {
+      cancelDrag();
+      selectedHandle = null;
+      reflectSharedSelection();
     }
     transport.start();
     setPlaying(true);
@@ -1231,17 +1428,13 @@ window.addEventListener("keydown", (e) => {
     e.preventDefault();
     togglePlay();
   } else if (e.code === "ArrowRight") {
-    if (isFormField) return;
+    if (isFormField || editMode) return; // edit mode: the edit listener owns the arrows
     e.preventDefault();
-    // In edit mode Left/Right step the STAFF selection between noteheads (Designer decision);
-    // the player is paused there, so they do not also scrub the transport.
-    if (editMode) moveStaffSelection(1);
-    else stepNote(1);
+    stepNote(1);
   } else if (e.code === "ArrowLeft") {
-    if (isFormField) return;
+    if (isFormField || editMode) return;
     e.preventDefault();
-    if (editMode) moveStaffSelection(-1);
-    else stepNote(-1);
+    stepNote(-1);
   }
 });
 
@@ -1306,10 +1499,11 @@ async function exportVideo(): Promise<void> {
 
     // Start the performance from the top and record it in real time. The timeslice flushes
     // a chunk each second so a long performance does not buffer entirely in memory. Clear any
-    // active correction selection first so its ring is never baked into the recorded video.
-    if (selectedIndex !== null) {
-      selectedIndex = null;
-      reflectSelection();
+    // active edit selection first so its ring is never baked into the recorded video.
+    if (selectedHandle !== null) {
+      cancelDrag();
+      selectedHandle = null;
+      reflectSharedSelection();
     }
     rewind();
     recorder.start(1000);
@@ -1464,90 +1658,314 @@ namesBtn.addEventListener("click", () => {
   applyLabelMode(labelMode);
 });
 
-// Correct mode toggle (issue #6): flip the mode, pausing playback on entry.
-correctBtn.addEventListener("click", () => {
-  if (!score) return;
-  if (correctMode) exitCorrectMode();
-  else enterCorrectMode();
-});
-
-// Smart Edit Mode toggle (P0): flip the staff editor. Entering lazy-loads Verovio and engraves
-// the retained MusicXML; leaving restores the OSMD view. Disabled for audio scores.
+// Smart Edit Mode toggle (P1): flip the dual-surface editor. Entering lazy-loads Verovio, builds
+// the source-of-truth model, and engraves it; leaving restores the OSMD view. Disabled for audio
+// scores (no MusicXML to engrave).
 editBtn.addEventListener("click", () => {
   if (editMode) exitEditMode();
   else enterEditMode();
 });
 
-// Click a notehead in the Verovio staff to select it (P0). Delegated on the persistent host so
-// it survives re-renders. Clicking empty staff space clears the selection. Every notehead is a
-// `<g class="note" id>`, so closest("g.note") resolves the click to a stable MEI id.
-sheetContainer.addEventListener("click", (e) => {
-  if (!editMode) return;
+// Undo / redo buttons (Smart Edit P1).
+undoBtn.addEventListener("click", () => doUndo());
+redoBtn.addEventListener("click", () => doRedo());
+
+// ----- STAFF surface: click to select + vertical drag to change pitch (diatonic) -----
+//
+// Click a notehead to select it; press-and-drag a notehead vertically to change its pitch,
+// snapping in diatonic steps as the pointer moves, committing one coalesced edit on release.
+// Delegated on the persistent #sheet container so it survives re-renders.
+sheetContainer.addEventListener("pointerdown", (e) => {
+  if (!editMode || playing) return;
   const target = e.target as Element | null;
   const noteG = target?.closest("g.note") as SVGGElement | null;
   if (noteG && noteG.id) {
-    selectStaffNote(noteG.id);
+    // Resolve the notehead to its model handle FIRST; only select + start a drag if it maps to a
+    // real editable note (a tie continuation maps to no handle, so we do nothing rather than drag
+    // a stale prior selection).
+    const visIndex = verovioRender?.idToVisIndex.get(noteG.id);
+    const handle = visIndex === undefined ? undefined : visIndexToHandle.get(visIndex);
+    if (handle === undefined) return;
+    selectHandle(handle);
+    beginStaffDrag(noteG, handle, e);
   } else if (target?.closest("#verovio-host")) {
     // A click on the staff but not on a notehead clears the selection.
-    staffSelectedId = null;
-    applyStaffSelectionHighlight("Selection cleared.");
+    selectedHandle = null;
+    reflectSharedSelection("Selection cleared.");
   }
 });
 
-// Click/tap a falling bar to select it (issue #6). Only meaningful in Correct mode (and the
-// transport is paused there). Convert the click to canvas-local px and hit-test against the
-// current playhead so the rectangle matches what the user sees.
-canvas.addEventListener("click", (e) => {
-  if (!score || !correctMode) return;
+// ----- CANVAS surface: click to select + HORIZONTAL drag to change pitch (chromatic) -----
+//
+// On the falling-notes canvas pitch is the HORIZONTAL axis (key columns) and time is vertical, so
+// dragging a bar SIDEWAYS to another key column is the chromatic pitch edit; vertical movement
+// (time) is ignored. (The Designer spec describes a horizontal piano-roll where pitch is vertical;
+// this app's falling view is vertical, so the pitch axis is horizontal here.) Convert the click to
+// canvas-local px and hit-test against the current playhead so the rectangle matches what is seen.
+canvas.addEventListener("pointerdown", (e) => {
+  if (!score || !editMode || playing) return;
   const rect = canvas.getBoundingClientRect();
   const px = e.clientX - rect.left;
   const py = e.clientY - rect.top;
   const scoreTime = Tone.getTransport().seconds * tempoRate;
   const hit = visualizer.hitTest(px, py, scoreTime);
   if (hit === null) {
-    selectedIndex = null;
-    reflectSelection("Selection cleared.");
+    selectedHandle = null;
+    reflectSharedSelection("Selection cleared.");
     return;
   }
-  selectedIndex = hit;
-  const note = score.notes[hit];
-  reflectSelection(`Selected ${editNoteLabel(note)}`);
+  const handle = visIndexToHandle.get(hit);
+  if (handle === undefined) return; // a bar with no model handle (defensive); just no-op the drag
+  selectHandle(handle);
+  beginCanvasDrag(handle, e);
 });
 
-// Edit cluster buttons (issue #6). Each is bound to a transform; also bound to keys below.
-pitchUpBtn.addEventListener("click", () => applyEdit((n) => nudgePitch(n, selectedIndex!, 1), "nudge"));
-pitchDownBtn.addEventListener("click", () => applyEdit((n) => nudgePitch(n, selectedIndex!, -1), "nudge"));
-deleteNoteBtn.addEventListener("click", () => applyEdit((n) => deleteNote(n, selectedIndex!), "delete"));
+// Edit cluster buttons (Smart Edit P1): act on the ONE shared selection. Pitch up/down on the
+// cluster are DIATONIC (the staff's native unit, the discoverable mirror of the staff arrows).
+pitchUpBtn.addEventListener("click", () => staffPitchStep("diatonic", 1));
+pitchDownBtn.addEventListener("click", () => staffPitchStep("diatonic", -1));
 
-// Correct-mode keyboard editing (issue #6). Up/Down move the selection (Left/Right/Space are
-// transport, handled by the global listener); -/+ nudge pitch; Delete/Backspace remove. Active
-// only in Correct mode, and ignored while a form field is focused (so the rename input is safe).
+// Whether an element is a form field, so editing shortcuts never steal typing (the rename input).
+function isFormFieldTarget(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  const tag = el?.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || !!el?.isContentEditable;
+}
+
+// Unified edit-mode keyboard handler (Smart Edit P1). Routes by which SURFACE has focus so the
+// two idioms coexist: on the STAFF, Up/Down = diatonic pitch (Ctrl = chromatic, Shift = octave),
+// Left/Right = selection step; on the CANVAS, +/- = chromatic pitch (Shift = octave), Up/Down =
+// selection step. The +/- pitch pair also works as a staff alias. Undo/redo are global to edit
+// mode (active even with no selection). Ignored while a form field is focused.
 window.addEventListener("keydown", (e) => {
-  if (!score || busy || !correctMode) return;
-  const target = e.target as HTMLElement | null;
-  const tag = target?.tagName;
-  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target?.isContentEditable) {
+  if (!score || busy || !editMode) return;
+  if (isFormFieldTarget(e.target)) return;
+  const ctrl = e.ctrlKey || e.metaKey;
+
+  // Undo / redo first (not gated on a selection). Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z, Ctrl/Cmd+Y.
+  if (ctrl && (e.key === "z" || e.key === "Z")) {
+    e.preventDefault();
+    if (e.shiftKey) doRedo();
+    else doUndo();
     return;
   }
+  if (ctrl && (e.key === "y" || e.key === "Y")) {
+    e.preventDefault();
+    doRedo();
+    return;
+  }
+
+  // Is the canvas the focused (active) surface? If so, its idiom applies; otherwise the staff's.
+  const onCanvas = document.activeElement === canvas;
+
   if (e.key === "ArrowUp") {
     e.preventDefault();
-    moveSelection(1);
-  } else if (e.key === "ArrowDown") {
+    if (onCanvas) moveCanvasSelection(1);
+    else staffPitchStep(ctrl ? "chromatic" : e.shiftKey ? "octave" : "diatonic", 1);
+    return;
+  }
+  if (e.key === "ArrowDown") {
     e.preventDefault();
-    moveSelection(-1);
-  } else if (selectedIndex === null) {
-    return; // the edit keys below need a selected note
-  } else if (e.key === "+" || e.key === "=") {
+    if (onCanvas) moveCanvasSelection(-1);
+    else staffPitchStep(ctrl ? "chromatic" : e.shiftKey ? "octave" : "diatonic", -1);
+    return;
+  }
+  if (e.key === "ArrowRight") {
     e.preventDefault();
-    applyEdit((n) => nudgePitch(n, selectedIndex!, 1), "nudge");
+    moveStaffSelection(1); // staff selection step (the canvas owns Up/Down for selection)
+    return;
+  }
+  if (e.key === "ArrowLeft") {
+    e.preventDefault();
+    moveStaffSelection(-1);
+    return;
+  }
+
+  if (selectedHandle === null) return; // the remaining keys need a selected note
+
+  if (e.key === "+" || e.key === "=") {
+    e.preventDefault();
+    // +/- are the CANVAS's chromatic pitch pair, and a staff alias. Shift = octave.
+    canvasPitchStep(e.shiftKey, 1);
   } else if (e.key === "-" || e.key === "_") {
     e.preventDefault();
-    applyEdit((n) => nudgePitch(n, selectedIndex!, -1), "nudge");
-  } else if (e.key === "Delete" || e.key === "Backspace") {
-    e.preventDefault();
-    applyEdit((n) => deleteNote(n, selectedIndex!), "delete");
+    canvasPitchStep(e.shiftKey, -1);
   }
 });
+
+// ----- Drag mechanics (shared by both surfaces) -----
+
+// Start a STAFF pitch drag on `noteG`. Records the pre-drag pitch + a per-step pixel sensitivity
+// from the notehead's height (a notehead is ~one interline; a diatonic step is half an interline),
+// dims the canvas mirror, and captures the pointer so a drag that leaves the SVG still tracks.
+function beginStaffDrag(noteG: SVGGElement, handleId: number, e: PointerEvent): void {
+  if (!scoreModel) return;
+  const h = scoreModel.handles[handleId];
+  if (!h) return;
+  const bbox = noteG.getBoundingClientRect();
+  const pxPerStep = Math.max(4, (bbox.height || 16) / 2);
+  drag = {
+    surface: "staff",
+    handleId,
+    beforePitch: h.pitch,
+    startClientX: e.clientX,
+    startClientY: e.clientY,
+    startMidi: h.midi,
+    pxPerStep,
+    lastPreviewMidi: h.midi,
+    moved: false,
+  };
+  // The canvas is the stale mirror during a staff drag: dim its selected bar.
+  visualizer.setMirrorDeemphasis(selectedVisIndex());
+  try {
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+  } catch {
+    // Pointer capture is best-effort; the window-level move/up listeners still track the drag.
+  }
+}
+
+// Start a CANVAS pitch drag. Records the pre-drag pitch and dims the staff mirror notehead.
+function beginCanvasDrag(handleId: number, e: PointerEvent): void {
+  if (!scoreModel) return;
+  const h = scoreModel.handles[handleId];
+  if (!h) return;
+  drag = {
+    surface: "canvas",
+    handleId,
+    beforePitch: h.pitch,
+    startClientX: e.clientX,
+    startClientY: e.clientY,
+    startMidi: h.midi,
+    pxPerStep: 0,
+    lastPreviewMidi: h.midi,
+    moved: false,
+  };
+  // The staff is the stale mirror during a canvas drag: dim its selected notehead.
+  staffNoteEl(selectedStaffId() ?? "")?.classList.add("ph-mirror");
+  try {
+    canvas.setPointerCapture?.(e.pointerId);
+  } catch {
+    // best-effort
+  }
+}
+
+// Pointer move during a drag: compute the previewed pitch from the pointer delta and, if it
+// changed, preview ONLY the active surface (the staff re-engraves at the snapped diatonic step;
+// the canvas draws the bar at the key under the pointer). The mirror + audio are NOT updated
+// mid-drag (Designer P1-3). The model IS mutated for the staff preview (so it re-engraves); the
+// net edit is recorded as one command on release.
+window.addEventListener("pointermove", (e) => {
+  if (!drag || !scoreModel) return;
+  if (drag.surface === "staff") {
+    const steps = Math.round((drag.startClientY - e.clientY) / drag.pxPerStep); // up = +steps
+    let preview = drag.beforePitch;
+    const fifths = scoreModel.fifthsForHandle(drag.handleId);
+    for (let s = 0; s < Math.abs(steps); s++) {
+      preview = diatonicStep(preview, steps > 0 ? 1 : -1, fifths);
+    }
+    const previewMidi = midiFromPitch(preview);
+    if (previewMidi !== drag.lastPreviewMidi) {
+      drag.lastPreviewMidi = previewMidi;
+      drag.moved = true;
+      // Re-engrave the staff at the previewed pitch (single-digit ms). Mutate the model directly
+      // (NOT through the command stack); the one command is recorded on release.
+      scoreModel.setPitch(drag.handleId, preview);
+      renderVerovioPreview(drag.handleId);
+    }
+  } else {
+    // Canvas: pitch is the horizontal axis. Snap to the key column under the pointer.
+    const rect = canvas.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const targetMidi = visualizer.midiAtX(px);
+    if (targetMidi !== null && targetMidi !== drag.lastPreviewMidi) {
+      drag.lastPreviewMidi = targetMidi;
+      drag.moved = true;
+      const visIndex = handleToVisIndex.get(drag.handleId);
+      if (visIndex !== undefined) {
+        visualizer.setDragPreview({ index: visIndex, previewMidi: targetMidi });
+      }
+    }
+  }
+});
+
+// Pointer up: commit the drag as ONE coalesced command (before -> final pitch) and do the full
+// re-render / re-derive, or just clean up if the pointer never moved (a plain click-select).
+window.addEventListener("pointerup", () => {
+  if (!drag) return;
+  const d = drag;
+  drag = null;
+  visualizer.setMirrorDeemphasis(null);
+  visualizer.setDragPreview(null);
+  clearStaffMirror();
+  if (!d.moved || !scoreModel || !commandStack) {
+    // No movement: the model was never changed; leave the selection as the click set it.
+    return;
+  }
+  // Determine the final pitch. Staff: the model already holds the previewed pitch. Canvas: derive
+  // the final pitch from the snapped key column (re-spell from MIDI), since the canvas only
+  // previewed (the model was not mutated mid-canvas-drag).
+  let finalPitch: ModelPitch;
+  if (d.surface === "staff") {
+    finalPitch = scoreModel.handles[d.handleId]?.pitch ?? d.beforePitch;
+    // Roll the model back to the pre-drag pitch so the command's apply is the single source of
+    // the change (keeps the model state and the command in lockstep; pushApplied would also work
+    // but this keeps one apply path).
+    scoreModel.setPitch(d.handleId, d.beforePitch);
+  } else {
+    finalPitch = pitchFromMidi(d.lastPreviewMidi, d.lastPreviewMidi >= d.startMidi ? 1 : -1);
+  }
+  if (midiFromPitch(finalPitch) === midiFromPitch(d.beforePitch)) {
+    // Net zero change (dragged back to start): nothing to commit, but re-engrave to clear any
+    // mid-drag preview state on the staff.
+    if (d.surface === "staff") renderVerovio();
+    return;
+  }
+  selectedHandle = d.handleId;
+  const fromLabel = pitchLabel(midiFromPitch(d.beforePitch), spellingFromPitch(d.beforePitch));
+  commandStack.push({ kind: "setPitch", handleId: d.handleId, before: d.beforePitch, after: finalPitch });
+  const verb = verticalVerb(midiFromPitch(d.beforePitch), midiFromPitch(finalPitch));
+  const toLabel = pitchLabel(midiFromPitch(finalPitch), spellingFromPitch(finalPitch));
+  finishEdit(`${fromLabel} ${verb} ${toLabel}`);
+});
+
+// Abandon an in-flight drag without committing (used when Play/Export interrupts editing): roll
+// the model back to the pre-drag pitch and clear all preview state.
+function cancelDrag(): void {
+  if (!drag) return;
+  const d = drag;
+  drag = null;
+  if (d.surface === "staff" && scoreModel) {
+    scoreModel.setPitch(d.handleId, d.beforePitch);
+    if (editMode) renderVerovio();
+  }
+  visualizer.setMirrorDeemphasis(null);
+  visualizer.setDragPreview(null);
+  clearStaffMirror();
+}
+
+// Re-engrave the staff during a drag preview and re-apply the brass halo to the DRAGGED note by
+// finding it at its (onset, previewed-midi). The id may change across re-renders, so we re-find
+// it from the new render's notes rather than trusting the old id.
+function renderVerovioPreview(handleId: number): void {
+  if (!verovioToolkit || !scoreModel || !score) return;
+  const width = sheetContainer.clientWidth || 800;
+  verovioRender = renderMusicXml(verovioToolkit, scoreModel.serialize(), score.notes, width);
+  if (verovioHost) verovioHost.innerHTML = verovioRender.svg;
+  // Highlight the dragged notehead: find the rendered note matching the handle's onset + midi.
+  const h = scoreModel.handles[handleId];
+  if (h && verovioHost) {
+    const match = verovioRender.notes.find(
+      (n) => n.midi === h.midi && Math.abs(n.timeSec - h.onsetSec) < 0.002,
+    );
+    if (match) staffNoteEl(match.id)?.classList.add("ph-selected");
+  }
+}
+
+// Remove the staff mirror-dim class from any notehead carrying it.
+function clearStaffMirror(): void {
+  if (!verovioHost) return;
+  for (const el of verovioHost.querySelectorAll(".ph-mirror")) el.classList.remove("ph-mirror");
+}
 
 function frame(): void {
   // Derive a bpm-independent score time from the transport so the falling notes and the
@@ -1561,7 +1979,7 @@ function frame(): void {
     updateSeekUI(scoreTime);
   }
   visualizer.render(scoreTime);
-  // Smart Edit Mode P0: mirror the playhead onto the Verovio staff via the timemap. Cheap (only
+  // Smart Edit Mode: mirror the playhead onto the Verovio staff via the timemap. Cheap (only
   // touches the DOM when the sounding set changes) and skipped entirely when edit mode is off.
   if (editMode) updateVerovioPlayhead(scoreTime);
   requestAnimationFrame(frame);
