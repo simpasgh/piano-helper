@@ -15,7 +15,7 @@ export type FlagState = Record<FlagKey, boolean>;
 export interface FlagMeta {
   key: FlagKey;
   label: string;
-  // 1-based rank within the whole list, primitive (1) -> advanced (7); drives display order.
+  // 1-based rank within the whole list, primitive (1) -> advanced (8); drives display order.
   tier: number;
   section: FlagSection;
   // Direct prerequisites: this flag is meaningless unless these are also on.
@@ -110,6 +110,17 @@ export const FLAG_METADATA: readonly FlagMeta[] = [
     accuracy: "Identical final result.",
     latency: "First PAGE sooner, but the TOTAL time can be higher (each page reloads the model; unmeasured).",
     algorithm: "Split the PDF, transcribe + fuse each page independently, append in document order. Needs progressive.",
+  },
+  {
+    key: "OMR_PROGRESSIVE_BLOCKS",
+    label: "Progressive: block-by-block (per system)",
+    tier: 8,
+    section: "delivery",
+    requires: ["OMR_PROGRESSIVE", "OMR_GEOM_FUSION"],
+    summary: "Stream REAL rhythm one staff system at a time, with no pitch-only placeholder.",
+    accuracy: "Identical final result: the assembled output equals the whole-file fusion, just delivered in pieces.",
+    latency: "Same total time. The first real-rhythm block lands in ~28s instead of waiting ~75s for a 6-system page.",
+    algorithm: "One warm Clarity run emits each system's rhythm as it decodes; fuse geom pitch + the growing prefix per system. Needs progressive + fusion.",
   },
 ];
 

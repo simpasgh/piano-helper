@@ -1894,3 +1894,270 @@ def test_progressive_pages_wired_into_process_job(tmp_path, monkeypatch):
 
     assert [p["metadata"]["omr-status"] for p in client.puts] == ["partial", "partial", "complete"]
     assert _mcount(client.puts[2]["body"]) == 3
+
+
+# --- BLOCK-BY-BLOCK streaming (OMR_PROGRESSIVE_BLOCKS) -------------------------------------------
+# One warm Clarity invocation emits each staff system's CUMULATIVE rhythm as it decodes; the worker
+# fuses geom's whole-page pitch with the growing Clarity prefix and publishes per system. The hard
+# guarantee under test: the assembled FINAL equals today's whole-file fusion on the same input.
+
+def _grand_staff_geom(steps_treble, steps_bass=None, octave=5):
+    """A geom-shaped MusicXML (geom's faked rhythm = every note duration 1, no <time> borrow) with
+    one quarter-ish note per step letter, built via the real llm_omr builder so fusion.fuse reads it
+    exactly as it reads real geom output. divisions=4; geom uses duration 1 (a 16th) as its fake."""
+    measures = [
+        {"staff1": [{"duration": 1, "pitches": [{"step": s, "octave": octave}]}],
+         "staff2": ([{"duration": 1, "pitches": [{"step": steps_bass[i], "octave": 3}]}]
+                    if steps_bass and i < len(steps_bass) else [])}
+        for i, s in enumerate(steps_treble)
+    ]
+    return _pg_llm.score_json_to_musicxml({"divisions": 4, "key_fifths": 0,
+                                           "time": {"beats": 4, "beat_type": 4}, "measures": measures})
+
+
+def _clarity_doc(steps, durations, octave=5):
+    """A Clarity-shaped MusicXML carrying real durations (the rhythm geom borrows). One note per step;
+    durations are 16th-units at divisions=4 (4 = quarter). Single staff is enough for fusion's staff-1
+    alignment in these tests."""
+    measures = [
+        {"staff1": [{"duration": d, "pitches": [{"step": s, "octave": octave}]}], "staff2": []}
+        for s, d in zip(steps, durations)
+    ]
+    return _pg_llm.score_json_to_musicxml({"divisions": 4, "key_fifths": 0,
+                                           "time": {"beats": 4, "beat_type": 4}, "measures": measures})
+
+
+def test_progressive_blocks_enabled_truthy_parsing(monkeypatch):
+    for value, expected in (("1", True), ("true", True), ("TRUE", True), ("0", False),
+                            ("", False), ("yes", False)):
+        monkeypatch.setenv("OMR_PROGRESSIVE_BLOCKS", value)
+        assert worker.progressive_blocks_enabled() is expected
+    monkeypatch.delenv("OMR_PROGRESSIVE_BLOCKS", raising=False)
+    assert worker.progressive_blocks_enabled() is False
+
+
+def test_parse_stream_line_valid_and_invalid():
+    assert worker._parse_stream_line("STREAM 1 6 /tmp/emit/system-0001.musicxml") == (
+        1, 6, "/tmp/emit/system-0001.musicxml")
+    # A path with spaces is preserved (split into at most 4 fields).
+    assert worker._parse_stream_line("STREAM 2 6 /tmp/a b/sys.xml") == (2, 6, "/tmp/a b/sys.xml")
+    # Non-stream / malformed lines are ignored.
+    assert worker._parse_stream_line("[stage-b-eval] 1/6 ...") is None
+    assert worker._parse_stream_line("STREAM x 6 /p") is None
+    assert worker._parse_stream_line("STREAM 1 6") is None
+    assert worker._parse_stream_line("") is None
+    assert worker._parse_stream_line(None) is None
+
+
+def test_run_clarity_stream_returns_none_when_env_unset(tmp_path, monkeypatch):
+    monkeypatch.delenv("CLARITY_OMR_DIR", raising=False)
+    monkeypatch.delenv("CLARITY_PYTHON", raising=False)
+    called = []
+    assert worker.run_clarity_stream("in.pdf", str(tmp_path),
+                                     lambda i, t, b: called.append(i)) is None
+    assert called == []  # never even spawned
+
+
+def test_fusion_block_stream_final_equals_whole_file_fusion(tmp_path, monkeypatch):
+    # THE correctness guarantee: the body block-streaming returns for the COMPLETE write is identical
+    # to today's whole-file fusion (fusion.fuse(geom_whole, clarity_whole)). We stub run_clarity_stream
+    # to drive on_system with CUMULATIVE Clarity prefixes (system 1, then systems 1..2) and return the
+    # whole Clarity doc, exactly like the real driver. geom + fusion.fuse + merge are REAL here.
+    geom_whole = _grand_staff_geom(["C", "D"], steps_bass=["E", "F"])
+    clarity_whole = _clarity_doc(["C", "D"], [4, 8])      # quarter then half
+    clarity_prefix1 = _clarity_doc(["C"], [4])            # just system 1 so far
+
+    geom_out = tmp_path / "geom.musicxml"
+    geom_out.write_bytes(geom_whole)
+    monkeypatch.setattr(worker, "rasterize_if_pdf", lambda p, w: ("/fake.png", True))
+    monkeypatch.setattr(worker, "run_geom", lambda *a, **k: str(geom_out))
+
+    def fake_stream(pdf_path, workdir, on_system, timeout=None):
+        on_system(1, 2, clarity_prefix1)   # only the non-last systems publish
+        return clarity_whole               # the warm run's final cumulative result
+
+    monkeypatch.setattr(worker, "run_clarity_stream", fake_stream)
+
+    def geom_body():
+        with open(geom_out, "rb") as fh:
+            return fh.read()
+
+    published = []
+    final = worker._fusion_block_stream("job", "in.pdf", str(tmp_path), geom_body,
+                                        lambda b: published.append(b))
+
+    # The complete body is byte-identical to the whole-file fusion path.
+    assert final == worker.fusion.fuse(geom_whole, clarity_whole)
+    # Exactly one partial was published (system 1; the last system is the returned complete).
+    assert len(published) == 1
+    # The partial is a real, non-empty grand-staff score (geom's full pitch shown, system-1 rhythm).
+    assert _mcount(published[0]) == 2  # geom's measures all present from the first partial
+
+
+def test_fusion_block_stream_stream_unavailable_returns_none(tmp_path, monkeypatch):
+    # If the warm Clarity stream is unavailable (env unset, no systems, crash), block-streaming
+    # declines (returns None) so process_job falls back to whole-file fusion. geom must not matter.
+    monkeypatch.setattr(worker, "run_clarity_stream", lambda *a, **k: None)
+    published = []
+    result = worker._fusion_block_stream("job", "in.pdf", str(tmp_path),
+                                         lambda: b"<geom/>", lambda b: published.append(b))
+    assert result is None
+    assert published == []
+
+
+def test_fusion_block_stream_single_system_no_partial_still_final(tmp_path, monkeypatch):
+    # A 1-system page streams nothing before the final (on_system fires only for NON-last systems),
+    # but the final fuse must still run with geom's pitch + the whole Clarity result.
+    geom_whole = _grand_staff_geom(["C"], steps_bass=["E"])
+    clarity_whole = _clarity_doc(["C"], [4])
+    monkeypatch.setattr(worker, "run_clarity_stream", lambda p, w, cb, timeout=None: clarity_whole)
+    published = []
+    final = worker._fusion_block_stream("job", "in.pdf", str(tmp_path),
+                                        lambda: geom_whole, lambda b: published.append(b))
+    assert published == []  # nothing published before the final on a single system
+    assert final == worker.fusion.fuse(geom_whole, clarity_whole)
+
+
+def test_progressive_blocks_wired_into_process_job(tmp_path, monkeypatch):
+    # WIRING: OMR_PROGRESSIVE + OMR_PROGRESSIVE_BLOCKS routes a PDF through _fusion_block_stream. Its
+    # partials carry omr-status=partial with a MONOTONIC omr-version, and the returned body is the
+    # complete write. The whole-file geom path + per-page path must not run.
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    monkeypatch.setenv("OMR_PROGRESSIVE", "1")
+    monkeypatch.setenv("OMR_PROGRESSIVE_BLOCKS", "1")
+
+    def fake_block_stream(job_id, input_path, workdir, geom_body, publish_partial):
+        publish_partial(_pg_xml(["C"]))        # system 1 partial
+        publish_partial(_pg_xml(["C", "D"]))   # system 2 partial
+        return _pg_xml(["C", "D", "E"])        # final -> complete
+
+    monkeypatch.setattr(worker, "_fusion_block_stream", fake_block_stream)
+
+    def must_not_run(*a, **k):
+        raise AssertionError("the whole-file / per-page path must not run when block-stream produced a result")
+
+    monkeypatch.setattr(worker, "run_geom", must_not_run)
+    monkeypatch.setattr(worker, "_fusion_per_page", must_not_run)
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+
+    client = _FakeClient(input_bytes=b"%PDF-1.4 fake")
+    _drive_process_job(monkeypatch, client, is_pdf=True)
+
+    statuses = [p["metadata"]["omr-status"] for p in client.puts]
+    assert statuses == ["partial", "partial", "complete"]
+    # Monotonic omr-version on the partials (1 then 2), in the body the browser reads.
+    assert b'name="omr-version">1' in client.puts[0]["body"]
+    assert b'name="omr-version">2' in client.puts[1]["body"]
+    assert _mcount(client.puts[2]["body"]) == 3
+
+
+def test_progressive_blocks_falls_back_to_whole_file_when_unavailable(tmp_path, monkeypatch):
+    # If block-streaming declines (returns None), process_job must fall through to the existing
+    # whole-file fusion path (single complete write, no partial), so it is never worse than today.
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    monkeypatch.setenv("OMR_PROGRESSIVE", "1")
+    monkeypatch.setenv("OMR_PROGRESSIVE_BLOCKS", "1")
+    monkeypatch.delenv("OMR_PROGRESSIVE_PAGES", raising=False)
+
+    monkeypatch.setattr(worker, "_fusion_block_stream", lambda *a, **k: None)  # streaming unavailable
+    geom_out = tmp_path / "geom.musicxml"
+    geom_out.write_bytes(_pg_xml(["C"]))
+    clar_out = tmp_path / "clarity.musicxml"
+    clar_out.write_text("<score>clarity</score>")
+    monkeypatch.setattr(worker, "rasterize_if_pdf", lambda p, w: ("/fake.png", True))
+    monkeypatch.setattr(worker, "run_geom", lambda *a, **k: str(geom_out))
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clar_out))
+    monkeypatch.setattr(worker.fusion, "fuse", lambda g, c: b"<score>fused</score>")
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"%PDF-1.4 fake")
+    _drive_process_job(monkeypatch, client, is_pdf=True)
+
+    # Fast-then-refine is still ON (OMR_PROGRESSIVE), so the whole-file path publishes the geom partial
+    # then the fused complete. The key assertion: block-stream declined and we did NOT strand the job.
+    assert client.puts[-1]["metadata"]["omr-status"] == "complete"
+    assert client.puts[-1]["body"] == b"<score>fused</score>"
+
+
+class _FakePopen:
+    """Stand-in for subprocess.Popen used as a context manager: yields the given stdout LINES (so the
+    driver's STREAM lines are parsed), exposes a readable stderr, and returns the given exit code from
+    wait(). Used to drive run_clarity_stream's read loop with NO real subprocess / torch."""
+
+    def __init__(self, lines, returncode=0, stderr_text=""):
+        import io
+
+        self.stdout = iter(lines)
+        self.stderr = io.StringIO(stderr_text)
+        self._returncode = returncode
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def wait(self, timeout=None):
+        return self._returncode
+
+    def kill(self):
+        pass
+
+
+def test_run_clarity_stream_parses_lines_and_reads_system_files(tmp_path, monkeypatch):
+    # Drive the REAL run_clarity_stream read loop with a fake Popen: it emits 3 STREAM lines whose
+    # files we pre-write. on_system must fire for systems 1 and 2 (NOT the last), each handed the
+    # cumulative bytes of that system's file, and the returned final is the last system's bytes.
+    monkeypatch.setenv("CLARITY_OMR_DIR", str(tmp_path))            # any existing dir
+    fake_py = tmp_path / "py"
+    fake_py.write_text("x")
+    monkeypatch.setenv("CLARITY_PYTHON", str(fake_py))
+    # The driver script must exist beside worker.py; it does (clarity_stream.py is committed there).
+
+    emit_dir = tmp_path / "clarity-stream-emit"
+    emit_dir.mkdir(parents=True, exist_ok=True)
+    files = {}
+    lines = []
+    for k in (1, 2, 3):
+        p = emit_dir / ("system-%04d.musicxml" % k)
+        body = ("<sys>%d</sys>" % k).encode("utf-8")
+        p.write_bytes(body)
+        files[k] = body
+        lines.append("STREAM %d 3 %s\n" % (k, p))
+    # Interleave a non-STREAM progress line to prove it is ignored.
+    lines.insert(1, "[stage-b-eval] 1/3 ...\n")
+
+    monkeypatch.setattr(worker.subprocess, "Popen", lambda *a, **k: _FakePopen(lines, returncode=0))
+
+    seen = []
+    final = worker.run_clarity_stream(
+        "in.pdf", str(tmp_path), lambda i, t, b: seen.append((i, t, b))
+    )
+    # Systems 1 and 2 published (the last is the returned complete), with the right cumulative bytes.
+    assert [(i, t) for (i, t, _b) in seen] == [(1, 3), (2, 3)]
+    assert seen[0][2] == files[1]
+    assert seen[1][2] == files[2]
+    # The returned final is the last system's bytes (no -o file was written by the fake driver).
+    assert final == files[3]
+
+
+def test_run_clarity_stream_nonzero_exit_returns_none(tmp_path, monkeypatch):
+    # A non-zero driver exit (e.g. EXIT_NO_SYSTEMS or a crash) must yield None so process_job falls
+    # back to whole-file fusion, even if some systems were emitted first.
+    monkeypatch.setenv("CLARITY_OMR_DIR", str(tmp_path))
+    fake_py = tmp_path / "py"
+    fake_py.write_text("x")
+    monkeypatch.setenv("CLARITY_PYTHON", str(fake_py))
+    monkeypatch.setattr(
+        worker.subprocess, "Popen",
+        lambda *a, **k: _FakePopen([], returncode=worker.clarity_stream.EXIT_NO_SYSTEMS,
+                                   stderr_text="no staff systems detected"),
+    )
+    seen = []
+    assert worker.run_clarity_stream("in.pdf", str(tmp_path),
+                                     lambda i, t, b: seen.append(i)) is None
+    assert seen == []
