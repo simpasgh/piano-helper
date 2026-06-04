@@ -202,6 +202,52 @@ def _row_ink(gray) -> "np.ndarray":
     return (gray < 0.5).mean(axis=1)
 
 
+def normalize_illumination(gray, grid: int = 48, floor: float = 0.25, even_thresh: float = 0.7):
+    """Flat-field uneven lighting on a PHONE PHOTO of a page so the geometry detectors survive it.
+
+    WHY. detect_systems / detect_barlines / detect_ottavas all key on a fixed `gray < 0.5` ink
+    threshold, which assumes the paper is near-white. A photo darkens the "white" unevenly: a cast
+    shadow or dim corner can push the LOCAL background below 0.5, where whole rows read as full-width
+    ink, the interline estimate is polluted, and the staff/barline geometry collapses. Measured on
+    the 4 real pieces, a strength-1.5 shadow roughly HALVES the detected staves (e.g. liminality
+    6 -> 3, tctab 22 -> 6), dropping every head whose staff is lost and crashing note_f1 (~0.95 ->
+    ~0.69) -- even though the trained NOTEHEAD detector still finds ~all heads (it is tone-robust).
+    So the photo cliff is staff geometry, not the detector; this is the lever that fixes it.
+
+    HOW. Estimate the smooth paper-brightness field by BLOCK-MAX downsample (paper is the bright
+    majority in any block, so the max ignores the darker ink), upsample (bilinear), and divide it
+    out so the background renormalizes to ~1.0 everywhere while ink stays well below 0.5.
+
+    NEVER-WORSE-ON-CLEAN GUARD. If the page is already evenly lit (the 5th-percentile block paper
+    is bright, > even_thresh) the input is returned UNCHANGED, so a clean render is byte-identical
+    and the detectors are provably unaffected on the clean-PDF gate. A broad shadow darkens many
+    blocks and pushes even the 5th percentile below the threshold, triggering the flat-field; a few
+    fully-inked blocks (a beam) cannot, since they are a tiny fraction of the grid.
+
+    gray is float [0,1] (0=ink, 1=white). Returns the same shape/dtype. NEVER raises; returns the
+    input on any failure so a degenerate image cannot break the detectors."""
+    if not GEOM_AVAILABLE or gray is None:
+        return gray
+    try:
+        h, w = gray.shape
+        gh = max(1, min(grid, h))
+        gw = max(1, min(grid, w))
+        bs_y, bs_x = h // gh, w // gw
+        if bs_y < 1 or bs_x < 1:
+            return gray
+        H2, W2 = gh * bs_y, gw * bs_x
+        block = gray[:H2, :W2].reshape(gh, bs_y, gw, bs_x).max(axis=(1, 3))  # paper level per cell
+        if float(np.percentile(block, 5)) > even_thresh:
+            return gray  # evenly lit -> no-op (clean stays byte-identical)
+        bg = np.asarray(
+            Image.fromarray((np.clip(block, 0.0, 1.0) * 255.0).astype(np.uint8)).resize(
+                (w, h), Image.BILINEAR), dtype=np.float32) / 255.0
+        bg = np.maximum(bg, floor)  # floor avoids a divide blow-up in an all-ink / deep-shadow block
+        return np.clip(gray / bg, 0.0, 1.0).astype(np.float32)
+    except Exception:
+        return gray
+
+
 def _extract_staves(centers: List[float], inks: List[float], thick: List[float],
                     interline: float) -> List[List[float]]:
     """Turn the ordered staff-line-candidate centers into clean 5-line staves.
@@ -304,6 +350,7 @@ def detect_systems(gray) -> List[List[float]]:
     if not GEOM_AVAILABLE or gray is None:
         return []
     try:
+        gray = normalize_illumination(gray)  # flat-field photo shadows (no-op on clean)
         h, w = gray.shape
         roww = (gray < 0.5).sum(axis=1)
         # A staff line is a near-full-width dark row, but noteheads/stems sitting ON the line
@@ -540,6 +587,7 @@ def detect_barlines(gray, staves: List[List[float]]) -> List[List[float]]:
     if not GEOM_AVAILABLE or gray is None or not staves:
         return out
     try:
+        gray = normalize_illumination(gray)  # flat-field photo shadows (no-op on clean)
         h, w = gray.shape
         mask = gray < 0.5
         npairs = (len(staves) + 1) // 2
@@ -792,6 +840,7 @@ def detect_ottavas(gray, staves: List[List[float]]) -> List[List[Tuple[float, fl
     if not GEOM_AVAILABLE or gray is None or not staves:
         return out
     try:
+        gray = normalize_illumination(gray)  # flat-field photo shadows (no-op on clean)
         h, w = gray.shape
         # Each staff's top line y, so we can tell how far the NEXT staff sits below (to gate 8vb).
         tops = [sorted(float(v) for v in lines)[0] for lines in staves]
