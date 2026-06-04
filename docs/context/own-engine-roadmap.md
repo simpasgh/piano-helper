@@ -4,6 +4,53 @@ Self-contained plan so any session (esp. the one on the GPU PC) can pick up and 
 without the prior machine's local memory. Newest status at the top. NO em dashes in generated
 text (project rule). Ship every code change through the gated flow (see "Constraints" below).
 
+## STATUS: FULL-SYMBOL ship gate RUN -- it LOSES to the fusion on rhythm, so DO NOT swap the engine; key detection works but is not a cheap port (2026-06-04)
+
+Ran the deploy gate on cx33. Copied the trained `symbols_full.pt` (yolov8s, 18-class, 85 MB) to
+`/opt/geom-omr/symbols_full.pt` and measured the NEW full-symbol path
+(`geom_detector.transcribe_with_symbols`, `key_fifths=None` = DETECT the key) head-to-head against the
+prod-primary geom+Clarity FUSION on the 4 real MuseScore pieces, both scored by
+`omr_eval.score_transcription`. Harness `/opt/geom-omr/eval/real_scores/symbols_vs_fusion.py` (reuses the
+warm fusion cache for the baseline, runs the symbol detector fresh). FUSION baseline = current main
+(both rhythm fixes #201 clamp + #205 held-note-fill are in).
+
+HEAD-TO-HEAD (FUSION -> FULL-SYMBOL):
+- note_f1 (pitch): liminality 0.946->0.948, tctab 0.995->0.995, icarus 0.990->0.976, reverie 0.476->0.480  (a WASH; icarus -0.014)
+- note_dur_f1:     liminality 0.946->0.937, tctab 0.940->0.936, icarus 0.949->0.908, reverie 0.476->0.307  (WORSE on ALL 4)
+- duration_acc:    liminality 1.000->0.989, tctab 0.945->0.941, icarus 0.959->0.931, reverie 1.000->0.640  (WORSE on ALL 4)
+- chord_recall:    liminality 0.758->0.788, tctab 0.942->0.927, icarus 0.964->0.929, reverie 0.471->0.471  (a WASH)
+
+DECISION: DO NOT SWAP THE ENGINE. The gate criterion (note_dur_f1 not worse on any piece) fails on all
+4. The full-symbol DURATION self-read loses to Clarity's borrowed rhythm, badly on beam-dense reverie
+(it reads 74 eighths vs truth's 132 and scatters the rest into whole/quarter/16th -- the beam/flag
+subdivision brittleness this roadmap warned about). Pitch + key are STRONG (note counts within ~1-7 of
+truth on every piece), but rhythm is the whole ballgame here and the fusion's Clarity rhythm wins. This
+confirms the synthetic-eval prediction exactly. (Detected key == oracle on all 4, so the detected-key
+run IS the oracle-key run -- the pitch deltas are genuine detector/decode differences, not a key
+artifact.)
+
+KEY DETECTION works on REAL data: detected fifths == oracle == 0 on all 4 (the emitted `<fifths>` is 0),
+so the assumed-C-major limitation is genuinely gone in this path. But it is NOT a free win to ship yet:
+- All 4 eval pieces are C major, so on this set key detection is a metric NO-OP; the real-data win (on a
+  non-C piece) is UNMEASURED -- no non-C piece exists in the eval set.
+- It is NOT a cheap "port" into the deployed path. `_detect_key_fifths` reads the symbol detector's
+  accidental/timesig/clef BOXES; the deployed geom path is notehead-only (`GEOM_WEIGHTS=notehead.pt`,
+  `geom_command` builds NO `--symbols`), so it has notehead CENTERS only and cannot run that reader.
+  Reaching prod needs EITHER (A) a NEW classical key-sig CV detector in geom_omr (model-free, fits the
+  deployed subprocess, needs no worker change, in the spirit of detect_barlines/detect_ottavas -- but it
+  is new, brittle sharp-vs-flat CV with a C-major FALSE-POSITIVE regression risk on the common case), OR
+  (B) deploy `symbols_full.pt` + a worker change to run the symbol detector for the KEY ONLY and thread it
+  into the fusion's geom pitch (heavier: 85 MB model + a 2nd CPU inference per upload, which hurts the
+  ~5s progressive partial). Swapping the whole engine to `--symbols` (C) is out: the gate just rejected
+  it on rhythm.
+
+NEXT (key lever, RECOMMENDED but NOT shipped this session -- the honest no-regression call): get a NON-C
+real validation piece first (transpose one of the user's pieces in MuseScore, export PDF + MusicXML),
+then choose A vs B from the measured non-C win size against the C-major regression risk. The duration
+self-read is NOT a lever (it loses to the fusion); rhythm stays with Clarity. BOX STATE after the gate:
+`symbols_full.pt` sits at `/opt/geom-omr/symbols_full.pt` but is INERT (no env points at it; prod is
+unchanged and was NOT restarted). See memory [[full-symbol-trained-eval]] + [[geom-deployed-path-notehead-only]].
+
 ## STATUS: FULL-SYMBOL detector TRAINED + evaluated; KEY-detection works, duration decode made stem-independent; real_eval is the ship gate (2026-06-04)
 
 Step 3's model bake + decode hardening (GPU PC). The multi-class detector is trained and the
