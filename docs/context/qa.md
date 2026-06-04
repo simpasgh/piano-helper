@@ -4,6 +4,71 @@ Accumulated quality knowledge for Piano Helper. Newest entries first. QA owns th
 
 ## Post-merge QA results (newest first)
 
+- 2026-06-04: SMART EDIT MODE full live QA on PROD (https://piano-helper.pages.dev, served
+  bundle `main-zQeMQ_s2.js`, lazy chunks `verovio-module-DtKpMCQ-.js` + `verovio-wycgSLAY.js`).
+  **VERDICT: PASS on all 11 battery items + the multi-measure regression is FIXED.** Drove live in
+  real Chromium (Playwright 1.60.0) on Windows. FIRST end-to-end QA of the Verovio-engraved dual-
+  surface editor. The headline (a real multi-measure bug was just fixed here): editing/deleting/
+  selecting/adding in MEASURE 2+ on BOTH staves of a grand staff now works; I exercised every
+  measure of a 3-measure grand staff explicitly and it is solid.
+  - FIXTURES: hand-built `grand.musicxml` (3 measures, treble+bass, 17 pitched notes, a quarter
+    REST in m2 treble beat 3 + a half REST in m2 bass beat 2, a C3 whole in m3 bass) is the
+    grand-staff multi-measure stressor; `clamp.musicxml` (C8 treble + A0 bass whole notes) for the
+    88-key edge; the shipped single-staff `demo.musicxml` (C Major Scale, 15 notes, 4 measures) as
+    baseline. All loaded via `#file-input` (File + DataTransfer + change).
+  - RESULTS PER AREA (all PASS): (1) load+Edit -> Verovio grand staff renders (3 measures, G+F
+    clefs, brace), edit toolbar (undo/redo/pitch/delete) appears, "Rendered by Verovio" credit
+    visible+linked, 0 console errors. (2) Selection BOTH surfaces: 10/10 staff notehead clicks
+    across m1/m2/m3 on both staves select with the correct solfege readout + brass halo; canvas
+    bar clicks (C3/C5/G3 columns) sync the staff halo with pitch matching the column. The shared
+    handle means one click highlights both. (3) PITCH DRAG: staff vertical (Do->Re, and m2-bass
+    Si->Do, a LATER measure on the LOWER staff) and canvas horizontal (C3 Do dragged right to D3
+    Re) both move the note + announce; undo enabled after. (4) KEYBOARD pitch in m1, LATER measure
+    UPPER staff, and LATER measure LOWER staff (m2-bass Re->Mi, m3-bass-whole Do->Re) all work;
+    Ctrl=chromatic (Mi->Mi#), Shift=octave ("up an octave to"), canvas +/- chromatic with correct
+    flat spelling (Si->Sib). (5) DELETE->REST + undo on first AND later measures, both staves, via
+    Delete key and trash button: count 17->16, staff rest +1, "Deleted X"; undo restores fully +
+    re-selects ("Restored X"). (6) ADD on a REST in a LATER measure on EACH staff: m2 treble
+    quarter rest (readout "A quarter rest, beat 3", Enter) and m2 bass half rest ("A half rest,
+    beat 2", Add button) both select with halo, fill (17->18, rest -1), select the new note, and
+    undo restores the rest re-selected. THE THIN-COVERAGE REST MAPPING WORKS ON BOTH STAVES IN A
+    LATER MEASURE. (7) UNDO/REDO chain of 4 mixed edits (pitch, lower-staff-later-measure pitch,
+    delete, octave) reverses + replays in LIFO with correct announcements; buttons dim at the
+    ends; "Nothing to undo"/"Nothing to redo" at the edges; selection follows. (8) 88-KEY CLAMP:
+    C8 ArrowUp/Shift+Up/canvas-'+' all hold at "Do" + announce "Already at the highest key."; A0
+    ArrowDown/Shift+Down hold + announce "Already at the lowest key."; no spurious undo pushed.
+    (9) RIGHT-CLICK + 48px move does NOT drag pitch (stays "Do", no command); a synthetic TOUCH
+    pointerdown+move+up likewise selects but never drags. (10) EXIT edit restores the OSMD player
+    (aria-pressed false, toolbar/credit hidden, `.editing` removed, verovio host emptied + role/
+    tabindex stripped, OSMD svg back, count intact); Play works after exit; re-enter round-trips.
+    Edit is DISABLED with no notation loaded (the `sourceMusicXml===null` gate an audio-only load
+    hits). (11) EDIT REACHES AUDIO: editing m1-bass C3 up 2 steps moved the falling bar OUT of the
+    C3 column and INTO the E3 column (the audio sampler reads that same VisNote array), then Play
+    advanced 0:01->0:02 cleanly. Verovio staff playhead tint works during in-edit playback (2
+    noteheads `.ph-playing` for the simultaneous grand-staff beat). 0 console.error / 0 pageerror
+    across every test.
+  - METHOD / GOTCHAS for the next Edit-mode pass (Windows): (a) Playwright npm pkg is NOT installed
+    but the Chromium binary IS cached at `%LOCALAPPDATA%\ms-playwright\chromium-1223`; install
+    `playwright@1.60.0` into a temp dir (it expects exactly build 1223) and launch with
+    `PLAYWRIGHT_BROWSERS_PATH=%LOCALAPPDATA%\ms-playwright` so it reuses the cache (no download).
+    Repo tree stays clean: all drivers/fixtures live in C:/tmp/qa-edit, never the worktree. (b)
+    VEROVIO NOTEHEAD IDS ARE NOT STABLE across renders (every `loadData`/edit re-engraves with
+    fresh MEI ids), so identify glyphs POSITIONALLY (measure index by `g.measure` DOM ancestry +
+    staff ordinal within the measure + sorted x), never by a hardcoded id; re-list after every edit.
+    (c) CLICK THE NOTEHEAD `<use>` GLYPH CENTER, not the `<g>` bbox center: the `<g>` bbox includes
+    the stem so its center sits below the head on whitespace and misses `closest('g.note')`. OPEN
+    noteheads (half/whole) are HOLLOW at the exact center, so spiral-scan a few px for a point whose
+    elementFromPoint resolves to the same `g.note` (a real user clicks the ring). (d) To click a
+    FALLING BAR, replicate the app's pure barRect+buildKeyLayout math (in piano.ts/visualizer.ts):
+    at scoreTime 0 (paused on entry, total shows e.g. 0:06) time-0 notes sit AT the keybed, so
+    click the midi column just above keyboardTop. Return all coords in VIEWPORT space (rect.left/
+    rect.top added) - mixing canvas-local-y with viewport-x was my main harness bug. `window.Tone`/
+    osmd are NOT exposed on prod (good hygiene), so read state via DOM: `#sheet-note-count`,
+    `#note-edit-readout`, `#add-note-readout`, `#edit-live`, `.ph-selected` count/ids on
+    `#verovio-host`, `#time-readout`, undo/redo `.disabled`. (e) Edit-mode pointer handlers BAIL if
+    `playing`, so pause before any click/drag (entry auto-pauses). Artifacts under /tmp/qa-edit/
+    (grand/clamp/demo .musicxml, lib.mjs harness, 01..13 drivers, shots/01..13 .png).
+
 - 2026-06-04: PROGRESSIVE OMR merged (default OFF; `OMR_PROGRESSIVE` fast-then-refine, +
   `OMR_PROGRESSIVE_PAGES` per-page). Covered by unit + worker tests and a browser end-to-end with a
   MOCKED backend: a partial result hides the scan overlay, renders the notes, enables the controls, and

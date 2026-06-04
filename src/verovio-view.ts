@@ -216,6 +216,51 @@ export function notesAtScoreTime(
   return [...active];
 }
 
+// A padded hit target: an element's screen bounding box plus the index that identifies it to the
+// caller. The geometry below is pure (no DOM), so the nearest-glyph hit test is unit-testable; the
+// DOM helpers in main.ts read each glyph's getBoundingClientRect() into this shape and map the
+// winning index back to a `<g>`.
+export interface PaddedBox {
+  index: number;
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
+// The index of the box whose bounds, inflated by `padding` px on every side, CONTAIN the point and
+// whose center is nearest the point; or null if the padded point hits no box. This gives a small
+// glyph (a notehead or a rest) a finger-sized hot zone without enlarging the drawn glyph: a tap
+// that lands within `padding` of a notehead still selects it. Nearest-center breaks ties between
+// overlapping padded zones so the closest glyph wins. Pure: the caller supplies screen-space boxes.
+export function nearestPaddedBoxIndex(
+  boxes: readonly PaddedBox[],
+  clientX: number,
+  clientY: number,
+  padding: number,
+): number | null {
+  let bestIndex: number | null = null;
+  let bestDist = Infinity;
+  for (const b of boxes) {
+    if (
+      clientX < b.left - padding ||
+      clientX > b.right + padding ||
+      clientY < b.top - padding ||
+      clientY > b.bottom + padding
+    ) {
+      continue;
+    }
+    const cx = (b.left + b.right) / 2;
+    const cy = (b.top + b.bottom) / 2;
+    const dist = Math.hypot(clientX - cx, clientY - cy);
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestIndex = b.index;
+    }
+  }
+  return bestIndex;
+}
+
 // Lazily-loaded module handles, cached after the first load so re-entering edit mode is cheap.
 let createVerovioModule:
   | ((moduleArg?: Record<string, unknown>) => Promise<unknown>)
@@ -255,21 +300,42 @@ export async function loadVerovioToolkit(): Promise<VerovioToolkit> {
   return new ToolkitCtor(module);
 }
 
-// Sensible render options for the read-only edit viewer: SVG view, page width tracking the
-// container, and stable element ids in the SVG (the default) so click hit-testing works. We
-// pass the container width so the engraving fills the sheet pane like OSMD does.
+// Engraving scale (Verovio's `scale`, a percent of the staff's natural size). At this scale the
+// staff-line spacing renders at ~9px on screen and a notehead at ~10px, comparable to OSMD's
+// default read-only view (the readability target). Higher = larger glyphs but fewer measures per
+// system. Exported so a test can pin the pageWidth-from-scale invariant.
+export const VEROVIO_SCALE = 50;
+
+// Sensible render options for the edit viewer: SVG view, an engraving that FILLS the container
+// width (so it reads like OSMD), and stable element ids in the SVG (the default) so click
+// hit-testing works.
+//
+// The width fix (issue: "staff too small"): Verovio's `pageWidth` is in 1/100 mm and the rendered
+// SVG's px width is `pageWidth * scale / 100`. The CSS sizes the SVG with `max-width: 100%`, so if
+// the intrinsic px width EXCEEDS the host the browser shrinks the whole engraving (glyphs and all)
+// to fit, which is what made the staff a tiny strip (the old `pageWidth = containerWidth * 5` at
+// scale 40 produced a ~2x-too-wide SVG that then got halved by the CSS). We instead derive
+// `pageWidth` so the intrinsic px width EQUALS the container: pageWidth = containerWidthPx * 100 /
+// scale. Then `max-width: 100%` is a no-op (no hidden downscale) and `scale` alone sets glyph size,
+// while `breaks: "auto"` wraps long scores into multiple systems that scroll inside #sheet.
 export function buildToolkitOptions(containerWidthPx: number): Record<string, unknown> {
+  // A floor avoids a degenerate 0-width layout before the container has measured (e.g. a hidden
+  // pane). 320px is the narrowest sensible phone content width.
+  const widthPx = Math.max(320, Math.round(containerWidthPx));
   return {
-    // Track the container so the staff is not clipped; Verovio uses 1/100 mm, but it also
-    // accepts px-ish values well for screen layout. A floor avoids a degenerate 0-width layout
-    // before the container has measured.
-    pageWidth: Math.max(600, Math.round(containerWidthPx * 5)),
+    // px width of the SVG == widthPx, so the CSS never downscales the engraving.
+    pageWidth: Math.round((widthPx * 100) / VEROVIO_SCALE),
     pageHeight: 60000, // tall page so a multi-system score lays out vertically, scrolled in #sheet
-    scale: 40,
+    scale: VEROVIO_SCALE,
     adjustPageHeight: true,
     breaks: "auto",
     footer: "none",
     header: "none",
+    // Trim the default page margins so the music uses the full width (OSMD-like edge-to-edge).
+    pageMarginLeft: 50,
+    pageMarginRight: 50,
+    pageMarginTop: 50,
+    pageMarginBottom: 50,
   };
 }
 
