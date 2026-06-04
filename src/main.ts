@@ -664,18 +664,65 @@ function exitEditMode(): void {
   }
 }
 
-// COMMIT v1: SAVE bakes the edited model back into the retained source MusicXML, then leaves edit
-// mode. The live player already reflects every edit (each edit ran through reloadNotes), so there
-// is nothing to re-derive; we only PERSIST the model so re-entering edit shows the saved edits and
-// any source/MusicXML export is current. serialize() also enriches the score (it inserts inferred
-// <type>s), but it is reached only when dirty, so we never gate on byte-equality. The read-only
-// OSMD sheet is intentionally left as-is: it shows the pre-edit engraving exactly as any
-// edit-then-exit already does today; refreshing it is a separate follow-up. Focus returns to the
-// Edit button (the just-clicked Save is now hidden with the toolbar).
-function saveEdits(): void {
+// OSMD's load() recognises a STRING as MusicXML content only when it opens with the XML
+// declaration; without it the string is mistaken for a URL and the load fails ("Could not retrieve
+// requested URL"). XMLSerializer (and so scoreModel.serialize()) omits the declaration, while every
+// originally loaded source (a MusicXML file / an OMR result) carries it, so a serialized SAVE must
+// add it back to stay a complete, OSMD-loadable document. Idempotent: a string that already opens
+// with the declaration is returned unchanged.
+const XML_DECLARATION = '<?xml version="1.0" encoding="UTF-8"?>\n';
+function withXmlDeclaration(xml: string): string {
+  return xml.trimStart().startsWith("<?xml") ? xml : XML_DECLARATION + xml;
+}
+
+// COMMIT v1: SAVE bakes the edited model back into the retained source MusicXML, refreshes the
+// read-only OSMD cream sheet from it, then leaves edit mode. The live falling notes + audio already
+// reflect every edit (each ran through reloadNotes), so we do NOT re-derive the player; we only
+// PERSIST the model (so re-entering edit + any MusicXML export are current) and re-engrave the OSMD
+// sheet so it stops showing the originally loaded notation while the player shows the saved edits
+// (the sheet-vs-player divergence). serialize() also enriches the score with inferred <type>s, but
+// it is reached only when dirty, so we never gate on byte-equality. The re-render is flash-free:
+// osmd.load only PARSES (no DOM write), so the still-visible Verovio host survives the await;
+// osmd.render() then detaches it and engraves the edited page (hidden under `.editing`), and every
+// step from there through exitEditMode() and the post-reveal label + cursor refresh runs
+// synchronously, so the host->sheet swap is never painted half-done. We deliberately do NOT call
+// loadNotes/loadScoreXml (those reset hand mutes, balance, tempo, and the sheet name). Focus returns
+// to the Edit button (the just-clicked Save is now hidden with the toolbar).
+async function saveEdits(): Promise<void> {
   if (!scoreModel) return;
-  sourceMusicXml = scoreModel.serialize();
+  // Persist the edited model as a COMPLETE document (declaration included) so the retained source
+  // matches an originally loaded file/OMR source and re-renders cleanly through OSMD's load() below.
+  sourceMusicXml = withXmlDeclaration(scoreModel.serialize());
+  // Edit mode paused playback but preserved the transport position; capture it so the cursor can be
+  // repositioned on the refreshed sheet.
+  const playhead = Tone.getTransport().seconds * tempoRate;
+  let refreshed = false;
+  // Guarded so an unlikely OSMD parse failure on our own freshly-serialized model still bakes the
+  // source and leaves edit mode rather than trapping the user in the editor.
+  try {
+    await osmd.load(sourceMusicXml);
+    osmd.render();
+    // The OSMD cursor now steps through the EDITED engraving, so recompute score.stepTimes from it:
+    // a STRUCTURAL edit (add / delete / duration change) alters the step COUNT, and the original
+    // (now stale) stepTimes would over- or under-run the re-rendered cursor (a pitch edit keeps the
+    // count, so there the recompute is just a harmless refresh). Keep the live edit-derived notes +
+    // duration; only the timing skeleton was stale, and it + the notes both derive from the same
+    // saved XML, so the falling-notes <-> cursor sync invariant holds. extractScore reads the musical
+    // model (not DOM geometry), so it is valid here while the OSMD page is still hidden by `.editing`.
+    if (score) score = { ...score, stepTimes: extractScore(osmd).stepTimes };
+    refreshed = true;
+  } catch (err) {
+    console.error("Failed to refresh the sheet after saving edits:", err);
+  }
   exitEditMode();
+  if (refreshed) {
+    // The OSMD sheet is VISIBLE now (exitEditMode dropped `.editing`), so finish the refresh here:
+    // the label overlay reads notehead geometry via getBoundingClientRect, which is all-zero while
+    // the page is display:none, and the cursor is repositioned to the paused playhead. Both run
+    // synchronously after the reveal, so the sheet still paints once, in its final edited state.
+    renderSheetLabels(osmd, sheetContainer, labelMode);
+    if (score) resyncCursor(playhead);
+  }
   editLive.textContent = "Edits saved.";
   editBtn.focus();
 }
@@ -683,10 +730,10 @@ function saveEdits(): void {
 // COMMIT v1: DISCARD reverts the live player to the session baseline (the notes snapshotted on
 // entering edit mode) and leaves edit mode, throwing away the in-session edits. Restoring the
 // falling notes + audio via the narrow reloadNotes (which preserves mutes/balance/tempo/name and
-// lands paused, since edit mode paused playback) is all that is needed: the read-only OSMD sheet is
-// left as-is, consistent with SAVE and with today's edit-then-exit (the OSMD sheet reflects only
-// the originally loaded score; refreshing it on save/discard is a deferred follow-up). A no-snapshot
-// guard keeps it safe if somehow called outside an edit session.
+// lands paused, since edit mode paused playback) is all that is needed; the read-only OSMD sheet
+// needs no re-render here because it already shows the session baseline (a fresh load engraved the
+// original, and SAVE re-engraves the saved state), which is exactly the state discard reverts to.
+// A no-snapshot guard keeps it safe if somehow called outside an edit session.
 function discardEdits(): void {
   if (editBaselineNotes) reloadNotes(editBaselineNotes);
   exitEditMode();
