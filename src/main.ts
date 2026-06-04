@@ -38,13 +38,16 @@ import {
 import {
   CIRCLE_OF_FIFTHS,
   keyMajorName,
+  keyPillLabel,
+  keyPillAria,
   buildKeyOptionButton,
 } from "./key-names";
 import {
   PRESET_METERS,
   buildTimeOptionButton,
   meterSlashLabel,
-  meterSpokenLabel,
+  timePillLabel,
+  timePillAria,
 } from "./time-names";
 import { shouldStartPitchDrag } from "./edit-pointer";
 import {
@@ -637,13 +640,11 @@ async function enterEditMode(): Promise<void> {
       "Falling notes editor. Up and down select a note; plus and minus change its pitch by a semitone; Shift with plus or minus moves an octave; comma and period change its length, tying across the next bar when needed; semicolon dots it; Delete removes it; Control Z undoes.",
     );
     reflectUndoRedoButtons();
+    // SIGNATURE EDITING (SIG-2/SIG-5 + MID-1): reflectSharedSelection -> reseatSignaturePills seeds the
+    // key + time pills + each popover's selected cell. On entry there is no selection, so the pills read
+    // the model's INITIAL <key>/<time> (the v1 readout); once a note/rest is selected they re-seat from
+    // the in-effect signature at the selection (region-aware, with the `(m. N)` qualifier).
     reflectSharedSelection();
-    // SIGNATURE EDITING (SIG-2/SIG-5): seed the key + time pills + each popover's selected cell from the
-    // model's initial <key>/<time>, so the pills read the declared signatures the OMR gave (the passive
-    // readout half). The time pill seeds from the initial meter (SIG-3).
-    reflectKeySig(scoreModel.initialFifths());
-    const t0 = scoreModel.initialTime();
-    reflectTimeSig(t0.beats, t0.beatType);
     editLive.textContent =
       "Edit mode on. Click a note on the staff or the falling notes to select it, then edit its pitch.";
   } catch (err) {
@@ -824,7 +825,7 @@ function renderVerovio(): void {
   verovioHost.setAttribute("role", "application");
   verovioHost.setAttribute(
     "aria-label",
-    "Staff editor. Left and right select a note or a rest; up and down change a note's pitch by a step; Control with up or down changes by a semitone; Shift with up or down by an octave; comma makes a note shorter and period makes it longer, crossing into the next bar with a tie when it must; semicolon dots the note; on a rest, press Enter to add a note of the same duration; Delete removes a note; Control Z undoes; use the key and time buttons on the toolbar to fix the key or time signature for the whole piece.",
+    "Staff editor. Left and right select a note or a rest; up and down change a note's pitch by a step; Control with up or down changes by a semitone; Shift with up or down by an octave; comma makes a note shorter and period makes it longer, crossing into the next bar with a tie when it must; semicolon dots the note; on a rest, press Enter to add a note of the same duration; Delete removes a note; Control Z undoes; use the key and time buttons on the toolbar to fix the key or time signature; with a note selected they change the signature from that measure, otherwise for the whole piece.",
   );
   // Always (re)attach the host to #sheet. OSMD owns #sheet and an osmd.load/render between edit
   // sessions can detach our node, so re-appending here keeps the render going into the live DOM
@@ -982,7 +983,51 @@ function reflectSharedSelection(announce?: string): void {
   if (hasNote) noteEditReadout.textContent = selectedNoteReadout();
   if (hasRest) addNoteReadout.textContent = capitalize(selectedRestLabel());
   reflectDurationButtons();
+  reseatSignaturePills();
   if (announce) editLive.textContent = announce;
+}
+
+// Re-seat the key + time pills from the SELECTED handle's IN-EFFECT signature (MID-1), the chokepoint
+// every selection transition funnels through. With a note selected the pills read the key/meter in
+// effect at its measure (and carry the `(m. N)` qualifier when that signature started at a mid-piece
+// measure N > 1); with a rest selected, the rest's in-effect signature; with NOTHING selected, the
+// INITIAL declaration (v1 behavior). A signature edit then TARGETS whatever the pill is showing. No-op
+// outside edit mode / before the model loads (the pills are only meaningful in the editor).
+function reseatSignaturePills(): void {
+  if (!editMode || !scoreModel) return;
+  if (selectedHandle !== null) {
+    reflectKeySig(
+      scoreModel.fifthsForHandle(selectedHandle),
+      scoreModel.keyRegionStartForHandle(selectedHandle),
+    );
+    const t = scoreModel.timeForHandle(selectedHandle);
+    reflectTimeSig(t.beats, t.beatType, scoreModel.timeRegionStartForHandle(selectedHandle));
+    return;
+  }
+  if (selectedRest !== null) {
+    reflectKeySig(
+      scoreModel.fifthsForRest(selectedRest),
+      scoreModel.keyRegionStartForRest(selectedRest),
+    );
+    const t = scoreModel.timeForRest(selectedRest);
+    reflectTimeSig(t.beats, t.beatType, scoreModel.timeRegionStartForRest(selectedRest));
+    return;
+  }
+  // No selection: the initial (piece-level) declaration is the target (v1 clean pills).
+  reflectKeySig(scoreModel.initialFifths());
+  const t0 = scoreModel.initialTime();
+  reflectTimeSig(t0.beats, t0.beatType);
+}
+
+// The SCORE measure number a signature edit TARGETS, given the current selection (MID-1 / task item 6):
+// the SELECTED handle's own measure (a chord member / tie continuation uses its onset's measure, which
+// is what measureNumberForHandle returns), or the selected rest's measure, or undefined (the initial
+// declaration, v1) when nothing is selected. The model's setKey/setTime treat undefined as the start edit.
+function selectedTargetMeasure(): number | undefined {
+  if (!scoreModel) return undefined;
+  if (selectedHandle !== null) return scoreModel.measureNumberForHandle(selectedHandle);
+  if (selectedRest !== null) return scoreModel.measureNumberForRest(selectedRest);
+  return undefined;
 }
 
 // Dim/enable the duration steppers to match the selected note's ladder position (Smart Edit P3-6:
@@ -1237,18 +1282,19 @@ function doUndo(): void {
     return;
   }
   if (cmd.kind === "setKey") {
-    // Undo of a key edit: the model restored the prior <fifths> + accidentals (restoreKey). Pitch is
-    // preserved, so the falling notes do not move; refresh the pill to the prior key, re-render the
-    // staff (the signature + accidentals re-engrave back), and announce the reversal (SIG-5).
-    reflectKeySig(cmd.before);
+    // Undo of a key edit (start OR mid-piece): the model restored the prior <fifths> + accidentals in
+    // the affected region (restoreKey). Pitch is preserved, so the falling notes do not move; finishEdit
+    // re-engraves the staff and (via reflectSharedSelection -> reseatSignaturePills) re-seats the pill
+    // from the now-reverted in-effect key at the current selection. Announce the reversal (SIG-5 / MID-4):
+    // "Back to {previous in-effect key}", where cmd.before is the key in effect at the target before the
+    // edit (the value the region reverts to).
     finishEdit(`Undid key change. Back to ${keyMajorName(cmd.before)}.`, score ? score.notes.slice() : undefined);
     return;
   }
   if (cmd.kind === "setTime") {
-    // Undo of a time edit: the model restored the prior <beats>/<beat-type> (restoreTime). Declaration-
-    // only, so the falling notes do not move; refresh the pill to the prior meter, re-engrave the staff
-    // (the <time> re-engraves back), and announce the reversal (SIG-5).
-    reflectTimeSig(cmd.before.beats, cmd.before.beatType);
+    // Undo of a time edit (start OR mid-piece): the model restored the prior declaration (restoreTime).
+    // Declaration-only, so the falling notes do not move; finishEdit re-engraves the staff and re-seats
+    // the pill from the reverted in-effect meter at the selection. Announce the reversal.
     finishEdit(
       `Undid time change. Back to ${meterSlashLabel(cmd.before.beats, cmd.before.beatType)}.`,
       score ? score.notes.slice() : undefined,
@@ -1296,18 +1342,18 @@ function doRedo(): void {
     return;
   }
   if (cmd.kind === "setKey") {
-    // Redo of a key edit: applyCommand re-ran model.setKeyFifths(after) (deterministic), so the new
-    // signature is applied again. Pitch-preserving, so the falling notes hold; refresh the pill +
-    // re-engrave the staff and announce like the forward edit.
-    reflectKeySig(cmd.after);
-    finishEdit(`Key signature set to ${keyMajorName(cmd.after)}.`, score ? score.notes.slice() : undefined);
+    // Redo of a key edit: applyCommand re-ran model.setKeyFifths(after, atMeasure) (deterministic), so
+    // the same change (start or mid-piece) is applied again. Pitch-preserving, so the falling notes hold;
+    // finishEdit re-engraves the staff + re-seats the pill from the in-effect key at the selection.
+    // Announce like the forward edit (region-aware, naming the target measure for a mid-piece change).
+    finishEdit(keySetAnnounce(cmd.after, cmd.atMeasure), score ? score.notes.slice() : undefined);
     return;
   }
   if (cmd.kind === "setTime") {
-    // Redo of a time edit: applyCommand re-ran model.setTimeSignature(after) (deterministic), so the
-    // meter is re-applied + the mismatched-bar count re-derived. Declaration-only, so the falling notes
-    // hold; refresh the pill + re-engrave the staff and announce like the forward edit (same string).
-    reflectTimeSig(cmd.after.beats, cmd.after.beatType);
+    // Redo of a time edit: applyCommand re-ran model.setTimeSignature(after, atMeasure) (deterministic),
+    // so the meter is re-applied + the scoped mismatched-bar count re-derived. Declaration-only, so the
+    // falling notes hold; finishEdit re-engraves the staff + re-seats the pill. Announce like the forward
+    // edit (same string, naming the target measure for a mid-piece change).
     finishEdit(timeSetAnnounce(cmd.after.beats, cmd.after.beatType, cmd.record), score ? score.notes.slice() : undefined);
     return;
   }
@@ -2729,12 +2775,15 @@ function reflectKeySigSelected(fifths: number): void {
   }
 }
 
-// Seed/refresh the pill label + its aria-label + the popover's selected row from a fifths value. The
-// pill IS the persistent readout (SIG-5), so this runs on entering edit mode and after every key edit.
-function reflectKeySig(fifths: number): void {
-  const name = keyMajorName(fifths);
-  keySigLabel.textContent = name;
-  keySigBtn.setAttribute("aria-label", `Key signature: ${name}. Change the key.`);
+// Seed/refresh the key pill label + its aria-label + the popover's selected row from a fifths value. The
+// pill IS the persistent readout (SIG-5), now REGION-AWARE (MID-1): when `atMeasure` > 1 the in-effect
+// key was introduced by a mid-piece change at that measure, so the label carries a `(m. N)` qualifier and
+// the aria names the region; for the initial region (atMeasure 1 / undefined) the pill stays clean with
+// the v1 aria verbatim. Runs on entering edit mode, on every selection (re-seated from the in-effect key),
+// and after every key edit / undo / redo.
+function reflectKeySig(fifths: number, atMeasure = 1): void {
+  keySigLabel.textContent = keyPillLabel(fifths, atMeasure);
+  keySigBtn.setAttribute("aria-label", keyPillAria(fifths, atMeasure));
   reflectKeySigSelected(fifths);
 }
 
@@ -2807,28 +2856,50 @@ keySigMenu.addEventListener("keydown", (e) => {
   }
 });
 
-// Apply a key-signature edit (SIG-4): rewrite the initial <key><fifths> to `fifths`, PITCH-PRESERVING,
-// as ONE undoable command. The notes keep their MIDI/time/letter, so the falling notes are unchanged
-// (we pass the current notes to finishEdit, which re-engraves the staff via Verovio); only the printed
-// signature + per-note accidentals move. A no-op (same key, or no initial <key>) just refreshes the
-// pill. Routed through the command stack so Save/Discard + undo/redo all see it.
+// The forward (and redo) announce for a KEY edit (MID-4): when the edit targeted a mid-piece measure N
+// (> 1) it NAMES the measure; for a start edit (no selection / the initial region) it keeps the v1
+// string. `atMeasure` is the command's target (undefined = start).
+function keySetAnnounce(fifths: number, atMeasure: number | undefined): string {
+  const name = keyMajorName(fifths);
+  if (atMeasure !== undefined && atMeasure > 1) {
+    return `Key signature set to ${name} from measure ${atMeasure}.`;
+  }
+  return `Key signature set to ${name}.`;
+}
+
+// Apply a key-signature edit (SIG-4 / MID-1), PITCH-PRESERVING, as ONE undoable command. The TARGET is
+// the selected note/rest's measure (a mid-piece change there); with NO selection it targets the initial
+// piece-level <key> exactly as v1. The notes keep their MIDI/time/letter, so the falling notes are
+// unchanged (we pass the current notes to finishEdit, which re-engraves the staff via Verovio); only the
+// printed signature + per-note accidentals (in the affected region) move. A no-op (the MID-2 rule, or no
+// <key> to edit) just re-seats the pills. Routed through the command stack so Save/Discard + undo/redo see it.
 function setKeyEdit(fifths: number): void {
   if (!scoreModel || !commandStack) return;
-  const before = scoreModel.initialFifths();
-  const cmd: SetKeyCommand = { kind: "setKey", before, after: fifths, record: null };
+  const atMeasure = selectedTargetMeasure();
+  // `before` is the key IN EFFECT at the target (the undo announce's fallback): the selected handle's
+  // in-effect key for a mid-piece target, else the initial declaration (v1).
+  const before =
+    selectedHandle !== null
+      ? scoreModel.fifthsForHandle(selectedHandle)
+      : selectedRest !== null
+        ? scoreModel.fifthsForRest(selectedRest)
+        : scoreModel.initialFifths();
+  const cmd: SetKeyCommand = { kind: "setKey", before, after: fifths, atMeasure, record: null };
   // Apply directly (not via push) so a no-op (null record) never pushes a command or wipes the redo
   // branch, mirroring the duration edits' probe-then-pushApplied discipline.
   applyCommand(scoreModel, cmd);
   if (!cmd.record) {
-    // No change (already this key, or the score has no <key>): just reseat the pill, no announce.
-    reflectKeySig(before);
+    // No change (the MID-2 no-op, already this key, or the score has no <key>): just re-seat the pills
+    // from the current selection, no announce.
+    reseatSignaturePills();
     return;
   }
   commandStack.pushApplied(cmd);
-  reflectKeySig(fifths);
+  reseatSignaturePills();
   // Pitch-preserving: pass the CURRENT falling notes so they do not move/recolor/re-time; finishEdit
   // re-renders the staff (Verovio re-engraves the new signature + accidentals) and refreshes the maps.
-  finishEdit(`Key signature set to ${keyMajorName(fifths)}.`, score ? score.notes.slice() : undefined);
+  // The announce names the target measure for a mid-piece change (MID-4), else the v1 string.
+  finishEdit(keySetAnnounce(fifths, atMeasure), score ? score.notes.slice() : undefined);
 }
 
 // ===== Time-signature picker (Smart Edit Mode SIGNATURE EDITING, SIG-2 / SIG-3) =====
@@ -2851,19 +2922,23 @@ const timeSigItems: HTMLButtonElement[] = PRESET_METERS.map((m) => {
 });
 timeSigMenu.append(...timeSigItems);
 
-// The forward (and redo) announce for a time edit (SIG-5): the all-bars-fit string, else the guardrail
-// string with the count of bars that no longer fill the new meter. Shared by setTimeEdit + the redo path
-// so the two stay identical. `record` carries the just-computed mismatched-bar count.
+// The forward (and redo) announce for a time edit (SIG-5 / MID-4): the all-bars-fit string, else the
+// guardrail string with the count of bars that no longer fill the new meter. When the edit targeted a
+// mid-piece measure N (> 1) it NAMES the measure ("from measure N"); a start edit keeps the v1 phrasing.
+// The mismatched count is already scoped to the affected region by the model. Shared by setTimeEdit + the
+// redo path so the two stay identical. `record` carries the mismatched-bar count + the target measure.
 function timeSetAnnounce(
   beats: number,
   beatType: number,
-  record: { mismatchedBars: number } | null,
+  record: { mismatchedBars: number; targetMeasure?: number | null } | null,
 ): string {
   const meter = meterSlashLabel(beats, beatType);
+  const atMeasure = record?.targetMeasure ?? null;
+  const from = atMeasure !== null && atMeasure > 1 ? ` from measure ${atMeasure}` : "";
   const n = record?.mismatchedBars ?? 0;
-  if (n <= 0) return `Time signature set to ${meter}.`;
+  if (n <= 0) return `Time signature set to ${meter}${from}.`;
   const bars = n === 1 ? "1 bar no longer fills" : `${n} bars no longer fill`;
-  return `Time signature set to ${meter}. ${bars} the bar; adjust their note lengths.`;
+  return `Time signature set to ${meter}${from}. ${bars} the bar; adjust their note lengths.`;
 }
 
 // Mark the cell matching (beats, beatType) as selected (and clear the rest), so the grid shows the
@@ -2875,15 +2950,15 @@ function reflectTimeSigSelected(beats: number, beatType: number): void {
   }
 }
 
-// Seed/refresh the pill label + its aria-label + the popover's selected cell from a meter. The pill IS
-// the persistent readout (SIG-5), so this runs on entering edit mode and after every time edit. aria
-// reads the meter as words ("4 4") so a screen reader does not speak "4/4" as a date/fraction.
-function reflectTimeSig(beats: number, beatType: number): void {
-  timeSigLabel.textContent = meterSlashLabel(beats, beatType);
-  timeSigBtn.setAttribute(
-    "aria-label",
-    `Time signature: ${meterSpokenLabel(beats, beatType)}. Change the time signature.`,
-  );
+// Seed/refresh the time pill label + its aria-label + the popover's selected cell from a meter. The pill
+// IS the persistent readout (SIG-5), now REGION-AWARE (MID-1): when `atMeasure` > 1 the in-effect meter
+// started at a mid-piece change there, so the label carries a `(m. N)` qualifier and the aria names the
+// region; the initial region (atMeasure 1 / undefined) keeps the v1 aria verbatim. aria reads the meter
+// as words ("4 4") so a screen reader does not speak "4/4" as a date/fraction. Runs on entering edit
+// mode, on every selection (re-seated from the in-effect meter), and after every time edit / undo / redo.
+function reflectTimeSig(beats: number, beatType: number, atMeasure = 1): void {
+  timeSigLabel.textContent = timePillLabel(beats, beatType, atMeasure);
+  timeSigBtn.setAttribute("aria-label", timePillAria(beats, beatType, atMeasure));
   reflectTimeSigSelected(beats, beatType);
 }
 
@@ -2958,34 +3033,46 @@ timeSigMenu.addEventListener("keydown", (e) => {
   }
 });
 
-// Apply a time-signature edit (SIG-3): rewrite the initial <time>'s <beats>/<beat-type> to the new meter,
-// DECLARATION-ONLY, as ONE undoable command. No barline moves and no note is retimed, so the falling notes
-// are unchanged (we pass the current notes to finishEdit, which re-engraves only the staff meter via
-// Verovio). Bars that no longer fill the new meter are reported in the announce (non-blocking), never auto-
-// fixed; the duration editor now reads the live meter for its bar capacity. A no-op (same meter, or no
-// initial <time>) just reseats the pill. Routed through the command stack so Save/Discard + undo/redo see it.
+// Apply a time-signature edit (SIG-3 / MID-1), DECLARATION-ONLY, as ONE undoable command. The TARGET is
+// the selected note/rest's measure (a mid-piece change there); with NO selection it targets the initial
+// piece-level <time> exactly as v1. No barline moves and no note is retimed, so the falling notes are
+// unchanged (we pass the current notes to finishEdit, which re-engraves only the staff meter via Verovio).
+// Bars in the AFFECTED REGION that no longer fill the new meter are reported in the announce (non-blocking,
+// scoped by the model), never auto-fixed; the duration editor reads the live per-bar meter for its
+// capacity. A no-op (the MID-2 rule, or no <time> to edit) just re-seats the pills. Routed through the
+// command stack so Save/Discard + undo/redo see it.
 function setTimeEdit(beats: number, beatType: number): void {
   if (!scoreModel || !commandStack) return;
-  const before = scoreModel.initialTime();
+  const atMeasure = selectedTargetMeasure();
+  // `before` is the meter IN EFFECT at the target (the undo announce's fallback): the selected handle's
+  // in-effect meter for a mid-piece target, else the initial declaration (v1).
+  const before =
+    selectedHandle !== null
+      ? scoreModel.timeForHandle(selectedHandle)
+      : selectedRest !== null
+        ? scoreModel.timeForRest(selectedRest)
+        : scoreModel.initialTime();
   const cmd: SetTimeCommand = {
     kind: "setTime",
     before,
     after: { beats, beatType },
+    atMeasure,
     record: null,
   };
   // Apply directly (not via push) so a no-op (null record) never pushes a command or wipes the redo
   // branch, mirroring the key/duration edits' probe-then-pushApplied discipline.
   applyCommand(scoreModel, cmd);
   if (!cmd.record) {
-    // No change (already this meter, or the score has no <time>): just reseat the pill, no announce.
-    reflectTimeSig(before.beats, before.beatType);
+    // No change (the MID-2 no-op, already this meter, or the score has no <time>): just re-seat the pills
+    // from the current selection, no announce.
+    reseatSignaturePills();
     return;
   }
   commandStack.pushApplied(cmd);
-  reflectTimeSig(beats, beatType);
+  reseatSignaturePills();
   // Declaration-only: pass the CURRENT falling notes so they do not move/re-time; finishEdit re-renders
-  // the staff (Verovio re-engraves the new meter) and refreshes the maps. The announce names the new meter
-  // and, when bars no longer fill it, how many (the SIG-3 guardrail readout).
+  // the staff (Verovio re-engraves the new meter) and refreshes the maps. The announce names the target
+  // measure for a mid-piece change (MID-4) + the scoped count of bars that no longer fill it.
   finishEdit(timeSetAnnounce(beats, beatType, cmd.record), score ? score.notes.slice() : undefined);
 }
 

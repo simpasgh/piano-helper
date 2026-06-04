@@ -43,6 +43,22 @@ export function meterCellLabel(beats: number, beatType: number): string {
   return `${meterSpokenLabel(beats, beatType)} time`;
 }
 
+// The REGION-AWARE time pill LABEL + ARIA (Smart Edit MID-1), parallel to the key pill. When `atMeasure`
+// > 1 the in-effect meter started at a mid-piece change there, so the slashed label carries a `(m. N)`
+// qualifier and the aria names the region; the initial region (atMeasure 1 / undefined) keeps the v1
+// strings. aria reads the meter as words ("4 4"). Pure + DOM-free for the shared string + the DOM test.
+export function timePillLabel(beats: number, beatType: number, atMeasure = 1): string {
+  const slash = meterSlashLabel(beats, beatType);
+  return atMeasure > 1 ? `${slash} (m. ${atMeasure})` : slash;
+}
+export function timePillAria(beats: number, beatType: number, atMeasure = 1): string {
+  const spoken = meterSpokenLabel(beats, beatType);
+  if (atMeasure > 1) {
+    return `Time signature: ${spoken}, in effect from measure ${atMeasure}. Change the time signature from measure ${atMeasure}.`;
+  }
+  return `Time signature: ${spoken}. Change the time signature.`;
+}
+
 // Build ONE time-picker option cell (SIG-3): the meter drawn STACKED (numerator over denominator, the
 // engraved look) + the current one carrying aria-selected. beats/beat-type live on data attributes so
 // the click applies the right meter; the role/aria-selected match the listbox single-select pattern

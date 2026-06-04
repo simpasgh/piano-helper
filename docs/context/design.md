@@ -5,6 +5,250 @@ relevant section, dated.
 
 ## Smart Edit Mode SIGNATURE EDITING: correct the KEY + TIME signature (interaction + visual spec)
 
+- **2026-06-04 (v2, MID-PIECE) - mid-piece key + time signature CHANGES (the SIG-1 deferred v2).
+  Builds directly on the shipped v1 pills/popovers/command pattern below; the model substrate is
+  mostly already there. CODE-GROUNDED on the live source (edit-model.ts, main.ts, index.html). The
+  framing is unchanged from v1: this is OMR CORRECTION, not composition. A real score can change key
+  or meter at a later measure (a new `<key>`/`<time>` in that measure's `<attributes>`, in effect from
+  there until the next change). The OMR may have MISREAD a mid-piece change (an EDIT) or MISSED one
+  entirely (an ADD); a spurious one needs a REMOVE. This entry is interaction + visual + the targeting
+  model; the Tech Lead owns the per-measure model mutations and the targeted commands.**
+
+  **Two load-bearing findings from the live code that REVISE the task's premise (read these first):**
+  1. **The KEY in-effect resolver already exists.** The parse walk (`reindexHandles`, edit-model.ts
+     ~754) updates `fifths` as it crosses each measure's `<attributes>`, so `fifthsForHandle(id)` /
+     `fifthsForRest(id)` ALREADY return the key IN EFFECT at the selected note/rest's measure, not the
+     initial. The targeting readout for KEY needs no new resolver: read it off the selected handle.
+  2. **The duration editor's bar capacity already resolves the in-effect meter per measure.**
+     `measureCapacityDivs` (edit-model.ts ~2041) calls `timeSignatureFor(measureEl)` (~2051), which
+     walks back to the LAST `<time>` at or before that measure. So task flag 3b is ALREADY HANDLED in
+     v1: a mid-piece `<time>` change is picked up by each bar's capacity for free, no per-measure work
+     for the duration editor. (Confirm in tests, but the code path is there.) The only TIME gap is a
+     READOUT resolver for the pill: there is no `timeForHandle(id)`; add a thin one mirroring
+     `fifthsForHandle` (cache the in-effect beats/beat-type per handle in the same parse walk).
+
+  ### DECISION MID-1 (TARGETING, the crux) - REUSE the note/rest selection as the target; NO new "select a measure" UI. Pills show the signature IN EFFECT at the selected handle's measure; with no selection, fall back to the INITIAL (v1 behavior).
+
+  RECOMMENDATION (strong): the target of a signature edit is **the measure of the currently selected
+  note/rest**. When a note or rest is selected, the pills show the signature in EFFECT at that handle's
+  measure, and choosing a new value applies a change AT that measure (in effect from there onward).
+  With NO selection, the pills show and edit the INITIAL declaration, exactly as v1 does today.
+
+  - **Why reuse the existing selection (and not a new affordance):** the app ALREADY has a precise,
+    accessible, cross-surface selection spine (`selectedHandle` / `selectedRest`, both routing through
+    `reflectSharedSelection`, main.ts ~974). A user correcting a mid-piece change is almost always
+    already looking at / selecting a note near where the change should be (that is how they noticed the
+    misread). Reusing the selection adds ZERO new UI, ZERO new hit-testing, ZERO new keyboard model: the
+    pills simply re-seat their value from the selected handle's measure inside the existing
+    `reflectSharedSelection` chokepoint, the one function every selection transition (note, rest, clear,
+    Left/Right nav, canvas click, staff click) already funnels through. The data is already computed
+    (`fifthsForHandle`; a small `timeForHandle` to add). This is the cheapest possible path to a correct
+    targeting model and it keeps the pills' "I am the readout" identity from SIG-5 intact: the pill now
+    reads the signature in effect WHERE YOU ARE.
+  - **Concretely, the pill label + aria by target (no em dashes):**
+    - **No selection (target = the start, v1 unchanged):** `#key-sig-btn` reads `C major`; aria-label
+      `Key signature: C major. Change the key.` `#time-sig-btn` reads `4/4`; aria-label
+      `Time signature: 4 4. Change the time signature.` (Identical to v1: with nothing selected the
+      whole piece's initial declaration is the target.)
+    - **A note/rest in a mid-piece region is selected (target = that region):** the pill shows the
+      value IN EFFECT there AND names the measure so the target is never ambiguous. `#key-sig-btn` reads
+      `D major (m. 5)` where 5 is the measure where the in-effect change STARTED (the most recent `<key>`
+      at or before the selection); aria-label `Key signature: D major, in effect from measure 5. Change
+      the key from measure 5.` Same shape for time: pill `3/4 (m. 5)`, aria `Time signature: 3 4, in
+      effect from measure 5. Change the time signature from measure 5.` When the selection is in the
+      FIRST region (before any mid-piece change, i.e. the initial signature is still in force), DROP the
+      `(m. N)` suffix and read just `D major` with the v1 aria (it IS the initial declaration; no measure
+      qualifier needed). RULE: the `(m. N)` qualifier appears only when the in-effect signature was
+      introduced by a mid-piece change at measure N > 1; for the initial region the pill stays clean.
+    - **The measure number is the SCORE measure number** (`<measure number="...">`, 1-based, what
+      Verovio prints), not a zero-based index, so "m. 5" matches what the user reads on the staff. The
+      Tech Lead should surface the selected handle's measure number on the handle (cheap: capture
+      `measure.getAttribute("number")` in the parse walk alongside `handleFifths`).
+  - **Alternatives weighed and rejected for MVP:**
+    - *Click the on-staff `<g class="keySig">` / `<g class="meterSig">` glyph.* Same three objections as
+      SIG-2 (empty C-major key has NO glyph to click; a single thin sharp is a tiny hit target; needs a
+      new SVG-glyph anchor + hit test). WORSE for mid-piece: to ADD a change where none exists there is
+      no glyph at all at the target measure, so glyph-click cannot express "add a key change at measure
+      5". Keep it as the documented v3 augmentation (it reuses the popover + command), never the MVP
+      targeting model.
+    - *The playhead / cursor position.* The transport playhead is a PLAYBACK affordance, not an edit
+      cursor; co-opting it conflates "where I am listening" with "where I am editing", and it is a moving
+      target during playback. Edits are deliberate and paused; the selection is the stable, intentional
+      anchor. Rejected.
+    - *A dedicated "select a measure" click affordance (e.g. click a barline or a measure-number gutter).*
+      This is the most "correct" general model but it adds a whole new selection type (measure selection)
+      with its own highlight, nav, aria, and readout, parallel to the note/rest spine, for a case the
+      note/rest selection already covers. Over-built for MVP. If a future need arises (e.g. editing a
+      signature in an empty/rest-only measure with nothing selectable nearby), revisit; today every
+      measure that needs a signature correction has a selectable note or rest in or near it.
+  - **One edge the selection model must answer: which measure when the selection is a CHORD or a tie.**
+    A chord member and a tie continuation belong to ONE measure (the onset's measure), so the target is
+    unambiguous: use the selected handle's own measure. (Tie continuations are not independently
+    selectable on the staff anyway; the start note's measure is the target.)
+
+  ### DECISION MID-2 (ADD / EDIT / REMOVE) - MVP ships ALL THREE. ADD + EDIT via the same picker (choose a value at the target measure); REMOVE by choosing the value that EQUALS the prior in-effect signature (it collapses the redundant change). No separate "remove" button in MVP.
+
+  RECOMMENDATION: the MVP is **add + edit + remove**, because OMR correction needs all three (a misread
+  change = edit, a missed change = add, a spurious change = remove) and the picker can express all three
+  with NO new controls, by defining the semantics of "choose a value at the target measure" precisely:
+
+  - **ADD (no change exists at the target measure yet):** the target measure has no `<key>`/`<time>` of
+    its own; the selection sits in a region governed by an earlier declaration. Choosing a value
+    DIFFERENT from the in-effect one INSERTS a new `<key>`/`<time>` into the target measure's
+    `<attributes>` (creating the `<attributes>` element if absent). In effect from that measure until
+    the next existing change. Announce names it as a "set ... from measure N" (MID-4).
+  - **EDIT (a change already exists at the target measure):** the target measure already declares its own
+    `<key>`/`<time>` (the selection is in the FIRST region of that change, i.e. its measure is exactly
+    where the in-effect signature started). Choosing a different value REWRITES that existing
+    declaration in place. This is the misread-a-mid-piece-change correction.
+  - **REMOVE (collapse a redundant change):** the user chooses a value that EQUALS the signature in
+    effect in the PRECEDING region (the value the target measure would inherit if it declared nothing).
+    Two sub-cases, and the rule is the same for both:
+    - If the target measure HAS its own declaration and the chosen value equals the prior-region value,
+      DELETE that redundant declaration (the measure reverts to inheriting the earlier signature). This
+      is how you remove a spurious mid-piece change the OMR hallucinated. Announce: "Removed the key
+      change at measure N; back to {prior key}." (MID-4).
+    - If the target measure has NO declaration and the chosen value equals the in-effect one, it is a
+      pure **no-op** (nothing to add, nothing to remove): just re-seat the pill, no command, no announce.
+      Mirrors v1's existing no-op discipline (apply-then-check-record; a null record never pushes).
+  - **So the single rule for "choose value V at target measure M" is:**
+    1. Let `prior` = the signature in effect in the region IMMEDIATELY BEFORE M (what M inherits if it
+       declares nothing); let `here` = the signature currently in effect AT M.
+    2. If V == here AND M has no own declaration -> NO-OP (re-seat pill only).
+    3. If V == prior (i.e. V makes M's declaration redundant) AND M has an own declaration -> REMOVE
+       (delete M's `<key>`/`<time>`), one undoable command.
+    4. Else (V differs from what M would inherit) -> ADD if M has no own declaration, EDIT if it does;
+       either way M ends up declaring V. One undoable command.
+    This collapses add/edit/remove into one mental model ("set the signature at this measure to V; if V
+    is what it already inherits, the change disappears"), needs NO extra button, and is exactly how
+    MuseScore-style editors behave when you set a courtesy/redundant signature.
+  - **Why no dedicated remove control in MVP:** "choose the prior value" is discoverable (the pill shows
+    you the prior region's value when you select a note just before the change) and keeps the picker as
+    the single surface. A dedicated "remove this change" affordance (e.g. a trash row in the popover when
+    the target has its own declaration) is a clean v3 nicety; flag it but do not block MVP on it. If QA
+    finds users cannot discover removal, add a "Remove change at m. N" row at the BOTTOM of the popover,
+    shown only when the target measure has its own declaration. (Recommended to spec now, ship later.)
+  - **Separate KEY removal vs TIME removal:** removing a key change deletes only the `<key>` from the
+    target measure's `<attributes>` (a `<time>` in the same `<attributes>` stays). Removing a time change
+    deletes only the `<time>`. If deleting leaves an EMPTY `<attributes>`, the Tech Lead may drop the
+    empty `<attributes>` or leave it inert (either serializes fine; dropping is tidier). Independent axes.
+
+  ### DECISION MID-3 (PILL SEMANTICS + COMMUNICATING THE RANGE + SCOPED PITCH-PRESERVATION) - the pill reads "value (m. N)" at the target; the affected range is "from m. N until the next existing change", communicated by the announce + the qualifier, not new chrome. Key pitch-preservation is now SCOPED to the affected region.
+
+  - **The pill IS still the readout (SIG-5 holds), now region-aware.** It shows the value in effect at
+    the target and the `(m. N)` qualifier (MID-1) tells the user this value reigns from measure N. After
+    an edit it updates to the new value (still `(m. N)` since the change still starts at N).
+  - **Communicating the affected range, MVP-simple:** a mid-piece change is in effect "from the target
+    measure UNTIL THE NEXT EXISTING CHANGE" (or end of piece). MVP does NOT draw a visual band over the
+    staff for that range (a v3 nicety). Instead the RANGE is communicated two ways that cost nothing:
+    (1) the `(m. N)` pill qualifier + the "from measure N" phrasing in aria/announce make the START
+    explicit; (2) the END is implicit and SAFE because the model only rewrites/inserts the ONE
+    declaration at N and never touches the next change downstream, so the user can verify the end by
+    selecting a note in the next region and watching the pill flip to that region's value. This is the
+    honest, non-surprising behavior: "I changed the signature starting here; the next change downstream
+    is untouched." Do NOT imply the edit reaches the end of the piece when a later change exists.
+    RECOMMENDATION: ship the qualifier + announce; defer the visual range band to v3.
+  - **Pitch-preservation is now SCOPED to the affected key region (CRITICAL change from v1).** v1's
+    `setKeyFifths` rewrote the single initial `<key>` and held EVERY note in the piece to pitch (added
+    explicit accidentals across all measures). For a mid-piece key change at measure N, only the notes
+    FROM measure N UNTIL THE NEXT KEY CHANGE may be affected by the new signature, so ONLY those notes
+    must be re-evaluated for bare-vs-explicit accidental. Notes before N (governed by the earlier key)
+    and notes from the next key change onward (governed by the next `<key>`) are UNTOUCHED. The rule per
+    SIG-4 is unchanged (a note prints bare iff its actual alter equals the new key's default for its
+    letter, else it carries an explicit accidental), but its DOMAIN is now the half-open region
+    `[N, nextKeyChange)`, not the whole piece. The Tech Lead computes that region from the `<key>`
+    positions and applies the bare-vs-explicit pass only within it. (When the edit is at the initial
+    declaration with no later key change, the region is the whole piece and this reduces exactly to v1.)
+    This keeps every other region's spelling byte-stable and makes the undo snapshot smaller (only the
+    affected measures need snapshotting, mirroring how `SetKeyRecord` already snapshots measure children).
+  - **Time has no pitch concern** (declaration-only, SIG-3): a mid-piece time change inserts/rewrites the
+    one `<time>` at N; no note is retimed or moved, falling notes unchanged, and each bar's capacity from
+    N onward already resolves the new meter via `timeSignatureFor` (MID finding 2). The SIG-3 mismatched-
+    bars guardrail count should be scoped to bars FROM N to the next time change (the only bars whose
+    governing meter just changed); counting the whole piece would mis-attribute mismatches in other
+    regions. (Tech Lead: pass the affected measure range to `countMismatchedBars`, or count only bars
+    whose in-effect `<time>` is the one just edited.)
+
+  ### DECISION MID-4 (FEEDBACK / ANNOUNCE / A11Y) - announces NAME THE TARGET MEASURE; readout + aria + help update; no em dashes. Verovio renders mid-staff changes natively.
+
+  - **Verovio renders mid-piece signature changes natively** (a new key/meter mid-staff) on the existing
+    `finishEdit` -> `renderVerovio` path; no new render code. The visible change is on the staff at the
+    target measure (and, for a key change, the per-note accidentals within the affected region).
+  - **`#edit-live` announcements (polite, em-dash-free). When the target is a mid-piece measure they NAME
+    the measure; when the target is the start they keep the v1 strings.**
+    - Key set at a mid-piece measure: **"Key signature set to {key name} from measure {N}."** e.g. "Key
+      signature set to D major from measure 5."
+    - Key set at the start (no selection, or selection in the initial region): the v1 string
+      **"Key signature set to {key name}."**
+    - Time set at a mid-piece measure, all affected bars fit: **"Time signature set to {beats}/{beat-type}
+      from measure {N}."** e.g. "Time signature set to 3/4 from measure 5."
+    - Time set at a mid-piece measure, some affected bars do not fit: **"Time signature set to 3/4 from
+      measure 5. {M} bars no longer fill the bar; adjust their note lengths."**
+    - Remove a key change: **"Removed the key change at measure {N}; back to {prior key name}."**
+    - Remove a time change: **"Removed the time change at measure {N}; back to {prior beats}/{beat-type}."**
+    - Undo of a mid-piece key add/edit: **"Undid key change. Back to {previous in-effect key name}."**
+      (reuse v1's undo string; the previous state is whatever was in effect at the target before).
+    - Undo of a key REMOVE (i.e. the change is restored): **"Restored the key change at measure {N}:
+      {key name}."** Same shape for a restored time change. (Optional polish; the generic "Undid ..."
+      string is acceptable for MVP if simpler.)
+  - **aria-labels (no em dashes), region-aware (per MID-1):** when the target is the start, the v1 aria
+    is used verbatim; when the target is a mid-piece measure, append the region: `#key-sig-btn` ->
+    "Key signature: {key}, in effect from measure {N}. Change the key from measure {N}." `#time-sig-btn`
+    -> "Time signature: {beats} {beat-type}, in effect from measure {N}. Change the time signature from
+    measure {N}." The popover option aria-labels are UNCHANGED from v1 (each option still speaks its own
+    value, e.g. "2 sharps, D major or B minor", "3 4 time"); the option that equals the CURRENT in-effect
+    value still carries `aria-selected="true"`. (The popover does not need per-target text; the target is
+    carried by the pill + the announce.)
+  - **Help strings (no em dashes):** extend the v1 toolbar clause to mention targeting. Staff aria/help
+    (main.ts ~744): "...use the key and time buttons on the toolbar to fix the key or time signature;
+    with a note selected they change the signature from that measure, otherwise for the whole piece."
+    Keep both surface strings em-dash-free. Keep the canvas string as v1 (signature is edited from the
+    toolbar).
+  - **Reduced motion:** no new motion (the signature re-engraves in place at the target measure). Nothing
+    to gate. The selection pulse is unchanged (it pulses the SELECTED note, which is incidental to a
+    signature edit).
+
+  ### DECISION MID-5 (SCOPE / SPLIT + UNDO + SAVE/DISCARD + EXPORT) - ship mid-piece KEY and TIME TOGETHER (they share the MID-1 targeting model); each edit is ONE undoable command; flows through Save/Discard + export unchanged.
+
+  - **Ship KEY and TIME together, NOT split (unlike v1).** v1 split them because TIME introduced the
+    bar-capacity risk that KEY did not, so landing KEY first de-risked the affordance. For v2 that risk is
+    already retired: the v1 pills, popovers, command pattern, AND the per-measure capacity resolver
+    (`timeSignatureFor`) all exist and are proven. The NEW thing in v2 is the TARGETING MODEL (MID-1),
+    which is IDENTICAL for key and time (read the in-effect value at the selected handle's measure;
+    add/edit/remove a declaration there). Splitting would mean specifying and reviewing that one shared
+    targeting model twice for no risk reduction. So the MVP increment is "mid-piece targeting for both
+    signatures", landing the small `timeForHandle` readout resolver, the measure-number-on-handle, the
+    targeted `setKeyFifths(fifths, atMeasure)` / `setTimeSignature(beats, beatType, atMeasure)` (or
+    new `setKeyAt` / `setTimeAt` variants), the scoped pitch-preservation (MID-3), and the region-aware
+    pill/aria/announce (MID-1/MID-4) in one shipment. If the integrator prefers a smaller step, the
+    natural cut is "targeting + add + edit first, REMOVE second" (MID-2's collapse rule lands with edit;
+    remove is the prior-value sub-rule layered on after), since add+edit cover the dominant misread cases
+    and remove handles the rarer hallucinated-change case.
+  - **One undoable command per edit (SIG-6 holds).** A mid-piece key add/edit/remove is ONE command that
+    snapshots the affected measures' children (the SAME `SetKeyRecord` mechanism, now scoped to
+    `[N, nextKeyChange)` instead of the whole piece) so invert restores the prior declaration AND the
+    region's accidentals byte-for-byte. A mid-piece time add/edit/remove is ONE command snapshotting the
+    target measure's `<attributes>` (or the old `<time>` element), tiny. Both push a single CommandStack
+    entry and invert cleanly, exactly like v1. Both make the model dirty, so Save/Discard light with zero
+    new wiring (`reflectCommitButtons` keys off `canUndo`).
+  - **Save/Discard + Export unchanged.** A mid-piece signature edit is a normal edit: Save serializes the
+    edited DOM (which now carries the mid-piece `<key>`/`<time>` in the target measure's `<attributes>`)
+    into the retained source, Discard reverts to baseline, and PDF/MusicXML export already serialize the
+    edited model, so the mid-piece change flows into both exports for free. No new commit or export code.
+  - **Tech Lead summary of new surface for v2:** (1) capture each handle's MEASURE NUMBER + in-effect
+    `<time>` in the parse walk (alongside the existing `handleFifths`), exposing `measureNumberForHandle`
+    / `timeForHandle` (+ the rest equivalents); (2) targeted mutations: `setKeyFifths` / `setTimeSignature`
+    gain an optional target measure (default = initial declaration, preserving v1), and SCOPE the key
+    bare-vs-explicit pass + the mismatched-bar count to the affected region; add/edit/remove follow the
+    MID-2 single rule (compare V to the prior-region value); (3) the pills re-seat from the SELECTED
+    handle's in-effect signature inside `reflectSharedSelection`, with the `(m. N)` qualifier when the
+    in-effect signature started at N > 1, falling back to the initial declaration when nothing is
+    selected; (4) region-aware announce + aria strings (MID-4). Decisions to confirm with the owner:
+    selection IS the target (no new measure UI); add+edit+remove all ship, remove = choose the prior
+    value (no dedicated button in MVP); key + time ship together; pitch-preservation + mismatched-bar
+    count are scoped to the affected region; the duration editor needs NO change (capacity already
+    resolves the in-effect meter).
+
 - **2026-06-04 - The next musescore-like capability after the duration editor. Framing that
   drives every decision: this is OMR CORRECTION, not composition. The dominant case is a SCANNED
   score whose key or meter the OMR misread, where the NOTES and BARLINES are already right and only

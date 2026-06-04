@@ -817,3 +817,146 @@ describe("SET-TIME (SIG-3): a time edit on real reverie engraves the new meter w
     expect(restored.idToVisIndex.size).toBe(restored.notes.length);
   });
 });
+
+// ----- MID-PIECE signature editing (v2) through the REAL engine -----
+//
+// A mid-piece key/time change inserts a <key>/<time> into a LATER measure's <attributes>; Verovio must
+// engrave the mid-staff signature change natively WITHOUT a "unsupported note-type-value" warning (no
+// <type> is touched) and keep the click map complete. These prove the model's targeted mutations produce
+// XML the real engine renders, on a multi-region fixture AND on the real reverie file (which must stay
+// 185/185 after a mid-piece change is added).
+
+// A grand-staff 2-measure fixture (single initial region) used to ADD mid-piece changes at measure 2.
+const MIDSIG_TWO_BAR = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>F</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>G</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>A</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>B</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>C</step><octave>6</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+// Render `xml` while capturing console output, returning the render + the captured output joined. Mirrors
+// the warning-capture idiom the duration/time integration tests use.
+function renderCapturingLog(
+  toolkit: VerovioToolkit,
+  xml: string,
+  vis: VisNote[],
+): { render: ReturnType<typeof renderMusicXml>; output: string } {
+  const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const render = renderMusicXml(toolkit, xml, vis, 800);
+    const output = [...logSpy.mock.calls, ...warnSpy.mock.calls]
+      .flat()
+      .map((a) => String(a))
+      .join("\n");
+    return { render, output };
+  } finally {
+    logSpy.mockRestore();
+    warnSpy.mockRestore();
+  }
+}
+
+describe("MID-PIECE signature editing v2 through real Verovio", () => {
+  let toolkit: VerovioToolkit;
+  beforeAll(async () => {
+    toolkit = await loadVerovioToolkit();
+  }, 60000);
+
+  it("a mid-piece KEY change at m.2 renders natively with NO note-type-value warning, click map complete", () => {
+    const model = parseScoreModel(MIDSIG_TWO_BAR);
+    const before = model.handles.map((h) => h.midi);
+    const rec = model.setKeyFifths(2, 2); // ADD D major at measure 2
+    expect(rec).not.toBeNull();
+    expect(model.handles.map((h) => h.midi)).toEqual(before); // pitch-preserving
+    const vis = visFromModel(model);
+    const { render, output } = renderCapturingLog(toolkit, model.serialize(), vis);
+    expect(output).not.toContain("note-type-value");
+    // 8 noteheads still render and every one maps to a VisNote (the mid-staff key change did not break it).
+    expect(render.notes).toHaveLength(8);
+    expect(render.idToVisIndex.size).toBe(render.notes.length);
+    // Verovio engraved a SECOND keySig (the mid-piece change at m.2) in addition to the initial one.
+    const keySigs = (render.svg.match(/class="keySig"/g) ?? []).length;
+    expect(keySigs).toBeGreaterThanOrEqual(2);
+  });
+
+  it("a mid-piece TIME change at m.2 renders natively with NO note-type-value warning, click map complete", () => {
+    const model = parseScoreModel(MIDSIG_TWO_BAR);
+    const rec = model.setTimeSignature(3, 4, 2); // ADD 3/4 at measure 2 (declaration-only)
+    expect(rec).not.toBeNull();
+    const vis = visFromModel(model);
+    const { render, output } = renderCapturingLog(toolkit, model.serialize(), vis);
+    expect(output).not.toContain("note-type-value");
+    expect(render.notes).toHaveLength(8);
+    expect(render.idToVisIndex.size).toBe(render.notes.length);
+    // Verovio engraved a SECOND meterSig (the mid-piece change at m.2).
+    const meterSigs = (render.svg.match(/class="meterSig"/g) ?? []).length;
+    expect(meterSigs).toBeGreaterThanOrEqual(2);
+  });
+
+  it("a mid-piece KEY + TIME change together render with no warning (both engraved at m.2)", () => {
+    const model = parseScoreModel(MIDSIG_TWO_BAR);
+    model.setKeyFifths(-3, 2); // E-flat major at m.2
+    model.setTimeSignature(6, 8, 2); // 6/8 at m.2
+    const vis = visFromModel(model);
+    const { render, output } = renderCapturingLog(toolkit, model.serialize(), vis);
+    expect(output).not.toContain("note-type-value");
+    expect(render.idToVisIndex.size).toBe(render.notes.length);
+  });
+
+  it("adding a mid-piece KEY change to the REAL reverie file keeps it 185/185 with no warning", () => {
+    const model = parseScoreModel(REVERIE_XML);
+    expect(model.handles.length).toBe(185);
+    // Target the measure of a note partway through the piece (so it is a genuine mid-piece change, not
+    // the initial declaration). Pick a non-continuation note around the middle.
+    const mid = model.handles[Math.floor(model.handles.length / 2)];
+    const targetMeasure = model.measureNumberForHandle(mid.id);
+    expect(targetMeasure).toBeGreaterThan(1);
+    const beforeMidis = model.handles.map((h) => h.midi);
+    const rec = model.setKeyFifths(2, targetMeasure); // add D major from that measure on
+    expect(rec).not.toBeNull();
+    expect(model.handles.map((h) => h.midi)).toEqual(beforeMidis); // pitch-preserving (every MIDI held)
+    const vis = visFromModel(model);
+    const { render, output } = renderCapturingLog(toolkit, model.serialize(), vis);
+    expect(output).not.toContain("note-type-value");
+    expect(render.notes).toHaveLength(185); // still 185 noteheads
+    expect(render.idToVisIndex.size).toBe(render.notes.length); // click map complete (185/185)
+    // Every serialized pitched note still carries a <type> (the mid-piece edit never stripped one).
+    const doc = new DOMParser().parseFromString(model.serialize(), "application/xml");
+    const pitched = Array.from(doc.getElementsByTagName("note")).filter(
+      (n) => n.getElementsByTagName("rest").length === 0,
+    );
+    for (const n of pitched) {
+      expect(n.getElementsByTagName("type").item(0)?.textContent ?? "").not.toBe("");
+    }
+  });
+
+  it("adding a mid-piece TIME change to reverie keeps it 185/185 with no warning, and undo is byte-exact", () => {
+    const model = parseScoreModel(REVERIE_XML);
+    const beforeXml = model.serialize();
+    const mid = model.handles[Math.floor(model.handles.length / 2)];
+    const targetMeasure = model.measureNumberForHandle(mid.id);
+    const rec = model.setTimeSignature(3, 4, targetMeasure)!; // add 3/4 from that measure
+    expect(model.serialize()).not.toBe(beforeXml);
+    const vis = visFromModel(model);
+    const { render, output } = renderCapturingLog(toolkit, model.serialize(), vis);
+    expect(output).not.toContain("note-type-value");
+    expect(render.notes).toHaveLength(185);
+    expect(render.idToVisIndex.size).toBe(render.notes.length);
+    // Undo restores the file byte-for-byte (the mid-piece <time> + any created <attributes> are gone).
+    model.restoreTime(rec);
+    expect(model.serialize()).toBe(beforeXml);
+  });
+});

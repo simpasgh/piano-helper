@@ -93,6 +93,9 @@ export interface SetKeyCommand {
   kind: "setKey";
   before: number; // the fifths in effect before the edit (for the announce + a safety fallback)
   after: number; // the target fifths
+  // MID-PIECE (v2): the SCORE measure number to target, or undefined for a START (initial-declaration)
+  // edit (v1). apply() forwards it to model.setKeyFifths, so a redo re-targets the SAME measure.
+  atMeasure?: number;
   record: SetKeyRecord | null; // filled by apply(); used by invert(). Re-filled on redo.
 }
 
@@ -106,6 +109,9 @@ export interface SetTimeCommand {
   kind: "setTime";
   before: { beats: number; beatType: number }; // the meter before the edit (for the undo announce)
   after: { beats: number; beatType: number }; // the target meter
+  // MID-PIECE (v2): the SCORE measure number to target, or undefined for a START edit (v1). apply()
+  // forwards it to model.setTimeSignature, so a redo re-targets the SAME measure.
+  atMeasure?: number;
   record: SetTimeRecord | null; // filled by apply(); used by invert(). Re-filled on redo.
 }
 
@@ -138,14 +144,16 @@ export function applyCommand(model: ScoreModel, cmd: EditCommand): void {
       cmd.record = model.changeDuration(cmd.handleId, cmd.direction);
       break;
     case "setKey":
-      // Re-derive the record on every apply (initial push AND redo): rewriting <fifths> to `after` is
-      // deterministic, so a redo reproduces the same pitch-preserving accidental rewrite.
-      cmd.record = model.setKeyFifths(cmd.after);
+      // Re-derive the record on every apply (initial push AND redo): setting <fifths> to `after` at the
+      // SAME target is deterministic, so a redo reproduces the same pitch-preserving accidental rewrite
+      // (whole-piece for a START edit, the affected region for a mid-piece edit).
+      cmd.record = model.setKeyFifths(cmd.after, cmd.atMeasure);
       break;
     case "setTime":
-      // Re-derive the record on every apply (initial push AND redo): rewriting <beats>/<beat-type> to
-      // `after` is deterministic, so a redo reproduces the same declaration-only meter relabel.
-      cmd.record = model.setTimeSignature(cmd.after.beats, cmd.after.beatType);
+      // Re-derive the record on every apply (initial push AND redo): setting <beats>/<beat-type> to
+      // `after` at the SAME target is deterministic, so a redo reproduces the same declaration-only
+      // meter relabel (the initial <time> for a START edit, the target measure for a mid-piece edit).
+      cmd.record = model.setTimeSignature(cmd.after.beats, cmd.after.beatType, cmd.atMeasure);
       break;
   }
 }

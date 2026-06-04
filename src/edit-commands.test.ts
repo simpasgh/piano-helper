@@ -78,6 +78,17 @@ function stubModel(): ScoreModel & {
     restHandles: [],
     fifthsForHandle: () => 0,
     fifthsForRest: () => 0,
+    // MID-PIECE v2 resolvers: the command-stack tests drive START (initial-declaration) edits only, so
+    // these constant stubs (measure 1, the stub's current meter, region start 1) are sufficient; the
+    // real per-handle resolution is exercised in edit-model.test.ts.
+    measureNumberForHandle: () => 1,
+    measureNumberForRest: () => 1,
+    timeForHandle: () => self.currentTime,
+    timeForRest: () => self.currentTime,
+    keyRegionStartForHandle: () => 1,
+    keyRegionStartForRest: () => 1,
+    timeRegionStartForHandle: () => 1,
+    timeRegionStartForRest: () => 1,
     setPitch: (id: number, pitch: ModelPitch) => {
       pitches.set(id, pitch);
     },
@@ -128,14 +139,15 @@ function stubModel(): ScoreModel & {
     },
     dotState: () => ({ dotted: false, canToggle: true }),
     initialFifths: () => self.currentFifths,
-    setKeyFifths: (newFifths: number): SetKeyRecord | null => {
+    setKeyFifths: (newFifths: number, atMeasure?: number): SetKeyRecord | null => {
       // A no-op when the key is unchanged (mirrors the real model, so a SetKeyCommand with after ==
-      // current pushes no real edit). Otherwise record the change + advance the stub's current key.
+      // current pushes no real edit). Otherwise record the change + advance the stub's current key. The
+      // command tests drive START edits (atMeasure undefined); the stub records it for the assertion.
       if (newFifths === self.currentFifths) return null;
       keyChanges.push(newFifths);
       const old = self.currentFifths;
       self.currentFifths = newFifths;
-      return { oldFifths: old, newFifths, measures: [], changedCount: 0 };
+      return { oldFifths: old, newFifths, measures: [], changedCount: 0, targetMeasure: atMeasure ?? null };
     },
     restoreKey: (record: SetKeyRecord) => {
       keyRestores.push(record);
@@ -143,7 +155,7 @@ function stubModel(): ScoreModel & {
     },
     initialTime: () => self.currentTime,
     barsNotMatchingMeter: () => 0,
-    setTimeSignature: (beats: number, beatType: number): SetTimeRecord | null => {
+    setTimeSignature: (beats: number, beatType: number, atMeasure?: number): SetTimeRecord | null => {
       // A no-op when the meter is unchanged (mirrors the real model, so a SetTimeCommand with after ==
       // current pushes no real edit). Otherwise record the change + advance the stub's current meter.
       if (beats === self.currentTime.beats && beatType === self.currentTime.beatType) return null;
@@ -156,6 +168,8 @@ function stubModel(): ScoreModel & {
         newBeats: beats,
         newBeatType: beatType,
         mismatchedBars: 0,
+        targetMeasure: atMeasure ?? null,
+        measures: [],
       };
     },
     restoreTime: (record: SetTimeRecord) => {
