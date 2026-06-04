@@ -3,6 +3,189 @@
 UX, visual design, interaction decisions. Append durable learnings at the top of the
 relevant section, dated.
 
+## Smart Edit Mode ADD-A-NOTE v1: fill a rest (turn a REST into a NOTE of the same duration) (interaction + visual spec)
+
+- **2026-06-04 - The inverse of P2 delete. P2 (model-level DELETE) shipped: a selected note
+  becomes a `<rest>` of the same duration in place, fixed-bar, undoable, chord-aware (tech-lead.md
+  2026-06-04 "MODEL-LEVEL DELETE shipped"; `makeRestFrom` + `DeleteNoteCommand` + `reindexHandles`).
+  ADD-a-note v1 is the literal mirror: turn a `<rest>` back into a `<note>` of the SAME duration,
+  fixed-bar, no new timing math. This is exactly the OMR correction need (the scanner drops a note
+  and leaves a rest in the gap; the user fills it) and it reuses the model machinery wholesale. The
+  richer MuseScore "insert a note of any duration anywhere" is entangled with duration editing and is
+  DEFERRED to land with P3 (duration). This entry is design only; the substrate is the edit-model DOM
+  (`src/edit-model.ts`), the command stack (`src/edit-commands.ts`), and the dual-surface wiring in
+  `src/main.ts`, all of which P1/P2 already built.**
+
+  ### Decision ADD-0 (SCOPING, validated) - Add = rest-to-note fill, NO duration math, NO new mode.
+
+  Validated the proposed scope and KEPT it. Add-a-note v1 = "select a rest on the staff, convert it to
+  a note of the same duration, then adjust the pitch with the existing P1 pitch controls." Three reasons
+  this is the right v1 and not a watered-down one: (1) it matches the real correction (a dropped note is
+  a rest in the gap, so filling rests IS the feature, not a subset of it); (2) it is the exact inverse of
+  the delete that just shipped, so it reuses `makeRestFrom`'s mirror, the command/undo stack, the
+  re-index, and the dual-surface re-derive with almost no new surface; (3) it keeps the sync invariant
+  trivially (the slot's duration and onset never change, so the falling lane and audio re-derive the same
+  way a pitch edit does). Everything that needs real timing math (arbitrary-duration insertion, splitting
+  a rest, note entry on an empty beat that has no rest) waits for P3 where duration editing exists.
+
+  ### Decision ADD-1 - TARGETING a rest: the staff is the only place you can, and that asymmetry is honest.
+
+  - **A rest is a STAFF-ONLY target.** The falling-notes canvas has no rest (rests do not fall), so there
+    is nothing to click there. On the staff a rest is a Verovio `<g class="rest" id="...">` with a stable
+    id, sibling to the `<g class="note">` noteheads the click path already resolves. So: **you add a note
+    by selecting a rest on the staff and converting it; the new note then appears on BOTH surfaces** (it
+    is a real note from that instant). This asymmetry is correct and should not be hidden: a rest is a
+    silence, and a silence has no falling bar, so "you fill the gap on the page, and the note drops into
+    the river" is the true mental model. Announce it so a canvas-focused or SR user is not surprised (see
+    ADD-4: the add announcement names the note AND that it now plays).
+  - **MOUSE - click the rest glyph.** Today the staff `pointerdown` resolves `target.closest("g.note")`;
+    extend it to ALSO resolve `target.closest("g.rest")`. A rest is not a handle today (the model walk at
+    `reindexHandles` SEES rests, computes their onset/duration, and deliberately pushes no handle for
+    them, `edit-model.ts` ~line 320). To make a rest selectable WITHOUT polluting the pitched-note handle
+    space that delete/pitch/undo key on, give the model a **separate rest registry**: a parallel
+    `restHandles[]` built in the same walk (each entry: a synthetic rest id, the `<rest>`'s `<g>` id on
+    the staff, its `onsetSec`, its `durationSec`/`<type>`, its `<staff>`/`<voice>`), so a rest id is
+    addressable for selection + the add command but never appears in `staffNavHandles()` / `handleToVisIndex`
+    / the pitched-note count. (Tech Lead owns the exact shape; the load-bearing constraint is "a rest is
+    selectable and convertible, but it is NOT a NoteHandle, so nothing that iterates pitched notes changes
+    behavior.") Click padding: noteheads already get a >=24px padded hot zone; give the rest glyph the
+    SAME padded hit target (rest glyphs are small) so it is tappable on phone (#33/#84).
+  - **KEYBOARD - rests join the staff Left/Right walk, opt-in via a "stops on rests" rule.** Left/Right
+    on the staff steps `staffNavHandles()` (notes only, by onset). Extend the staff nav order to ALSO
+    include rests, interleaved by onset, so Left/Right walks "note, note, REST, note" in document time and
+    you can land on the gap with the keyboard alone (a no-pointer path is a hard a11y requirement, parity
+    with delete). When the selection lands on a rest, the edit cluster shows the single **Add** action
+    (ADD-3) instead of the pitch/delete cluster, and the announcement says it is a rest (ADD-4). Rests are
+    still EXCLUDED from the canvas Up/Down selection nav (the canvas has no rest to select); canvas nav is
+    unchanged. This keeps one consistent rule: the STAFF can reach every musical event including silences;
+    the CANVAS reaches only the sounding notes it draws.
+
+  ### Decision ADD-2 - SETTING the new note's pitch: default to the click height on the staff, else the previous note.
+
+  When a rest becomes a note it needs a starting pitch the user then nudges with the P1 controls (arrows
+  on the staff, drag, +/-). Minimize the steps to the intended pitch:
+
+  - **MOUSE default = the staff line/space the user CLICKED (y -> nearest diatonic step, key-sig aware).**
+    The click already carries a vertical position; map it to the nearest staff position the way a staff
+    pitch drag snaps (the staff drag already does y -> diatonic step via the notehead bbox; reuse that
+    math against the rest glyph's staff geometry). This is the fewest-steps path: a user fixing a dropped
+    middle-C clicks at the middle-C line and gets a C with zero further adjustment. The pitch is diatonic
+    + key-signature aware (clicking just above the top line in C major yields G/A, not a sharp), matching
+    the staff's native unit. If the click maps cleanly, the new note lands there and is selected.
+  - **KEYBOARD default = the PREVIOUS sounding note's pitch** (the nearest earlier note in the same
+    voice/staff by onset; if none, the staff middle line, B4 treble / D3 bass). Rationale: a keyboard user
+    arriving on a rest via Left/Right has no y to click, and "same pitch as the note before it" is the
+    single best prior for a melodic gap (a dropped note is usually a step or two from its neighbor, far
+    closer than a fixed default). The user then uses Up/Down (diatonic) to walk to the exact pitch, which
+    is one or two presses from the neighbor in the common case. NOT the middle line as the primary default:
+    the middle line is on average a wide interval from the gap's true pitch, so it costs more presses than
+    "the note before it." Middle line is only the fallback when there is no previous note (a rest at the
+    very start of a part).
+  - **The new note is immediately the shared selection**, so the very next arrow / drag / +/- adjusts IT
+    with the existing P1 pitch path. No separate confirm: convert-then-adjust is one continuous flow, the
+    same as "delete, then undo if wrong." After conversion the pitch controls are live on it instantly.
+  - **Default duration is NOT a choice in v1: it is the rest's own duration, always.** That is the whole
+    point of fixed-bar fill (a quarter rest becomes a quarter note; the bar still balances). Duration
+    pickers belong to P3.
+
+  ### Decision ADD-3 - MODE MODEL: no note-input mode. Selecting a rest and converting it is enough. (Recommended, justified.)
+
+  **RECOMMENDATION: NO separate note-input mode for v1.** Rest-to-note fill is a single conversion on an
+  existing object (the rest), exactly like delete is a single conversion the other way; neither needs an
+  armed insertion cursor. The MuseScore "N = note input" armed mode exists to enter RUNS of notes at a
+  sticky advancing cursor with a chosen duration, which is a composition gesture; filling a dropped note
+  is a one-shot correction on a target that is already on the page. Adding a mode would mean a second
+  pointer state, a cursor object, an enter/exit affordance, and a mode indicator, all to wrap a single
+  click that the existing selection machinery already supports. So:
+  - **Selecting a rest reveals a single Add affordance**, and the edit cluster (shown whenever edit mode
+    is on AND something is selected, ADD-1/P1) shows, for a rest selection, ONE primary button: **"Add a
+    note"** (a plus-with-note glyph, e.g. Heroicons `plus` on the note motif, or a `plus-circle`), with
+    the readout naming the rest ("Quarter rest, beat 3"). For a NOTE selection it shows the existing
+    pitch-down / pitch-up / delete cluster, unchanged. One cluster, contents swap on what is selected.
+  - **KEYBOARD = Enter (or the letter N as a familiar alias) converts the selected rest.** When a rest is
+    selected, **Enter** turns it into a note at the keyboard default pitch (ADD-2) and selects it; **N**
+    does the same for MuseScore muscle memory, but it is an ALIAS, not a mode toggle (one press = one
+    conversion, never an armed state). After conversion you are on a normal note, so Up/Down immediately
+    adjusts its pitch. This keeps the no-pointer path: Left/Right to the rest, Enter to fill, Up/Down to
+    pitch it, done.
+  - **Why this beats a mode even for runs:** a run of dropped notes is a run of rests (the scanner left a
+    rest per gap), so the keyboard flow "Right to the next rest, Enter, Up/Down, Right to the next rest,
+    Enter" already walks a run fast with no mode. If usage data ever shows users entering long original
+    passages (composition, not correction), THAT is when a note-input mode earns its weight, and it lands
+    with P3 duration (you cannot enter a run without choosing durations anyway). Flag to the PM, do not
+    build it now.
+
+  ### Decision ADD-4 - AFTER it is added it is a normal note; UNDO/REDO is one command; announcements.
+
+  - **The added note is a first-class note** the instant it converts: pitch-editable (P1, both surfaces),
+    deletable (P2, which turns it straight back into a rest), and present on BOTH the staff and the falling
+    canvas. Nothing marks it as "added" (no permanent badge); like a corrected pitch, it is now just part
+    of the model, which is the single source of truth (consistent with P1's "no permanent edited marker").
+  - **ADD is ONE command, the inverse of delete.** Mirror `DeleteNoteCommand` with an `AddNoteCommand`:
+    apply() converts the `<rest>` to a `<note>` at the chosen pitch/duration (a `makeNoteFrom(restEl, pitch)`
+    that mirrors `makeRestFrom` and re-indexes), invert() turns that note back into the rest it came from
+    (literally the delete path), redo() re-applies. The command carries the rest's slot + the added note's
+    pitch + a `VisNoteSnapshot` so main.ts can splice the new falling note IN at its index on add and OUT
+    on undo, exactly the reverse of how delete splices. Undo restores BOTH surfaces + audio together (same
+    re-render / re-derive / reloadNotes path) and re-selects: after undoing an add, the **REST returns
+    selected** (so you can try again), matching "after undoing a delete the note returns selected."
+  - **Announcements (the shared `#edit-live` polite region):**
+    - Selecting a rest: **"Selected a quarter rest, beat 3"** (name the rest's duration + its beat, the
+      rest analogue of "Selected D4, right hand"). If beat is awkward to compute, "Selected a quarter rest"
+      is acceptable; duration is the load-bearing token.
+    - Adding: **"Added a note, D5"** (state that a note now exists AND its pitch, in the current Names mode
+      so solfege/letters match the screen). Because the new note also starts sounding, this doubles as the
+      "it now plays" signal the ADD-1 asymmetry needs; no extra sentence required.
+    - Undo of an add: **"Removed the note"** (it became a rest again; symmetric with delete's "Restored
+      D5"). Redo of an add: **"Added a note, D5"** again.
+    - Each later pitch nudge on the new note announces with the normal P1 from->to form ("D5 up to E5").
+
+  ### Decision ADD-5 - VISUAL + ARIA: a selectable rest wears the brass selection language; updated surface labels.
+
+  - **A selectable rest looks like a rest until you touch it; on hover/focus it invites the click.** Give
+    the rest `<g>`'s padded hot zone a subtle hover affordance (cursor: pointer + a faint brass
+    `--accent-glow` wash behind the glyph on hover/keyboard-focus, ~20% alpha) so the user learns rests are
+    actionable in edit mode without making every rest shout. This is lighter than a note's full selection
+    halo because an unselected rest is not selected, only hoverable.
+  - **A SELECTED rest wears the same brass selection language as a selected note**, sized to the rest
+    glyph: the `.ph-selected` brass halo (2px `--focus-ring` stroke + soft `--accent-glow`) drawn around
+    the rest's bounding box instead of a notehead. Same token, same look, applied to a rest. This is the
+    one place the brass selection language extends to a non-note, and it should read identically so
+    "selected = brass halo" stays a single learnable rule across notes and rests.
+  - **DURING the add (the moment of conversion) there is no drag preview** (a click-to-fill is discrete,
+    like a keyboard pitch step): the rest is replaced by a notehead at the chosen pitch in one re-engrave,
+    the halo moves from the rest to the new notehead, and the falling bar appears in the lane in the same
+    frame. If a future version lets the user drag vertically off the rest to choose the pitch before
+    committing (a nice enhancement), it would reuse the staff drag-preview language (gliding notehead +
+    target line/space wash); v1 does not need it because the click height already sets the pitch.
+  - **Updated surface aria-labels (the staff gains the rest verbs; the canvas is unchanged on add):**
+    - Staff `aria-label` adds the rest clause to the existing string: append "Select a rest and press
+      Enter to fill it with a note of the same duration." So the full staff label becomes roughly: "Staff
+      editor. Left and right select a note or a rest; up and down change a note's pitch by a step; Control
+      with up or down changes by a semitone; Shift with up or down by an octave; on a rest, press Enter to
+      add a note; Delete removes a note; Control Z undoes."
+    - Canvas `aria-label` is UNCHANGED for adding (you cannot add from the canvas), but the project should
+      ensure the ADD announcement is what tells a canvas-focused user that a note appeared (the live region
+      is shared, so "Added a note, D5" reaches them regardless of focus).
+    - Reduced motion: the rest hover wash and the selection halo are static (no pulse), matching #86/#6.
+
+  ### Decisions to confirm with the main agent / product owner
+  1. **Scope ratification: Add v1 = rest-to-note fill ONLY** (no arbitrary-duration insertion, no entering
+     a note on a beat that has no rest, no note-input run mode). All of that waits for P3 duration. Confirm
+     this is the intended v1 (the prompt says it is; flagging so the PM owns the "you cannot add a note
+     where there is no rest yet" limit, which is the one user-visible gap and is honest given the scanner
+     leaves a rest in real dropped-note cases).
+  2. **Keyboard default pitch = the PREVIOUS note's pitch** (fallback middle line). Confirm "same as the
+     note before it" over "always the middle line"; I chose it because a dropped note is usually near its
+     neighbor, so it is the fewest-keystrokes prior. Mouse default is the click height regardless.
+  3. **Enter (primary) + N (alias) to convert; NO note-input mode.** Confirm we do not want an armed
+     MuseScore-style cursor for v1. I recommend no mode (a single conversion does not need one); N stays as
+     a familiar one-shot alias, not a sticky state, so importing it now does not commit us to mode UX later.
+  4. **Rests become reachable by the staff Left/Right walk** (interleaved by onset) in addition to clicking.
+     Confirm we want keyboard users to step onto rests (I believe yes, it is the no-pointer add path); the
+     cost is Left/Right now also stops on rests, which a pitch-correcting user will tab past. If that proves
+     noisy, a follow-up could gate rest-stops behind a modifier, but v1 should include them for a11y.
+
 ## Smart Edit Mode P1: DUAL-SURFACE pitch editing + Correct-mode retirement + undo/redo (interaction + visual spec)
 
 - **2026-06-04 - REVISES the framing below. P0 shipped a Verovio staff viewer behind an Edit toggle

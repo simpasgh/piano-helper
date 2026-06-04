@@ -10,7 +10,7 @@
 // re-render / re-derive / reloadNotes path, so undo restores both surfaces + audio exactly like
 // a fresh edit. This keeps the stack logic unit-testable against a tiny model stub.
 
-import type { DeleteRecord, ModelPitch, ScoreModel } from "./edit-model";
+import type { AddRecord, DeleteRecord, ModelPitch, ScoreModel } from "./edit-model";
 
 // A pitch edit on one model note. `handleId` is the stable handle index; `before`/`after` are
 // the written pitches. apply() sets `after`; invert() sets `before`. Used by BOTH surfaces (the
@@ -46,7 +46,21 @@ export interface DeleteNoteCommand {
   visIndex: number | null;
 }
 
-export type EditCommand = SetPitchCommand | DeleteNoteCommand;
+// An ADD of one note (ADD-a-note v1): the inverse of a standalone-note delete. A `<rest>` becomes a
+// `<note>` of the SAME duration at `pitch` (fixed-bar). `restId` is the document-position id of the
+// rest in the model's rest registry. apply() converts it via the model and stashes the AddRecord in
+// `record`; invert() turns the note back into the rest from that record. `visNote` is the
+// orchestrator's bookkeeping so the new falling note can be spliced in on add and out on undo (the
+// command stack ignores it). Mirrors DeleteNoteCommand exactly, with rest <-> note reversed.
+export interface AddNoteCommand {
+  kind: "addNote";
+  restId: number;
+  pitch: ModelPitch;
+  record: AddRecord | null; // filled by apply(); used by invert(). Re-filled on redo.
+  visNote: VisNoteSnapshot | null;
+}
+
+export type EditCommand = SetPitchCommand | DeleteNoteCommand | AddNoteCommand;
 
 export function applyCommand(model: ScoreModel, cmd: EditCommand): void {
   switch (cmd.kind) {
@@ -58,6 +72,11 @@ export function applyCommand(model: ScoreModel, cmd: EditCommand): void {
       // CURRENT DOM. Deletion is deterministic, so a redo reproduces the same removal.
       cmd.record = model.deleteNote(cmd.handleId);
       break;
+    case "addNote":
+      // Re-derive the record on every apply (initial push AND redo): the conversion is
+      // deterministic, so a redo reproduces the same rest -> note at the same pitch.
+      cmd.record = model.addNote(cmd.restId, cmd.pitch);
+      break;
   }
 }
 
@@ -68,6 +87,9 @@ export function invertCommand(model: ScoreModel, cmd: EditCommand): void {
       break;
     case "deleteNote":
       if (cmd.record) model.restoreNote(cmd.record);
+      break;
+    case "addNote":
+      if (cmd.record) model.removeNote(cmd.record);
       break;
   }
 }

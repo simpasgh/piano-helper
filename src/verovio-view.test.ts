@@ -5,7 +5,13 @@ import {
   buildVisIndexToId,
   notesAtScoreTime,
   parseSvgNoteIds,
+  parseSvgRestIds,
+  restOnsetsFromTimemap,
+  restStavesFromSvg,
+  restKey,
+  buildRestIndexToId,
   type VerovioNote,
+  type VerovioRest,
 } from "./verovio-view";
 import type { TimemapEntry } from "verovio/esm";
 import type { VisNote } from "./visualizer";
@@ -198,5 +204,113 @@ describe("parseSvgNoteIds", () => {
 
   it("returns [] when there are no note groups", () => {
     expect(parseSvgNoteIds(`<svg><g class="staff" id="s1"></g></svg>`)).toEqual([]);
+  });
+});
+
+// ----- ADD-a-note v1: rest id extraction + onset/staff/key helpers -----
+
+describe("parseSvgRestIds", () => {
+  it("pulls the id from every <g class=\"rest\"> regardless of attribute order", () => {
+    const svg = `<svg>
+      <g class="note" id="note-1"></g>
+      <g class="rest" id="rest-1"></g>
+      <g id="rest-2" class="rest"></g>
+    </svg>`;
+    expect(parseSvgRestIds(svg)).toEqual(["rest-1", "rest-2"]);
+  });
+  it("returns [] when there are no rest groups", () => {
+    expect(parseSvgRestIds(`<svg><g class="note" id="n1"></g></svg>`)).toEqual([]);
+  });
+});
+
+describe("restOnsetsFromTimemap", () => {
+  it("reads each rest's onset SECONDS from the timemap's restsOn entries", () => {
+    // A rest turns on at tstamp 1000ms (1.0s); another at 0ms. (The shape mirrors the real toolkit:
+    // restsOn lists the rests starting at that tstamp.)
+    const timemap: TimemapEntry[] = [
+      { tstamp: 0, restsOn: ["r-a"] } as TimemapEntry,
+      { tstamp: 500, on: ["n1"] } as TimemapEntry,
+      { tstamp: 1000, restsOn: ["r-b"], restsOff: ["r-a"] } as TimemapEntry,
+    ];
+    const onsets = restOnsetsFromTimemap(timemap);
+    expect(onsets.get("r-a")).toBe(0);
+    expect(onsets.get("r-b")).toBe(1);
+    expect(onsets.size).toBe(2);
+  });
+  it("ignores entries without restsOn (a plain note onset)", () => {
+    const timemap: TimemapEntry[] = [{ tstamp: 0, on: ["n1"] } as TimemapEntry];
+    expect(restOnsetsFromTimemap(timemap).size).toBe(0);
+  });
+});
+
+describe("restStavesFromSvg", () => {
+  it("assigns each rest its 1-based enclosing staff ordinal (staff 1 first)", () => {
+    // Two staff groups; a rest in each. The first staff group => staff 1, the second => staff 2.
+    const svg = `<svg>
+      <g class="staff" id="s1"><g class="rest" id="r1"></g></g>
+      <g class="staff" id="s2"><g class="rest" id="r2"></g></g>
+    </svg>`;
+    const staves = restStavesFromSvg(svg);
+    expect(staves.get("r1")).toBe(1);
+    expect(staves.get("r2")).toBe(2);
+  });
+  it("a rest with no enclosing staff group falls back to staff 1", () => {
+    const svg = `<svg><g class="rest" id="r1"></g></svg>`;
+    expect(restStavesFromSvg(svg).get("r1")).toBe(1);
+  });
+  it("counts the staff WITHIN its measure, not document-wide (multi-measure regression)", () => {
+    // Verovio lays a multi-measure single-staff score out as system > (measure > staff)*, so the
+    // staff group repeats once per measure. A rest in the 4th measure is still STAFF 1: counting
+    // staff groups document-wide would wrongly call it staff 4 (the bug that no-op'd the demo).
+    const svg = `<svg><g class="system">
+      <g class="measure"><g class="staff" id="s1"><g class="rest" id="r-m1"></g></g></g>
+      <g class="measure"><g class="staff" id="s2"></g></g>
+      <g class="measure"><g class="staff" id="s3"></g></g>
+      <g class="measure"><g class="staff" id="s4"><g class="rest" id="r-m4"></g></g></g>
+    </g></svg>`;
+    const staves = restStavesFromSvg(svg);
+    expect(staves.get("r-m1")).toBe(1);
+    expect(staves.get("r-m4")).toBe(1); // NOT 4
+  });
+  it("still distinguishes staves WITHIN a measure (grand staff): staff 1 then staff 2", () => {
+    // Two measures, two staves each. The rest in measure 2 on the 2nd staff is staff 2, even though
+    // it is the 4th staff group in document order.
+    const svg = `<svg><g class="system">
+      <g class="measure"><g class="staff" id="m1s1"></g><g class="staff" id="m1s2"></g></g>
+      <g class="measure"><g class="staff" id="m2s1"></g><g class="staff" id="m2s2"><g class="rest" id="r"></g></g></g>
+    </g></svg>`;
+    expect(restStavesFromSvg(svg).get("r")).toBe(2);
+  });
+});
+
+describe("restKey + buildRestIndexToId", () => {
+  it("restKey is (staff, onset) rounded to ms", () => {
+    expect(restKey(1.0, 1)).toBe("1@1.000");
+    expect(restKey(1.0, 2)).toBe("2@1.000");
+  });
+  it("maps each model rest (by index) to the glyph id sharing its (onset, staff)", () => {
+    const rests: VerovioRest[] = [
+      { id: "g-a", timeSec: 1.0, staff: 1 },
+      { id: "g-b", timeSec: 1.0, staff: 2 }, // same onset, different staff
+    ];
+    const modelRests = [
+      { onsetSec: 1.0, staff: 2 }, // model rest 0 is the staff-2 rest
+      { onsetSec: 1.0, staff: 1 }, // model rest 1 is the staff-1 rest
+    ];
+    const map = buildRestIndexToId(rests, modelRests);
+    expect(map.get(0)).toBe("g-b"); // staff 2
+    expect(map.get(1)).toBe("g-a"); // staff 1
+  });
+  it("first-wins on a (onset, staff) collision (two voices), mirroring the note map", () => {
+    const rests: VerovioRest[] = [
+      { id: "g-first", timeSec: 0.5, staff: 1 },
+      { id: "g-second", timeSec: 0.5, staff: 1 },
+    ];
+    const map = buildRestIndexToId(rests, [{ onsetSec: 0.5, staff: 1 }]);
+    expect(map.get(0)).toBe("g-first");
+  });
+  it("leaves a model rest unmapped when no glyph shares its key (degrades, never throws)", () => {
+    const map = buildRestIndexToId([{ id: "g", timeSec: 0, staff: 1 }], [{ onsetSec: 9, staff: 1 }]);
+    expect(map.size).toBe(0);
   });
 });

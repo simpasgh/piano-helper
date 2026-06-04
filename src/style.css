@@ -1050,6 +1050,28 @@ button:focus-visible,
   opacity: 0.55;
 }
 
+/* ADD-a-note v1: a rest is ACTIONABLE in edit mode (click to select, then fill). The whole rest
+   <g> is a pointer hit target like a notehead, and on hover/keyboard-focus it gets a faint brass
+   wash behind the glyph (~20% accent) so the user learns rests are clickable without every rest
+   shouting. Lighter than a note's full halo: an unselected rest is only hoverable. */
+#verovio-host svg g.rest {
+  cursor: pointer;
+}
+#verovio-host svg g.rest:hover,
+#verovio-host svg g.rest:focus-visible {
+  fill: rgba(216, 162, 58, 0.2); /* --accent at ~20% */
+}
+
+/* A SELECTED rest wears the SAME brass selection language as a selected note (sized to the rest
+   glyph by its own bbox): the .ph-selected brass ring + fill. One token, one look, so "selected =
+   brass halo" stays a single learnable rule across notes and rests. */
+#verovio-host svg g.rest.ph-selected {
+  fill: var(--focus-ring);
+  stroke: var(--accent);
+  stroke-width: 18px; /* Verovio user units; a thin brass ring at scale, matching the notehead */
+  paint-order: stroke;
+}
+
 /* The staff host is a focusable application region in edit mode (keyboard editing). */
 #verovio-host:focus-visible {
   outline: 2px solid var(--accent-deep);
@@ -1112,6 +1134,18 @@ button:focus-visible,
 .edit-tool-btn:focus-visible {
   outline: 2px solid var(--accent-deep);
   outline-offset: 1px;
+}
+
+/* Primary action (ADD-a-note v1): the single "Add a note" button reads as the main action with a
+   filled brass look, distinct from the ghost pitch/undo tools. */
+.edit-tool-btn-primary {
+  background: var(--accent);
+  border-color: var(--accent-deep);
+  color: #3a2a0c; /* dark brass ink on the accent fill, for contrast */
+}
+.edit-tool-btn-primary:hover:not(:disabled) {
+  background: var(--accent-deep);
+  color: #fff;
 }
 
 /* Ghost-disabled: dimmed so the user can see there is no history to move through. */

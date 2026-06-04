@@ -9,8 +9,9 @@ import {
   invertCommand,
   type SetPitchCommand,
   type DeleteNoteCommand,
+  type AddNoteCommand,
 } from "./edit-commands";
-import type { DeleteRecord, ModelPitch, ScoreModel } from "./edit-model";
+import type { AddRecord, DeleteRecord, ModelPitch, ScoreModel } from "./edit-model";
 
 const p = (step: ModelPitch["step"], octave: number, alter = 0): ModelPitch => ({
   step,
@@ -18,23 +19,32 @@ const p = (step: ModelPitch["step"], octave: number, alter = 0): ModelPitch => (
   alter,
 });
 
-// A minimal ScoreModel stand-in: records the last pitch set per handle, and a delete/restore log,
-// so the tests can assert what apply/invert routed through the model. Only the methods the command
-// stack calls are implemented. deleteNote returns a sentinel record so the stack stores + replays it.
+// A minimal ScoreModel stand-in: records the last pitch set per handle, plus delete/restore and
+// add/remove logs, so the tests can assert what apply/invert routed through the model. Only the
+// methods the command stack calls are implemented. deleteNote / addNote return sentinel records so
+// the stack stores + replays them.
 function stubModel(): ScoreModel & {
   pitches: Map<number, ModelPitch>;
   deleted: number[];
   restored: DeleteRecord[];
+  added: { restId: number; pitch: ModelPitch }[];
+  removed: AddRecord[];
 } {
   const pitches = new Map<number, ModelPitch>();
   const deleted: number[] = [];
   const restored: DeleteRecord[] = [];
+  const added: { restId: number; pitch: ModelPitch }[] = [];
+  const removed: AddRecord[] = [];
   return {
     pitches,
     deleted,
     restored,
+    added,
+    removed,
     handles: [],
+    restHandles: [],
     fifthsForHandle: () => 0,
+    fifthsForRest: () => 0,
     setPitch: (id: number, pitch: ModelPitch) => {
       pitches.set(id, pitch);
     },
@@ -51,6 +61,16 @@ function stubModel(): ScoreModel & {
     },
     restoreNote: (record: DeleteRecord) => {
       restored.push(record);
+    },
+    addNote: (restId: number, pitch: ModelPitch): AddRecord => {
+      added.push({ restId, pitch });
+      return {
+        addedNote: { tag: `note-from-rest-${restId}` } as unknown as Element,
+        restClone: { tag: `rest-${restId}` } as unknown as Element,
+      };
+    },
+    removeNote: (record: AddRecord) => {
+      removed.push(record);
     },
     serialize: () => "",
   };
@@ -69,6 +89,14 @@ const deleteNote = (handleId: number): DeleteNoteCommand => ({
   record: null,
   visNote: null,
   visIndex: null,
+});
+
+const addNote = (restId: number, pitch: ModelPitch): AddNoteCommand => ({
+  kind: "addNote",
+  restId,
+  pitch,
+  record: null,
+  visNote: null,
 });
 
 describe("applyCommand / invertCommand", () => {
@@ -212,5 +240,58 @@ describe("DeleteNoteCommand (apply / invert / stack)", () => {
     expect(model.restored.length).toBe(1);
     stack.undo(); // then the pitch edit
     expect(model.pitches.get(5)).toEqual(p("C", 4));
+  });
+});
+
+describe("AddNoteCommand (apply / invert / stack) - the inverse of delete", () => {
+  it("apply adds via the model and stashes the record; invert removes from it", () => {
+    const model = stubModel();
+    const cmd = addNote(0, p("E", 5));
+    applyCommand(model, cmd);
+    expect(model.added).toEqual([{ restId: 0, pitch: p("E", 5) }]); // routed through model.addNote
+    expect(cmd.record).not.toBeNull(); // the record was captured for undo
+    const captured = cmd.record;
+    invertCommand(model, cmd);
+    expect(model.removed).toEqual([captured]); // removeNote got the captured record
+  });
+
+  it("push applies an add and undo turns the note back into the rest (round-trip)", () => {
+    const model = stubModel();
+    const stack = new CommandStack(model);
+    stack.push(addNote(1, p("G", 4)));
+    expect(model.added).toEqual([{ restId: 1, pitch: p("G", 4) }]);
+    expect(stack.canUndo()).toBe(true);
+    stack.undo();
+    expect(model.removed.length).toBe(1); // the note was turned back into a rest on undo
+    expect(stack.canRedo()).toBe(true);
+  });
+
+  it("redo re-adds, re-deriving a fresh record (the conversion is deterministic)", () => {
+    const model = stubModel();
+    const stack = new CommandStack(model);
+    const cmd = addNote(0, p("C", 4));
+    stack.push(cmd);
+    const recordAfterPush = cmd.record;
+    stack.undo();
+    stack.redo();
+    expect(model.added).toEqual([
+      { restId: 0, pitch: p("C", 4) },
+      { restId: 0, pitch: p("C", 4) },
+    ]); // added on push AND on redo
+    expect(cmd.record).not.toBeNull();
+    expect(cmd.record).not.toBe(recordAfterPush); // a fresh record, not the stale one
+  });
+
+  it("an add then a delete, both undone in LIFO order, route to the right model calls", () => {
+    const model = stubModel();
+    const stack = new CommandStack(model);
+    stack.push(addNote(0, p("E", 5)));
+    stack.push(deleteNote(2));
+    expect(model.added.length).toBe(1);
+    expect(model.deleted).toEqual([2]);
+    stack.undo(); // undoes the delete first
+    expect(model.restored.length).toBe(1);
+    stack.undo(); // then the add (turns the note back into the rest)
+    expect(model.removed.length).toBe(1);
   });
 });

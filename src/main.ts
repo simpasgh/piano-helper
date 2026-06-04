@@ -14,6 +14,8 @@ import {
   pitchFromMidi,
   midiFromPitch,
   spellingFromPitch,
+  restDurationName,
+  FIRST_MIDI,
   type ScoreModel,
   type ModelPitch,
 } from "./edit-model";
@@ -21,8 +23,17 @@ import {
   CommandStack,
   type SetPitchCommand,
   type DeleteNoteCommand,
+  type AddNoteCommand,
 } from "./edit-commands";
 import { shouldStartPitchDrag } from "./edit-pointer";
+import {
+  staffNavOrder,
+  stepStaffNav,
+  keyboardDefaultPitch,
+  mouseDefaultPitch,
+  musicalNeighborAfterDelete,
+  type StaffNavTarget,
+} from "./edit-nav";
 
 // Label a note for the edit readout + announcements. Falls back to letter-mode names when the
 // label mode is "off" (which midiToBarLabel returns as an empty string), so the edit cluster and
@@ -73,6 +84,7 @@ import {
   loadVerovioToolkit,
   renderMusicXml,
   notesAtScoreTime,
+  buildRestIndexToId,
   type VerovioRender,
 } from "./verovio-view";
 import type { VerovioToolkit } from "verovio/esm";
@@ -118,6 +130,11 @@ const noteEditReadout = document.getElementById("note-edit-readout") as HTMLSpan
 const pitchDownBtn = document.getElementById("pitch-down-btn") as HTMLButtonElement;
 const pitchUpBtn = document.getElementById("pitch-up-btn") as HTMLButtonElement;
 const deleteNoteBtn = document.getElementById("delete-note-btn") as HTMLButtonElement;
+// ADD-a-note v1 cluster: shown when a REST is selected (swaps with the note cluster). One primary
+// "Add a note" button + a readout naming the rest.
+const addNoteCluster = document.getElementById("add-note") as HTMLDivElement;
+const addNoteReadout = document.getElementById("add-note-readout") as HTMLSpanElement;
+const addNoteBtn = document.getElementById("add-note-btn") as HTMLButtonElement;
 const editLive = document.getElementById("edit-live") as HTMLSpanElement;
 const tempoSlider = document.getElementById("tempo-slider") as HTMLInputElement;
 const tempoReadout = document.getElementById("tempo-readout") as HTMLButtonElement;
@@ -207,10 +224,26 @@ let commandStack: CommandStack | null = null;
 // survives re-renders, unlike a VisNote index, which a delete would shift). Both surfaces show
 // it at once. Null = nothing selected.
 let selectedHandle: number | null = null;
+// The shared selection can instead be a REST (ADD-a-note v1): a rest is selectable + convertible
+// but is NOT a NoteHandle, so it gets its OWN selection slot. At most one of selectedHandle /
+// selectedRest is non-null; selecting a note clears the rest and vice versa. Keyed by the model's
+// rest-registry id (its document position among rests, stable until a structural edit). A rest has
+// no VisNote (rests do not fall), so it shows ONLY on the staff.
+let selectedRest: number | null = null;
+// The last MOUSE press on a rest (ADD-a-note v1): which rest + the click height + its glyph, so a
+// following "Add a note" button press fills at the CLICKED staff line/space (ADD-2 mouse default).
+// Cleared whenever the selection changes by any other path (keyboard selection, selecting a note),
+// so a stale click height never leaks into a keyboard-driven add.
+let lastRestPointer: { restId: number; clientY: number; glyph: SVGGElement } | null = null;
 // Maps rebuilt after every edit: handle id <-> VisNote index. The handle is the durable spine;
 // the VisNote index drives the canvas highlight and (via verovioRender.visIndexToId) the staff.
 let handleToVisIndex = new Map<number, number>();
 let visIndexToHandle = new Map<number, number>();
+// Rest maps rebuilt on every staff render (ADD-a-note v1): model rest-index <-> Verovio rest glyph
+// id, keyed by (onset, staff). restIndexToId drives the selected-rest halo + targeting a rest by
+// keyboard; idToRestIndex resolves a rest-glyph CLICK back to the model rest.
+let restIndexToId = new Map<number, string>();
+let idToRestIndex = new Map<string, number>();
 // Ids currently tinted as "playing" so the rAF loop only touches the DOM when the set changes.
 let staffPlayingIds: string[] = [];
 
@@ -561,8 +594,11 @@ function exitEditMode(): void {
   scoreModel = null;
   commandStack = null;
   selectedHandle = null;
+  selectedRest = null;
   handleToVisIndex = new Map();
   visIndexToHandle = new Map();
+  restIndexToId = new Map();
+  idToRestIndex = new Map();
   staffPlayingIds = [];
   drag = null;
   visualizer.setSelected(null);
@@ -616,7 +652,7 @@ function renderVerovio(): void {
   verovioHost.setAttribute("role", "application");
   verovioHost.setAttribute(
     "aria-label",
-    "Staff editor. Left and right select a note; up and down change its pitch by a step; Control with up or down changes by a semitone; Shift with up or down by an octave; Delete removes it; Control Z undoes.",
+    "Staff editor. Left and right select a note or a rest; up and down change a note's pitch by a step; Control with up or down changes by a semitone; Shift with up or down by an octave; on a rest, press Enter to add a note of the same duration; Delete removes a note; Control Z undoes.",
   );
   // Always (re)attach the host to #sheet. OSMD owns #sheet and an osmd.load/render between edit
   // sessions can detach our node, so re-appending here keeps the render going into the live DOM
@@ -627,15 +663,44 @@ function renderVerovio(): void {
   const width = sheetContainer.clientWidth || 800;
   verovioRender = renderMusicXml(verovioToolkit, scoreModel.serialize(), score.notes, width);
   verovioHost.innerHTML = verovioRender.svg;
+  rederiveRestMaps();
   applyStaffSelectionHighlight();
   staffPlayingIds = [];
   updateVerovioPlayhead(Tone.getTransport().seconds * tempoRate, true);
+}
+
+// Rebuild the rest maps (model rest-index <-> Verovio rest glyph id) from the current render +
+// model rest handles, keyed on (onset, staff). Called from renderVerovio after the SVG + the
+// render's rest list are available (a rest has no VisNote, so this is independent of the note maps
+// rebuilt in rederiveMaps). Empty when not in edit mode or the score has no rests.
+function rederiveRestMaps(): void {
+  if (!scoreModel || !verovioRender) {
+    restIndexToId = new Map();
+    idToRestIndex = new Map();
+    return;
+  }
+  restIndexToId = buildRestIndexToId(verovioRender.rests, scoreModel.restHandles);
+  idToRestIndex = new Map();
+  for (const [restIndex, id] of restIndexToId) idToRestIndex.set(id, restIndex);
 }
 
 // Find a notehead <g> by id within the Verovio host.
 function staffNoteEl(id: string): SVGGElement | null {
   if (!verovioHost) return null;
   return verovioHost.querySelector<SVGGElement>(`g.note[id="${CSS.escape(id)}"]`);
+}
+
+// Find a rest <g> by id within the Verovio host (ADD-a-note v1).
+function staffRestEl(id: string): SVGGElement | null {
+  if (!verovioHost) return null;
+  return verovioHost.querySelector<SVGGElement>(`g.rest[id="${CSS.escape(id)}"]`);
+}
+
+// The Verovio rest glyph id for the current rest selection, or null. Mirrors selectedStaffId for
+// rests: model rest-index -> glyph id via the render's rest map.
+function selectedRestId(): string | null {
+  if (selectedRest === null) return null;
+  return restIndexToId.get(selectedRest) ?? null;
 }
 
 // The Verovio notehead id for the current shared selection, or null. handle -> VisNote index ->
@@ -647,15 +712,18 @@ function selectedStaffId(): string | null {
   return verovioRender.visIndexToId.get(visIndex) ?? null;
 }
 
-// Reflect the shared selection on the STAFF: stroke the selected notehead with the brass halo,
-// clearing any previous one.
+// Reflect the shared selection on the STAFF: stroke the selected notehead OR rest with the brass
+// halo, clearing any previous one. A rest wears the SAME .ph-selected language as a note (sized to
+// its glyph by the CSS), so "selected = brass halo" stays one learnable rule across notes + rests.
 function applyStaffSelectionHighlight(): void {
   if (!verovioHost) return;
   for (const el of verovioHost.querySelectorAll(".ph-selected")) {
     el.classList.remove("ph-selected");
   }
-  const id = selectedStaffId();
-  if (id) staffNoteEl(id)?.classList.add("ph-selected");
+  const noteId = selectedStaffId();
+  if (noteId) staffNoteEl(noteId)?.classList.add("ph-selected");
+  const restId = selectedRestId();
+  if (restId) staffRestEl(restId)?.classList.add("ph-selected");
 }
 
 // A human label for the shared selection (the from-pitch token in announcements), via its
@@ -670,23 +738,61 @@ function selectedNoteLabel(): string {
   return "note";
 }
 
-// Reflect the ONE shared selection on BOTH surfaces + the edit cluster (Designer P1-1). The
-// cluster (readout + pitch + delete) shows whenever edit mode is on AND a note is selected,
-// regardless of which surface the selection came from, and acts on the one shared selection.
+// A human label for the selected REST (ADD-a-note v1): its duration name + beat, e.g. "a quarter
+// rest, beat 3". Duration is the load-bearing token; the beat is included when it is a whole
+// number (1..N), else omitted (an off-beat rest reads cleaner without a fractional beat).
+function selectedRestLabel(): string {
+  if (selectedRest === null || !scoreModel) return "a rest";
+  const r = scoreModel.restHandles[selectedRest];
+  if (!r) return "a rest";
+  const name = restDurationName(r.type);
+  const beatWhole = Number.isInteger(r.beat) ? r.beat : null;
+  return beatWhole !== null ? `a ${name}, beat ${beatWhole}` : `a ${name}`;
+}
+
+// Reflect the ONE shared selection on BOTH surfaces + the edit cluster (Designer P1-1 + ADD-3). The
+// cluster shows whenever edit mode is on AND something is selected, regardless of which surface the
+// selection came from. Its CONTENTS swap on WHAT is selected: a NOTE shows the pitch-down/up +
+// delete cluster; a REST shows the single "Add a note" button + a readout naming the rest. A rest
+// has no VisNote, so the canvas selection clears when a rest is selected.
 function reflectSharedSelection(announce?: string): void {
   const visIndex = selectedVisIndex();
   visualizer.setSelected(visIndex);
   applyStaffSelectionHighlight();
-  const hasSelection = selectedHandle !== null;
-  noteEdit.hidden = !(editMode && hasSelection);
-  if (hasSelection) noteEditReadout.textContent = selectedNoteLabel();
+  const hasNote = selectedHandle !== null;
+  const hasRest = selectedRest !== null;
+  noteEdit.hidden = !(editMode && hasNote);
+  addNoteCluster.hidden = !(editMode && hasRest);
+  if (hasNote) noteEditReadout.textContent = selectedNoteLabel();
+  if (hasRest) addNoteReadout.textContent = capitalize(selectedRestLabel());
   if (announce) editLive.textContent = announce;
 }
 
+// Capitalize the first letter of a label for the cluster readout (announcements use the lowercase
+// "a quarter rest" form mid-sentence; the readout is a standalone caption).
+function capitalize(s: string): string {
+  return s.length === 0 ? s : s[0].toUpperCase() + s.slice(1);
+}
+
 // Select a model note by HANDLE (the shared spine) and announce it. Used by both surfaces.
+// Selecting a note clears any rest selection (at most one of note / rest is selected).
 function selectHandle(handleId: number, silent = false): void {
   selectedHandle = handleId;
+  selectedRest = null;
+  lastRestPointer = null;
   reflectSharedSelection(silent ? undefined : `Selected ${selectedNoteLabel()}`);
+}
+
+// Select a REST by its model rest-registry id (ADD-a-note v1) and announce it. Selecting a rest
+// clears any note selection. The announce names the rest's duration + beat ("Selected a quarter
+// rest, beat 3"); the cluster swaps to the single Add action (reflectSharedSelection). This is the
+// KEYBOARD/programmatic path, so it clears any stashed mouse click height (the mouse pointerdown
+// re-stashes it AFTER calling selectRest); a keyboard add then uses the previous-note default.
+function selectRest(restId: number, silent = false): void {
+  selectedRest = restId;
+  selectedHandle = null;
+  lastRestPointer = null;
+  reflectSharedSelection(silent ? undefined : `Selected ${selectedRestLabel()}`);
 }
 
 // Select from a CANVAS bar (VisNote index) by mapping to its handle.
@@ -696,30 +802,33 @@ function selectByVisIndex(visIndex: number): void {
   selectHandle(handle);
 }
 
-// Handles in musical order (onset, then pitch) for the staff's Left/Right selection stepping.
-// Tie continuations are excluded (they have no VisNote to highlight and the start carries them).
-function staffNavHandles(): number[] {
+// The full staff Left/Right order (notes + rests interleaved by onset, ADD-1), built from the model
+// via the pure staffNavOrder. Tie continuations are excluded (no VisNote to highlight); rests are
+// included even if their glyph did not map (they are selectable + convertible regardless).
+function staffNavTargets(): StaffNavTarget[] {
   if (!scoreModel) return [];
-  return scoreModel.handles
+  const notes = scoreModel.handles
     .filter((h) => !h.isTieContinuation)
-    .slice()
-    .sort((a, b) => a.onsetSec - b.onsetSec || a.midi - b.midi)
-    .map((h) => h.id);
+    .map((h) => ({ id: h.id, onsetSec: h.onsetSec, midi: h.midi }));
+  const rests = scoreModel.restHandles.map((r) => ({ id: r.id, onsetSec: r.onsetSec }));
+  return staffNavOrder(notes, rests);
 }
 
-// Step the staff selection to the prev/next notehead in musical order (Left/Right). With no
-// current selection, Right selects the first and Left the last, so one arrow always lands.
+// Step the staff selection to the prev/next stop in musical order (Left/Right), interleaving notes
+// and rests. With no current selection, Right selects the first and Left the last. Selecting a note
+// vs a rest routes through selectHandle / selectRest accordingly.
 function moveStaffSelection(delta: 1 | -1): void {
-  const order = staffNavHandles();
-  if (order.length === 0) return;
-  let next: number;
-  const current = selectedHandle === null ? -1 : order.indexOf(selectedHandle);
-  if (current === -1) {
-    next = delta > 0 ? 0 : order.length - 1;
-  } else {
-    next = (current + delta + order.length) % order.length;
-  }
-  selectHandle(order[next]);
+  const order = staffNavTargets();
+  const current: StaffNavTarget | null =
+    selectedHandle !== null
+      ? { kind: "note", id: selectedHandle }
+      : selectedRest !== null
+        ? { kind: "rest", id: selectedRest }
+        : null;
+  const target = stepStaffNav(order, current, delta);
+  if (!target) return;
+  if (target.kind === "note") selectHandle(target.id);
+  else selectRest(target.id);
 }
 
 // Step the CANVAS selection by onset to the nearest earlier/later note (Up/Down on the canvas),
@@ -780,7 +889,7 @@ function commitPitchEdit(next: ModelPitch): void {
   const beforeMidi = midiFromPitch(before);
   if (midiFromPitch(next) === beforeMidi) {
     editLive.textContent =
-      beforeMidi <= 21 ? "Already at the lowest key." : "Already at the highest key.";
+      beforeMidi <= FIRST_MIDI ? "Already at the lowest key." : "Already at the highest key.";
     return;
   }
   const fromLabel = pitchLabel(beforeMidi, spellingFromPitch(before));
@@ -855,6 +964,12 @@ function doUndo(): void {
     undoDelete(cmd);
     return;
   }
+  if (cmd.kind === "addNote") {
+    // Undo of an add: the model turned the note back into the rest; splice the falling note OUT
+    // and re-select the rest. The VisNote count falls by one.
+    undoAdd(cmd);
+    return;
+  }
   // Re-select the affected note (it now shows its prior pitch) and announce what reversed. Do
   // NOT rebuild the maps here: finishEdit projects the reverted model pitch onto the falling
   // notes using the existing (index-stable) map, THEN reloadNotes + rederiveMaps rebuild it
@@ -878,6 +993,12 @@ function doRedo(): void {
     // Redo of a delete: the model re-deleted (re-derived its record); splice the falling note OUT
     // again and move the selection to a neighbor (or clear), as the original delete did.
     redoDelete(cmd);
+    return;
+  }
+  if (cmd.kind === "addNote") {
+    // Redo of an add: the model re-converted the rest; splice the falling note back IN and select
+    // the new note, as the original add did.
+    redoAdd(cmd);
     return;
   }
   // Same map ordering as doUndo: project with the existing map, then rebuild in finishEdit.
@@ -911,17 +1032,33 @@ function undoDelete(cmd: DeleteNoteCommand): void {
 }
 
 // Splice the deleted falling note back OUT (redo of a delete) and move selection to a neighbor.
-// The model has ALREADY re-deleted + re-indexed, so every pitched handle after the deleted one
-// shifted down by one: the note now AT cmd.handleId is the original "next note" neighbor, else the
-// one before it (deleting the last note), else nothing left to select.
+// Selection parity (P2 review): use the SAME musical-neighbor logic as deleteSelectedNote
+// (neighborNoteElAfterDelete: next in onset/midi order, else previous) so delete and redo select
+// IDENTICALLY. Evaluating it AFTER the re-delete (the model already re-indexed) means the neighbor
+// is computed over the post-delete handles, then re-found by element; picking by document position
+// (handles[handleId]) diverged from delete on a grand staff where document order != musical order.
 function redoDelete(cmd: DeleteNoteCommand): void {
   if (!score || cmd.visIndex === null || !scoreModel) return;
   const notes = score.notes.slice();
   notes.splice(cmd.visIndex, 1);
-  const next = scoreModel.handles[cmd.handleId] ?? scoreModel.handles[cmd.handleId - 1] ?? null;
-  selectedHandle = next ? next.id : null;
+  // Pick the next selection by MUSICAL order (matching deleteSelectedNote), evaluated after the
+  // re-delete. The deleted handle id no longer exists, so we resolve the same "next note, else
+  // previous" neighbor from the deleted note's (onset, midi) over the post-delete handles.
+  selectedHandle = musicalNeighborAfterDeletedOnset(cmd);
   const label = cmd.visNote ? pitchLabel(cmd.visNote.midi, cmd.visNote.spelling) : "note";
   finishEdit(`Deleted ${label}`, notes);
+}
+
+// The handle to select after a delete/redo, chosen by MUSICAL order from the DELETED note's (onset,
+// midi) via the pure musicalNeighborAfterDelete ("next note, else previous"). Evaluated over the
+// post-delete handles so delete and its redo land on the SAME note even on a grand staff where
+// document order != musical order (the P2 review fix).
+function musicalNeighborAfterDeletedOnset(cmd: DeleteNoteCommand): number | null {
+  if (!scoreModel || !cmd.visNote) return null;
+  const remaining = scoreModel.handles
+    .filter((h) => !h.isTieContinuation)
+    .map((h) => ({ id: h.id, onsetSec: h.onsetSec, midi: h.midi }));
+  return musicalNeighborAfterDelete(remaining, cmd.visNote.time, cmd.visNote.midi);
 }
 
 // Dim/enable the undo/redo buttons to match the stacks (Designer P1-6: visibly dimmed +
@@ -1027,6 +1164,188 @@ function deleteSelectedNote(): void {
       : null;
 
   finishEdit(`Deleted ${deletedLabel}`, notes);
+}
+
+// ----- ADD a note: fill a selected rest (ADD-a-note v1, the inverse of delete) -----
+
+// The default pitch for a KEYBOARD add on a rest (ADD-2): the PREVIOUS sounding note's pitch in the
+// SAME voice/staff, else the staff middle line. Adapts the model handles into the pure
+// keyboardDefaultPitch (which owns the choice + the fallback); the user then nudges with Up/Down.
+function keyboardDefaultPitchForRest(restId: number): ModelPitch {
+  if (!scoreModel) return { step: "B", octave: 4, alter: 0 };
+  const rest = scoreModel.restHandles[restId];
+  if (!rest) return { step: "B", octave: 4, alter: 0 };
+  const candidates = scoreModel.handles
+    .filter((h) => !h.isTieContinuation)
+    .map((h) => ({
+      onsetSec: h.onsetSec,
+      staff: num2(h.el, "staff", 1),
+      voice: num2(h.el, "voice", 1),
+      pitch: h.pitch,
+    }));
+  return keyboardDefaultPitch(rest.onsetSec, rest.staff, rest.voice, candidates);
+}
+
+// Read a numeric child (e.g. <staff>/<voice>) of a <note> element, defaulting when absent. Small
+// local helper so the keyboard default can read a handle's staff/voice without re-walking.
+function num2(el: Element, tag: string, fallback: number): number {
+  const t = el.getElementsByTagName(tag).item(0)?.textContent?.trim();
+  const n = t ? Number(t) : NaN;
+  return Number.isFinite(n) ? n : fallback;
+}
+
+// The default pitch for a MOUSE add on a rest (ADD-2): the staff line/space the user CLICKED. The
+// click's vertical offset from the rest glyph's CENTER (the staff middle line) is converted to
+// diatonic steps here (against the live glyph bbox), then mouseDefaultPitch applies them key-sig
+// aware. Mirrors the staff drag's per-step pixel sensitivity (~half a glyph height). Falls back to
+// the keyboard default when the glyph cannot be measured.
+function mouseDefaultPitchForRest(restId: number, restG: SVGGElement, clientY: number): ModelPitch {
+  if (!scoreModel) return keyboardDefaultPitchForRest(restId);
+  const rest = scoreModel.restHandles[restId];
+  if (!rest) return keyboardDefaultPitchForRest(restId);
+  const bbox = restG.getBoundingClientRect();
+  if (!bbox.height) return keyboardDefaultPitchForRest(restId);
+  // A rest glyph spans roughly one staff space; a diatonic step is ~half that. Mirror the staff
+  // drag's floor so a small glyph still steps sanely.
+  const pxPerStep = Math.max(4, bbox.height / 2);
+  const center = bbox.top + bbox.height / 2;
+  const steps = Math.round((center - clientY) / pxPerStep); // above center = +steps (higher pitch)
+  return mouseDefaultPitch(rest.staff, scoreModel.fifthsForRest(restId), steps);
+}
+
+// The hand a fill on `staff` should take: copy an EXISTING note's hand on that staff (the
+// authority, since score.ts already tagged it from staff/clef), else fall back to the staff
+// convention (staff 2 = left, staff 1 = right) only for a genuine grand staff, else "unknown".
+function handForRestStaff(staff: number): VisNote["hand"] {
+  if (scoreModel && score) {
+    for (const h of scoreModel.handles) {
+      if (num2(h.el, "staff", 1) !== staff) continue;
+      const vi = handleToVisIndex.get(h.id);
+      if (vi !== undefined) return score.notes[vi]?.hand;
+    }
+    // No note on this staff yet: a grand staff (some handle on staff 2) maps by convention.
+    const hasStaff2 = scoreModel.handles.some((h) => num2(h.el, "staff", 1) === 2);
+    if (hasStaff2) return staff === 2 ? "left" : "right";
+  }
+  return "unknown";
+}
+
+// Add a note by filling the SELECTED rest (ADD-a-note v1): turn the rest into a `<note>` of the
+// SAME duration at `pitch` (fixed-bar, the inverse of delete), undoable. The new note is a real
+// note from that instant: it appears on BOTH surfaces (a new falling bar) and becomes the shared
+// selection so the next arrow / drag / +/- nudges its pitch via the existing P1 path. No-op
+// without a selected rest. Routed through the command stack so undo turns it straight back into
+// the rest (which returns selected).
+function addSelectedRest(pitch: ModelPitch): void {
+  if (!scoreModel || !commandStack || selectedRest === null || !score) return;
+  const restId = selectedRest;
+  const rest = scoreModel.restHandles[restId];
+  if (!rest) return;
+  const midi = midiFromPitch(pitch);
+  // The new falling note shares the rest's onset + duration (fixed-bar) at the chosen pitch, and
+  // inherits the HAND of the existing notes on the rest's staff (so its velocity/mute matches its
+  // neighbors). Borrowing a real neighbor's hand exactly matches score.ts (which derives hand from
+  // staff/clef) including the single-staff "unknown" case, rather than re-deriving it here.
+  const addedVis: VisNote = {
+    midi,
+    time: rest.onsetSec,
+    duration: rest.durationSec,
+    hand: handForRestStaff(rest.staff),
+    spelling: spellingFromPitch(pitch),
+  };
+  const cmd: AddNoteCommand = {
+    kind: "addNote",
+    restId,
+    pitch,
+    record: null,
+    visNote: { midi, time: rest.onsetSec, duration: rest.durationSec, hand: addedVis.hand, spelling: addedVis.spelling },
+  };
+  commandStack.push(cmd); // applies it: the rest is now a <note>, handles re-indexed
+
+  // Splice the new falling note in (the VisNote count grows by one); order does not matter to the
+  // canvas (it draws by time), but keep onset order for tidy downstream indexing.
+  const notes = score.notes.slice();
+  const insertAt = firstIndexAfterOnset(notes, rest.onsetSec);
+  notes.splice(insertAt, 0, addedVis);
+
+  // The NEW NOTE is the shared selection: find its handle by the (midi, onset) it now owns.
+  selectedRest = null;
+  selectedHandle =
+    scoreModel.handles.find(
+      (h) => h.midi === midi && Math.abs(h.onsetSec - rest.onsetSec) < 1e-3,
+    )?.id ?? null;
+
+  finishEdit(`Added a note, ${pitchLabel(midi, addedVis.spelling)}`, notes);
+}
+
+// The index at which a note with `onsetSec` should be inserted to keep `notes` in onset order
+// (stable: lands after any note already at that onset). Linear is fine (P1 edits are one at a time).
+function firstIndexAfterOnset(notes: readonly VisNote[], onsetSec: number): number {
+  for (let i = 0; i < notes.length; i++) {
+    if (notes[i].time > onsetSec + 1e-9) return i;
+  }
+  return notes.length;
+}
+
+// Convert the selected rest from the KEYBOARD (Enter / N): default pitch = the previous note's
+// pitch (ADD-2). No-op without a selected rest.
+function addSelectedRestFromKeyboard(): void {
+  if (selectedRest === null) return;
+  addSelectedRest(keyboardDefaultPitchForRest(selectedRest));
+}
+
+// Undo of an ADD: the model turned the note back into the rest (re-indexed, so the rest reclaims
+// its id). Splice the falling note BACK OUT and re-select the REST (so the user can try again),
+// matching "after undoing a delete the note returns selected" in reverse. The VisNote count falls
+// by one, so pass the explicit array to finishEdit.
+function undoAdd(cmd: AddNoteCommand): void {
+  if (!score) return;
+  const notes = score.notes.slice();
+  if (cmd.visNote) {
+    const i = notes.findIndex(
+      (n) => n.midi === cmd.visNote!.midi && Math.abs(n.time - cmd.visNote!.time) < 1e-3,
+    );
+    if (i !== -1) notes.splice(i, 1);
+  }
+  // Re-select the rest the note came from: it is the rest now at the converted slot. Match by
+  // (onset, staff) since the rest reclaims a registry id but that id is by document position.
+  selectedHandle = null;
+  selectedRest = restIndexAtOnsetStaff(cmd);
+  finishEdit("Removed the note", notes);
+}
+
+// Redo of an ADD: the model re-converted the rest (re-derived its record); splice the falling note
+// back IN and re-select the NEW NOTE, exactly as the original add did.
+function redoAdd(cmd: AddNoteCommand): void {
+  if (!score || !scoreModel || !cmd.visNote) return;
+  const notes = score.notes.slice();
+  const restored: VisNote = {
+    midi: cmd.visNote.midi,
+    time: cmd.visNote.time,
+    duration: cmd.visNote.duration,
+    hand: cmd.visNote.hand,
+    spelling: cmd.visNote.spelling,
+  };
+  const insertAt = firstIndexAfterOnset(notes, restored.time);
+  notes.splice(insertAt, 0, restored);
+  selectedRest = null;
+  selectedHandle =
+    scoreModel.handles.find(
+      (h) => h.midi === cmd.visNote!.midi && Math.abs(h.onsetSec - cmd.visNote!.time) < 1e-3,
+    )?.id ?? null;
+  finishEdit(`Added a note, ${pitchLabel(cmd.visNote.midi, cmd.visNote.spelling)}`, notes);
+}
+
+// The rest-registry id of the rest at an added note's (onset, staff), used to re-select the rest
+// after undoing an add. The added note's command carries its onset (visNote.time) and we know its
+// staff from the hand it was given; match the model rest sharing that (onset, staff).
+function restIndexAtOnsetStaff(cmd: AddNoteCommand): number | null {
+  if (!scoreModel || !cmd.visNote) return null;
+  const staff = cmd.visNote.hand === "left" ? 2 : 1;
+  const r = scoreModel.restHandles.find(
+    (rh) => rh.staff === staff && Math.abs(rh.onsetSec - cmd.visNote!.time) < 1e-3,
+  );
+  return r ? r.id : null;
 }
 
 // Load MusicXML into OSMD and rebuild the pipeline. Shared by the direct MusicXML file
@@ -1226,10 +1545,13 @@ async function togglePlay(): Promise<void> {
   } else {
     // Pressing Play in edit mode suspends the selection so a moving target is never edited
     // (Designer decision): the selection clears (hiding the edit cluster) but edit mode stays
-    // on; pausing again lets the player re-select. Any in-flight drag is abandoned.
-    if (editMode && selectedHandle !== null) {
+    // on; pausing again lets the player re-select. Any in-flight drag is abandoned. Covers a NOTE
+    // or a REST selection (either hides its cluster).
+    if (editMode && (selectedHandle !== null || selectedRest !== null)) {
       cancelDrag();
       selectedHandle = null;
+      selectedRest = null;
+      lastRestPointer = null;
       reflectSharedSelection();
     }
     transport.start();
@@ -1644,10 +1966,12 @@ async function exportVideo(): Promise<void> {
 
     // Start the performance from the top and record it in real time. The timeslice flushes
     // a chunk each second so a long performance does not buffer entirely in memory. Clear any
-    // active edit selection first so its ring is never baked into the recorded video.
-    if (selectedHandle !== null) {
+    // active edit selection first (note OR rest) so its ring is never baked into the recorded video.
+    if (selectedHandle !== null || selectedRest !== null) {
       cancelDrag();
       selectedHandle = null;
+      selectedRest = null;
+      lastRestPointer = null;
       reflectSharedSelection();
     }
     rewind();
@@ -1835,12 +2159,56 @@ sheetContainer.addEventListener("pointerdown", (e) => {
     selectHandle(handle);
     // A plain primary left click selects (above) and arms a drag; right-click / touch only select.
     if (shouldStartPitchDrag(e)) beginStaffDrag(noteG, handle, e);
-  } else if (target?.closest("#verovio-host")) {
-    // A click on the staff but not on a notehead clears the selection.
+    return;
+  }
+  // No notehead: try a REST (ADD-a-note v1). A rest glyph is small, so accept a DIRECT hit OR the
+  // nearest rest within a >=24px padded hot zone (parity with the notehead tap target, #33/#84).
+  // Selecting a rest needs only a primary press (no drag); the same primary-button gate as notes
+  // applies via e.isPrimary above (a rest has no drag, so shouldStartPitchDrag is not consulted).
+  const directRest = target?.closest("g.rest") as SVGGElement | null;
+  const restG = directRest?.id ? directRest : nearestRestGWithinPadding(e.clientX, e.clientY);
+  if (restG && restG.id) {
+    const restId = idToRestIndex.get(restG.id);
+    if (restId === undefined) return; // a rest with no model mapping (defensive); no-op
+    selectRest(restId);
+    // Stash the click height + glyph AFTER selectRest (which clears it) so a following "Add a note"
+    // button press fills at the CLICKED staff line/space (ADD-2 mouse default).
+    lastRestPointer = { restId, clientY: e.clientY, glyph: restG };
+    return;
+  }
+  if (target?.closest("#verovio-host")) {
+    // A click on the staff but not on a notehead or rest clears the selection.
     selectedHandle = null;
+    selectedRest = null;
     reflectSharedSelection("Selection cleared.");
   }
 });
+
+// The rest `<g>` whose padded bounding box (inflated by REST_HIT_PADDING px on each side) contains
+// the client point and is nearest its center, or null. Gives the small rest glyph a finger-sized
+// hit target without enlarging the drawn glyph. Only consulted when a direct hit on g.rest missed.
+const REST_HIT_PADDING = 12; // px each side => a >=24px-wider hot zone than the glyph
+function nearestRestGWithinPadding(clientX: number, clientY: number): SVGGElement | null {
+  if (!verovioHost) return null;
+  let best: { el: SVGGElement; dist: number } | null = null;
+  for (const el of verovioHost.querySelectorAll<SVGGElement>("g.rest")) {
+    if (!el.id || idToRestIndex.get(el.id) === undefined) continue;
+    const b = el.getBoundingClientRect();
+    if (
+      clientX < b.left - REST_HIT_PADDING ||
+      clientX > b.right + REST_HIT_PADDING ||
+      clientY < b.top - REST_HIT_PADDING ||
+      clientY > b.bottom + REST_HIT_PADDING
+    ) {
+      continue;
+    }
+    const cx = b.left + b.width / 2;
+    const cy = b.top + b.height / 2;
+    const dist = Math.hypot(clientX - cx, clientY - cy);
+    if (best === null || dist < best.dist) best = { el, dist };
+  }
+  return best ? best.el : null;
+}
 
 // ----- CANVAS surface: click to select + HORIZONTAL drag to change pitch (chromatic) -----
 //
@@ -1859,6 +2227,8 @@ canvas.addEventListener("pointerdown", (e) => {
   const hit = visualizer.hitTest(px, py, scoreTime);
   if (hit === null) {
     selectedHandle = null;
+    selectedRest = null;
+    lastRestPointer = null;
     reflectSharedSelection("Selection cleared.");
     return;
   }
@@ -1875,6 +2245,23 @@ pitchUpBtn.addEventListener("click", () => staffPitchStep("diatonic", 1));
 pitchDownBtn.addEventListener("click", () => staffPitchStep("diatonic", -1));
 // Trash button: delete the shared-selected note (model-level, fixed-bar, undoable).
 deleteNoteBtn.addEventListener("click", () => deleteSelectedNote());
+// "Add a note" button (ADD-a-note v1): fill the selected rest. A button press following a MOUSE
+// selection of THIS rest uses the clicked staff height (ADD-2 mouse default); otherwise (a
+// keyboard selection, or the click context is stale) it uses the previous-note default.
+addNoteBtn.addEventListener("click", () => addNoteFromButton());
+
+// Fill the selected rest from the Add button: prefer the stashed mouse click height when it
+// matches the current rest selection, else the keyboard (previous-note) default.
+function addNoteFromButton(): void {
+  if (selectedRest === null) return;
+  if (lastRestPointer && lastRestPointer.restId === selectedRest) {
+    addSelectedRest(
+      mouseDefaultPitchForRest(selectedRest, lastRestPointer.glyph, lastRestPointer.clientY),
+    );
+  } else {
+    addSelectedRestFromKeyboard();
+  }
+}
 
 // Whether an element is a form field, so editing shortcuts never steal typing (the rename input).
 function isFormFieldTarget(target: EventTarget | null): boolean {
@@ -1929,6 +2316,18 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "ArrowLeft") {
     e.preventDefault();
     moveStaffSelection(-1);
+    return;
+  }
+
+  // Enter (or N as a one-shot alias, NOT a mode toggle) fills the SELECTED REST with a note at the
+  // keyboard default pitch (the previous note's pitch), then selects the new note so Up/Down
+  // immediately adjusts it (ADD-3). Handled before the selectedHandle guard since a rest selection
+  // has selectedHandle === null. A no-op when nothing (or a note) is selected.
+  if (e.key === "Enter" || e.key === "n" || e.key === "N") {
+    if (selectedRest !== null) {
+      e.preventDefault();
+      addSelectedRestFromKeyboard();
+    }
     return;
   }
 
