@@ -4,6 +4,26 @@ Self-contained plan so any session (esp. the one on the GPU PC) can pick up and 
 without the prior machine's local memory. Newest status at the top. NO em dashes in generated
 text (project rule). Ship every code change through the gated flow (see "Constraints" below).
 
+## STATUS: fusion keeps 4/4 for cut-time-equivalent meters (a Clarity 2/2 misread no longer relabels 4/4) (2026-06-04)
+
+Follow-up to PR #191. `fusion.fuse` now keeps the 4/4 default when Clarity's borrowed meter is
+metrically EQUIVALENT to 4/4 (`beats == beat_type`: the 2/2, 4/4, 8/8 family, all bar capacity 16 at
+divisions=4), while still borrowing genuinely-different meters (2/4 cap 8, 3/4 cap 12, 6/8 cap 12, ...).
+The whole fix is a one-line guard in `fuse` right after the borrow: `if beats == beat_type: beats,
+beat_type = 4, 4`. WHY: Clarity misreads some genuine 4/4 pieces as 2/2 (cut time); at divisions=4 the
+borrow was already metric-NEUTRAL (2/2 and 4/4 share bar capacity 16, byte-identical rhythm_repair
+behaviour), but it printed a cut-time glyph on a 4/4 piece. The guard means a cut-time misread can no
+longer relabel a genuine 4/4 piece; a TRUE 2/2 would render as cut time only once Clarity actually
+distinguishes it (it does not today). Pure rendering fix, never-raise; CANNOT regress
+note_f1/note_dur_f1/duration_acc because the bar capacity is unchanged.
+
+VALIDATED on the box (`fusion_repair_eval.py`, before AND after via `RHY_SRC=/tmp/rhy`): every printed
+number is IDENTICAL (liminality cap=[8] 1/56 -> 0/56; tctab cap=[16] 49/134 -> 12/134; icarus cap=[16]
+6/47 -> 0/47; reverie cap=[16] 4/32 -> 1/32; no metric move on any piece). The only behaviour change is
+the declared `<time>`: on the real cached engine outputs the fused meter now flips tctab 2/2 -> 4/4 and
+icarus 2/2 -> 4/4, while liminality stays 2/4 and reverie stays 4/4. Unit tests in test_fusion.py:
+2/2 -> 4/4, 8/8 -> 4/4, 2/4 -> 2/4, 3/4 -> 3/4.
+
 ## STATUS: fusion borrows Clarity's real TIME SIGNATURE (rhythm-repair now helps non-4/4) (2026-06-04)
 
 Shipped PR #191; deployed to cx33 (ed1f003). The geom+Clarity fusion (prod-primary, `OMR_GEOM_FUSION=1`)
@@ -28,9 +48,9 @@ CLARITY METER-DETECTION NUANCE (surfaced, not a blocker): Clarity reads tctab an
 4/4), reverie as 4/4, liminality as 2/4. At divisions=4, 2/2 and 4/4 share capacity 16, so borrowing
 2/2 for tctab/icarus is metric-neutral and the repair behavior is byte-identical (same incomplete-bar
 counts); only the printed time-signature glyph differs (cut-time vs 4/4). This is a Clarity
-meter-detection limit, not a fusion one. A capacity-aware refinement (keep the 4/4 default when
-Clarity's borrowed meter is metrically equivalent to it, so a cut-time misread cannot relabel a genuine
-4/4 piece) is the obvious follow-up if the cut-time glyph on those pieces is undesirable.
+meter-detection limit, not a fusion one. RESOLVED in the follow-up above (the capacity-aware
+refinement: `fuse` keeps the 4/4 default when Clarity's borrowed meter is metrically equivalent to it,
+so a cut-time misread cannot relabel a genuine 4/4 piece); tctab/icarus now declare 4/4.
 
 ## STATUS: FULL-SYMBOL detector DATA PIPELINE shipped (steps 1-2); GPU train + decode is step 3 (2026-06-04)
 

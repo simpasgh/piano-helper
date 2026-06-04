@@ -148,10 +148,11 @@ def _borrow_durations(g_cells: Dict, c_cells: Dict) -> Dict:
 
 def _build(g_cells: Dict, borrowed: Dict, fifths: int, beats: int = 4, beat_type: int = 4,
            fallback: int = 4) -> Optional[bytes]:
-    """Rebuild geom's notes (pitch + measures) with the borrowed durations and Clarity's declared
-    meter (beats/beat_type, so a non-4/4 piece renders at its true width). Unmatched geom chords
-    keep a neutral quarter note (fallback=4 sixteenths). The key stays geom's (a non-C key borrow
-    is a later enhancement, validated on a non-C piece first; all current eval pieces are C major).
+    """Rebuild geom's notes (pitch + measures) with the borrowed durations and the meter the caller
+    resolved (beats/beat_type: Clarity's declared meter, except a 4/4-equivalent meter is passed as
+    4/4 -- see fuse -- so a non-4/4 piece renders at its true width). Unmatched geom chords keep a
+    neutral quarter note (fallback=4 sixteenths). The key stays geom's (a non-C key borrow is a
+    later enhancement, validated on a non-C piece first; all current eval pieces are C major).
 
     divisions stays 4 and is LOAD-BEARING: the borrowed durations are omr_eval._dur16 SIXTEENTHS,
     and divisions=4 makes a <duration> value of N equal N sixteenths == N ticks, so the borrowed
@@ -183,6 +184,10 @@ def fuse(geom_xml, clarity_xml) -> Optional[bytes]:
     """Fuse geom pitch+measures with Clarity rhythm AND Clarity's declared <time> (so a non-4/4
     piece declares its real meter, which renders it at true width and lets the rhythm-repair
     post-transform corroborate the capacity; falls back to 4/4 when Clarity has no/garbage <time>).
+    A meter metrically EQUIVALENT to 4/4 (beats == beat_type: the 2/2, 4/4, 8/8 family, all bar
+    capacity 16 at divisions=4) is normalised to 4/4, so a Clarity cut-time MISREAD of a genuine
+    4/4 piece cannot relabel it (the borrow was already metric-neutral there: this fixes only the
+    printed glyph). Genuinely-different meters (2/4, 3/4, 6/8, ...) still borrow Clarity's real one.
     The key still comes from geom (a non-C key borrow is a deliberate later enhancement, validated
     on a non-C piece first). Returns fused MusicXML bytes. NEVER raises: on any failure returns
     geom_xml (never worse than geom alone); returns clarity_xml if geom produced nothing, and None
@@ -200,6 +205,13 @@ def fuse(geom_xml, clarity_xml) -> Optional[bytes]:
             return geom_xml
         borrowed = _borrow_durations(g_cells, c_cells)
         beats, beat_type = _read_time(clarity_xml) or (4, 4)
+        if beats == beat_type:
+            # A meter metrically EQUIVALENT to 4/4 (beats == beat_type: the 2/2, 4/4, 8/8 family,
+            # all bar capacity 16 at divisions=4) is normalised to 4/4. Clarity misreads some genuine
+            # 4/4 pieces as 2/2 (cut time); the borrow was already metric-neutral there (same capacity,
+            # byte-identical rhythm_repair), so this only stops a cut-time MISREAD from relabelling a
+            # 4/4 piece. Genuinely-different meters (2/4 cap 8, 3/4/6/8 cap 12, ...) still borrow.
+            beats, beat_type = 4, 4
         fused = _build(g_cells, borrowed, _read_fifths(geom_xml), beats, beat_type)
         return fused or geom_xml
     except Exception:

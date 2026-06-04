@@ -131,6 +131,44 @@ def test_fuse_falls_back_to_4_4_when_clarity_has_no_time():
     assert _durs(fused) == [4]            # clarity's duration still borrowed
 
 
+def test_fuse_normalizes_4_4_equivalent_meter_to_4_4():
+    # REFINEMENT (follow-up to PR #191): Clarity misreads some genuine 4/4 pieces as 2/2 (cut time).
+    # A meter with beats == beat-type (2/2, 4/4, 8/8) has the SAME bar capacity as 4/4 (16 sixteenths
+    # at divisions=4), so borrowing it is metric-neutral but prints the wrong glyph (cut time on a
+    # 4/4 piece). fuse keeps the 4/4 default for these, so a cut-time MISREAD cannot relabel a genuine
+    # 4/4 piece. Pitches and borrowed durations are unchanged (only the printed meter is corrected).
+    geom = _xml([{"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]},
+                             {"duration": 1, "pitches": [{"step": "D", "octave": 5}]}], "staff2": []}])
+    clarity = _xml([{"staff1": [{"duration": 8, "pitches": [{"step": "C", "octave": 5}]},
+                                {"duration": 8, "pitches": [{"step": "D", "octave": 5}]}], "staff2": []}],
+                   time={"beats": 2, "beat_type": 2})
+    fused = fusion.fuse(geom, clarity)
+    assert _time(fused) == ("4", "4")     # 2/2 (cut time, == 4/4 capacity) normalised to the 4/4 default
+    assert _midis(fused) == [72, 74]      # geom's pitches still preserved (C5, D5)
+    assert _durs(fused) == [8, 8]         # clarity's durations still borrowed (two half notes)
+
+
+def test_fuse_normalizes_8_8_to_4_4():
+    # 8/8 is another member of the beats == beat-type family (capacity 16): also normalised to 4/4.
+    geom = _xml([{"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []}])
+    clarity = _xml([{"staff1": [{"duration": 16, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []}],
+                   time={"beats": 8, "beat_type": 8})
+    assert _time(fusion.fuse(geom, clarity)) == ("4", "4")
+
+
+def test_fuse_still_borrows_genuinely_different_meter():
+    # The refinement normalises ONLY 4/4-equivalent meters (beats == beat-type). A genuinely different
+    # meter (different bar capacity) still borrows Clarity's real one so a non-4/4 piece renders at its
+    # true width and rhythm_repair can corroborate the capacity. 2/4 (cap 8) and 3/4 (cap 12) borrow.
+    def _fused_meter(beats, beat_type):
+        geom = _xml([{"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []}])
+        clarity = _xml([{"staff1": [{"duration": 4, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []}],
+                       time={"beats": beats, "beat_type": beat_type})
+        return _time(fusion.fuse(geom, clarity))
+    assert _fused_meter(2, 4) == ("2", "4")   # 2/4 (cap 8) genuinely different -> borrowed unchanged
+    assert _fused_meter(3, 4) == ("3", "4")   # 3/4 (cap 12) genuinely different -> borrowed unchanged
+
+
 class TestNeverRaises:
     def test_both_none(self):
         assert fusion.fuse(None, None) is None
