@@ -4,6 +4,35 @@ Self-contained plan so any session (esp. the one on the GPU PC) can pick up and 
 without the prior machine's local memory. Newest status at the top. NO em dashes in generated
 text (project rule). Ship every code change through the gated flow (see "Constraints" below).
 
+## STATUS: KEY DETECTION validated on real non-C engravings -- a LARGE win (prod's C-assumption HALVES non-C note_f1); Clarity is a free key source, so the cheapest fix feeds its key into geom (2026-06-04)
+
+Follow-up to the gate below. The gate found full-symbol loses on rhythm but its KEY detection works; the
+all-C-major eval set could not measure that win, so I made two NON-C test pieces by transposing icarus
+with music21 and re-engraving via the MuseScore4 CLI: `icarus_emaj` (E major, +4 sharps) and
+`icarus_ebmaj` (Eb major, -3 flats), both kept on the box at `/opt/geom-omr/eval/real_scores/` with
+harness `key_validation.py` (4 configs per piece, scored by `omr_eval.score_transcription`).
+
+THE WRONG-KEY COST (prod assumes C major today). Same image + detector, only the key differs:
+- NH @ key=0 (prod): E note_f1 **0.412** / chord 0.000, Eb **0.431** / 0.000
+- NH @ oracle key:   E note_f1 **0.845**,            Eb **0.842**
+So the C-assumption roughly HALVES note_f1 and zeroes chord_recall on a non-C upload. On C-major icarus
+NH@0 == NH@oracle, so the assumption is free on the common case.
+
+KEY DETECTION recovers it, and TWO sources read the key EXACTLY:
+- the full-symbol detector emits +4 / -3 (SYM@detect == SYM@oracle byte-identical; note_f1 0.833 / 0.853);
+- Clarity (the engine ALREADY in the prod fusion) ALSO emits +4 / -3 (its own pitch is weak, 0.51 / 0.35,
+  but its KEY is right). Both emit 0 on C-major icarus (no false positive).
+
+CHEAPEST VALIDATED FIX (recommended next lever): feed CLARITY's detected key into geom's existing
+`--key-fifths` in the fusion path. Clarity already runs in prod and geom already accepts the flag, so this
+needs NO new model and NO brittle classical key-sig CV. It is a worker.py orchestration change (run geom
+with the key Clarity reports; service restart needed), GUARDED to override the C default only when Clarity
+reports a non-zero key, so C-major stays byte-identical (provably safe on the common case). NOTE: the key
+must reach geom's DECODE (not a post-hoc `<fifths>` relabel like the time-sig borrow, since the per-note
+alter is baked at decode time), which is why it is a geom-INPUT change. The full-symbol detector is an
+equally-exact but heavier alternative key source (85 MB model + a 2nd CPU inference per upload). Resolves
+the "non-C key borrow pending a validation piece" note (memory [[fusion-timesig-borrow]] / [[full-symbol-trained-eval]]).
+
 ## STATUS: FULL-SYMBOL ship gate RUN -- it LOSES to the fusion on rhythm, so DO NOT swap the engine; key detection works but is not a cheap port (2026-06-04)
 
 Ran the deploy gate on cx33. Copied the trained `symbols_full.pt` (yolov8s, 18-class, 85 MB) to
