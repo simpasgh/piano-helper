@@ -186,7 +186,6 @@ body {
    are stroked (stroke-width 1.5, the Heroicons native weight); the solid Play/Pause hero
    is filled. Labeled buttons lay out as an icon + text row with a consistent gap. */
 .file-btn,
-#export-btn,
 #play-btn,
 .toggle {
   display: inline-flex;
@@ -409,7 +408,6 @@ body {
 }
 
 /* Tier 3, GHOST: transparent fill + subtle border. Export, Names, step buttons. */
-#export-btn,
 .toggle,
 .step-btn {
   background: var(--ghost-bg);
@@ -428,7 +426,6 @@ body {
     opacity 0.15s ease;
 }
 
-#export-btn:hover:not(:disabled),
 .toggle:hover:not(:disabled),
 .step-btn:hover:not(:disabled) {
   background: var(--ghost-bg-hover);
@@ -436,14 +433,12 @@ body {
   color: #fbf6ea;
 }
 
-#export-btn:active:not(:disabled),
 .toggle:active:not(:disabled),
 .step-btn:active:not(:disabled) {
   background: var(--ghost-bg-active);
   transform: translateY(1px);
 }
 
-#export-btn:disabled,
 .toggle:disabled,
 .step-btn:disabled {
   opacity: 0.4;
@@ -463,6 +458,124 @@ button:focus-visible,
 .toggle {
   padding: 0.4rem 0.75rem;
   font-size: 0.8rem;
+}
+
+/* Export disclosure menu (Video / PDF / MusicXML). The trigger is a `.toggle` ghost pill carrying a
+   small caret; the popup is a `--bar-surface` panel anchored under it via `.export-menu-wrap`
+   (position: relative), so it follows the trigger wherever the toolbar wraps on phone. Visibility is
+   the `hidden` attribute; the `:not([hidden])` guard is load-bearing here, exactly like `.hand-mutes`:
+   a bare `display: flex` would override the native `[hidden]` -> `display: none`. */
+.export-menu-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.export-caret {
+  margin-left: 0.05rem;
+  opacity: 0.8;
+}
+
+.export-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  min-width: 220px;
+  max-width: calc(100vw - 24px);
+  padding: 6px;
+  background: var(--bar-surface);
+  border: 1px solid var(--bar-border);
+  border-radius: 8px;
+  box-shadow: 0 12px 30px rgba(8, 6, 3, 0.5);
+}
+
+.export-menu:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  animation: export-pop 120ms ease-out;
+}
+
+@keyframes export-pop {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Each format is a full-width ghost row: an icon + a label, plus a reason hint shown only when the
+   item is disabled (audio-only scores have no sheet to make a PDF/MusicXML from). */
+.export-item {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.export-item-icon {
+  display: block;
+  flex: none;
+  width: 18px;
+  height: 18px;
+}
+
+.export-item-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.export-item-hint {
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+/* An enabled item is a clean one-word row; the reason hint appears only on a disabled item. */
+.export-item:not(:disabled) .export-item-hint {
+  display: none;
+}
+
+.export-item:hover:not(:disabled),
+.export-item:focus-visible:not(:disabled) {
+  background: var(--ghost-bg-hover);
+  color: #fbf6ea;
+}
+
+.export-item:disabled {
+  cursor: not-allowed;
+}
+
+/* Dim only the icon + label of a disabled item so its reason hint stays legible. */
+.export-item:disabled .export-item-icon,
+.export-item:disabled .export-item-label {
+  opacity: 0.4;
+}
+
+/* Reduced motion: the popup appears instantly, no fade or rise (matches the other reduced-motion
+   blocks in this file). */
+@media (prefers-reduced-motion: reduce) {
+  .export-menu:not([hidden]) {
+    animation: none;
+  }
 }
 
 /* Per-hand mute toggles (issue #37) + balance slider (issue #70). Shown only when the score
