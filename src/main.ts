@@ -15,6 +15,10 @@ import {
   midiFromPitch,
   spellingFromPitch,
   restDurationName,
+  durationValueName,
+  noteValueName,
+  ladderIndexForDuration,
+  DURATION_LADDER,
   FIRST_MIDI,
   type ScoreModel,
   type ModelPitch,
@@ -24,6 +28,7 @@ import {
   type SetPitchCommand,
   type DeleteNoteCommand,
   type AddNoteCommand,
+  type ChangeDurationCommand,
 } from "./edit-commands";
 import { shouldStartPitchDrag } from "./edit-pointer";
 import {
@@ -131,6 +136,10 @@ const noteEdit = document.getElementById("note-edit") as HTMLDivElement;
 const noteEditReadout = document.getElementById("note-edit-readout") as HTMLSpanElement;
 const pitchDownBtn = document.getElementById("pitch-down-btn") as HTMLButtonElement;
 const pitchUpBtn = document.getElementById("pitch-up-btn") as HTMLButtonElement;
+// Duration steppers (Smart Edit P3 v1): shorter/longer walk the note-value ladder. Placed between
+// pitch and delete in the note cluster, disabled at the ladder ends (same idiom as undo/redo).
+const durShorterBtn = document.getElementById("dur-shorter-btn") as HTMLButtonElement;
+const durLongerBtn = document.getElementById("dur-longer-btn") as HTMLButtonElement;
 const deleteNoteBtn = document.getElementById("delete-note-btn") as HTMLButtonElement;
 // ADD-a-note v1 cluster: shown when a REST is selected (swaps with the note cluster). One primary
 // "Add a note" button + a readout naming the rest.
@@ -566,7 +575,7 @@ async function enterEditMode(): Promise<void> {
     canvas.setAttribute("role", "application");
     canvas.setAttribute(
       "aria-label",
-      "Falling notes editor. Up and down select a note; plus and minus change its pitch by a semitone; Shift with plus or minus moves an octave; Delete removes it; Control Z undoes.",
+      "Falling notes editor. Up and down select a note; plus and minus change its pitch by a semitone; Shift with plus or minus moves an octave; comma and period change its length; Delete removes it; Control Z undoes.",
     );
     reflectUndoRedoButtons();
     reflectSharedSelection();
@@ -654,7 +663,7 @@ function renderVerovio(): void {
   verovioHost.setAttribute("role", "application");
   verovioHost.setAttribute(
     "aria-label",
-    "Staff editor. Left and right select a note or a rest; up and down change a note's pitch by a step; Control with up or down changes by a semitone; Shift with up or down by an octave; on a rest, press Enter to add a note of the same duration; Delete removes a note; Control Z undoes.",
+    "Staff editor. Left and right select a note or a rest; up and down change a note's pitch by a step; Control with up or down changes by a semitone; Shift with up or down by an octave; comma makes a note shorter and period makes it longer; on a rest, press Enter to add a note of the same duration; Delete removes a note; Control Z undoes.",
   );
   // Always (re)attach the host to #sheet. OSMD owns #sheet and an osmd.load/render between edit
   // sessions can detach our node, so re-appending here keeps the render going into the live DOM
@@ -740,6 +749,24 @@ function selectedNoteLabel(): string {
   return "note";
 }
 
+// The current value NAME of the shared-selected note (Smart Edit P3 readout/announce), e.g.
+// "quarter" or (for an OMR-inferred dotted arrival) "dotted quarter". Empty when no note is
+// selected or its handle is gone. Read straight from the model handle's duration + divisions.
+function selectedNoteValueName(): string {
+  if (selectedHandle === null || !scoreModel) return "";
+  const h = scoreModel.handles[selectedHandle];
+  if (!h) return "";
+  return durationValueName(h.durationDivs, h.divisions);
+}
+
+// The note cluster readout (Smart Edit P3): the pitch token (current Names mode) plus the current
+// value, e.g. "D5, quarter". The value follows every duration edit so the user sees what it became.
+function selectedNoteReadout(): string {
+  const pitch = selectedNoteLabel();
+  const value = selectedNoteValueName();
+  return value ? `${pitch}, ${value}` : pitch;
+}
+
 // A human label for the selected REST (ADD-a-note v1): its duration name + beat, e.g. "a quarter
 // rest, beat 3". Duration is the load-bearing token; the beat is included when it is a whole
 // number (1..N), else omitted (an off-beat rest reads cleaner without a fractional beat).
@@ -765,9 +792,38 @@ function reflectSharedSelection(announce?: string): void {
   const hasRest = selectedRest !== null;
   noteEdit.hidden = !(editMode && hasNote);
   addNoteCluster.hidden = !(editMode && hasRest);
-  if (hasNote) noteEditReadout.textContent = selectedNoteLabel();
+  if (hasNote) noteEditReadout.textContent = selectedNoteReadout();
   if (hasRest) addNoteReadout.textContent = capitalize(selectedRestLabel());
+  reflectDurationButtons();
   if (announce) editLive.textContent = announce;
+}
+
+// Dim/enable the duration steppers to match the selected note's ladder position (Smart Edit P3-6:
+// disabled + aria-disabled at the ladder ends, the same idiom as undo/redo). Shorter is disabled at
+// the shortest rung (16th), longer at the longest (whole). A dotted/odd ARRIVAL is off the ladder
+// (index -1): both stay enabled because the first edit snaps it onto a rung. No selected note (or no
+// model) leaves them disabled; the cluster is hidden then anyway.
+function reflectDurationButtons(): void {
+  let canShorter = false;
+  let canLonger = false;
+  if (editMode && selectedHandle !== null && scoreModel) {
+    const h = scoreModel.handles[selectedHandle];
+    if (h) {
+      const idx = ladderIndexForDuration(h.durationDivs, h.divisions);
+      if (idx < 0) {
+        // Off-ladder (dotted/odd arrival): the next press snaps onto a rung, so allow both.
+        canShorter = true;
+        canLonger = true;
+      } else {
+        canShorter = idx > 0;
+        canLonger = idx < DURATION_LADDER.length - 1;
+      }
+    }
+  }
+  durShorterBtn.disabled = !canShorter;
+  durShorterBtn.setAttribute("aria-disabled", String(!canShorter));
+  durLongerBtn.disabled = !canLonger;
+  durLongerBtn.setAttribute("aria-disabled", String(!canLonger));
 }
 
 // Capitalize the first letter of a label for the cluster readout (announcements use the lowercase
@@ -972,6 +1028,14 @@ function doUndo(): void {
     undoAdd(cmd);
     return;
   }
+  if (cmd.kind === "changeDuration") {
+    // Undo of a duration edit: the model restored the bar (restoreDuration). Re-derive the falling
+    // notes from the restored model (onsets/durations are back), re-select the same handle (stable
+    // across a duration edit), and announce the reversal. The changed note returns selected at its
+    // prior value, which the readout reflects. A pulse marks the restored note.
+    undoOrRedoDuration(cmd, "undo");
+    return;
+  }
   // Re-select the affected note (it now shows its prior pitch) and announce what reversed. Do
   // NOT rebuild the maps here: finishEdit projects the reverted model pitch onto the falling
   // notes using the existing (index-stable) map, THEN reloadNotes + rederiveMaps rebuild it
@@ -1001,6 +1065,12 @@ function doRedo(): void {
     // Redo of an add: the model re-converted the rest; splice the falling note back IN and select
     // the new note, as the original add did.
     redoAdd(cmd);
+    return;
+  }
+  if (cmd.kind === "changeDuration") {
+    // Redo of a duration edit: applyCommand re-ran model.changeDuration against the restored bar
+    // (deterministic), so the bar is edited again. Re-derive + re-select + announce like the undo.
+    undoOrRedoDuration(cmd, "redo");
     return;
   }
   // Same map ordering as doUndo: project with the existing map, then rebuild in finishEdit.
@@ -1096,6 +1166,125 @@ function canvasPitchStep(octaveMod: boolean, dir: 1 | -1): void {
   if (!h) return;
   const next = octaveMod ? octaveStep(h.pitch, dir) : chromaticStep(h.pitch, dir);
   commitPitchEdit(next);
+}
+
+// Re-derive the FULL falling-notes array from the model after a structural-but-id-stable edit (a
+// duration change). A duration edit never adds or removes a pitched note, so handle ids are stable
+// and the OLD handle->VisNote map still tells us each note's HAND (which the model does not carry);
+// midi/time/duration come fresh from the model (a lengthen ripples following onsets and changes
+// durations, so the index-stable pitch projection in finishEdit would be wrong here). Tie
+// continuations have no VisNote and are skipped. The result is in onset order for tidy indexing.
+function rederiveVisNotesFromModel(handToVisBefore: Map<number, number>): VisNote[] {
+  if (!scoreModel || !score) return score ? score.notes.slice() : [];
+  const out: VisNote[] = [];
+  for (const h of scoreModel.handles) {
+    if (h.isTieContinuation) continue;
+    const prevIndex = handToVisBefore.get(h.id);
+    const prev = prevIndex !== undefined ? score.notes[prevIndex] : undefined;
+    out.push({
+      midi: h.midi,
+      time: h.onsetSec,
+      duration: h.durationSec,
+      hand: prev?.hand,
+      spelling: spellingFromPitch(h.pitch),
+    });
+  }
+  out.sort((a, b) => a.time - b.time || a.midi - b.midi);
+  return out;
+}
+
+// Step the shared-selected note one notch SHORTER or LONGER along the value ladder (Smart Edit P3
+// v1), routed through the command stack so it is undoable and both surfaces re-derive. The model
+// does the fixed-bar mutation (shrink + leave a rest, or grow + ripple + clamp) and returns a record
+// describing the outcome for the announce; a ladder-end or no-room result is a no-op that only
+// announces. No-op without a selected note. The selection stays on the same handle (ids are stable
+// across a duration edit) and the changed note pulses on commit.
+function changeDurationEdit(direction: "shorter" | "longer"): void {
+  if (!scoreModel || !commandStack || selectedHandle === null || !score) return;
+  const handleId = selectedHandle;
+  const handle = scoreModel.handles[handleId];
+  if (!handle) return;
+  // Capture the pre-edit handle->VisNote map so the re-derive can carry each note's hand.
+  const handToVisBefore = handleToVisIndex;
+  const fromValue = durationValueName(handle.durationDivs, handle.divisions);
+
+  // Run the model edit DIRECTLY (not through the stack) so a NO-OP outcome (ladder end / no room)
+  // does not push a command and therefore cannot wipe the redo branch. Only a real edit is recorded,
+  // via pushApplied (the model is already mutated), exactly like a drag commits.
+  const rec = scoreModel.changeDuration(handleId, direction);
+  if (!rec || rec.outcome === "atEnd" || rec.outcome === "noRoom") {
+    // Boundary no-op: the model changed nothing. Announce so a keyboard/SR user knows it registered.
+    if (!rec || rec.outcome === "atEnd") {
+      editLive.textContent =
+        direction === "shorter"
+          ? "Already the shortest value, sixteenth"
+          : "Already the longest value, whole";
+    } else {
+      editLive.textContent = "No room to lengthen in this bar";
+    }
+    return;
+  }
+
+  // The edit landed: record the applied command for undo/redo (clears the redo branch like any new
+  // edit). Re-derive the falling notes from the model (onsets/durations changed), keep the selection
+  // on the same handle, announce the value change (folding a dotted snap in), and pulse the note.
+  const cmd: ChangeDurationCommand = { kind: "changeDuration", handleId, direction, record: rec };
+  commandStack.pushApplied(cmd);
+  const notes = rederiveVisNotesFromModel(handToVisBefore);
+  selectedHandle = handleId;
+  const announce = durationAnnounce(rec, fromValue);
+  finishEdit(announce, notes);
+  pulseSelection();
+}
+
+// The polite-region announce for a committed duration edit (Designer P3-6), value-named in the
+// current Names mode for the pitch token. Step: "D5 quarter to half"; clamp: "D5 lengthened to fill
+// the bar"; a dotted arrival folds into the from->to ("Dotted quarter to quarter"). `fromValue` is
+// the pre-edit value name (used for the dotted-arrival phrasing).
+function durationAnnounce(
+  rec: { outcome: string; fromName: string; toName: string; dottedSnap: boolean },
+  fromValue: string,
+): string {
+  const pitch = selectedNoteLabel();
+  if (rec.outcome === "clamped") return `${pitch} lengthened to fill the bar`;
+  // A dotted/odd arrival snapped to plain: phrase it from the arrival value ("Dotted quarter to
+  // quarter"), capitalized as it leads the sentence.
+  if (rec.dottedSnap) return `${capitalize(fromValue)} to ${rec.toName || noteValueName("", 0)}`;
+  return `${pitch} ${rec.fromName} to ${rec.toName}`;
+}
+
+// Whether the user prefers reduced motion (Designer P3-4: NO flash under it). Read fresh per call so
+// a runtime OS toggle is honored.
+function prefersReducedMotion(): boolean {
+  return (
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
+
+let pulseTimer: number | null = null;
+// Briefly pulse the changed note on a duration commit (Designer P3-4): the staff notehead gets a
+// transient brass accent glow (the .ph-accent class) and the canvas bar a stronger glow, for ~150ms,
+// then both settle to the steady .ph-selected halo. A duration edit can leave the notehead in the
+// same x/y while only its shape changes, so the one-shot flash draws the eye the way a position move
+// does for a pitch edit. Skipped entirely under prefers-reduced-motion (the re-engrave + readout
+// already confirm the change). The canvas pulse is driven through the visualizer's accent flag.
+function pulseSelection(): void {
+  if (prefersReducedMotion()) return;
+  const noteId = selectedStaffId();
+  const staffEl = noteId ? staffNoteEl(noteId) : null;
+  staffEl?.classList.add("ph-accent");
+  visualizer.setAccentPulse(selectedVisIndex());
+  if (pulseTimer !== null) window.clearTimeout(pulseTimer);
+  pulseTimer = window.setTimeout(() => {
+    pulseTimer = null;
+    // Clear the staff accent on whichever notehead currently carries it (the selection/render may
+    // have moved by now); clear the canvas accent flag so the bar settles to its steady halo.
+    if (verovioHost) {
+      for (const el of verovioHost.querySelectorAll(".ph-accent")) el.classList.remove("ph-accent");
+    }
+    visualizer.setAccentPulse(null);
+  }, 150);
 }
 
 // The <note> element the selection should move to AFTER deleting `handleId`: the next note in
@@ -1348,6 +1537,25 @@ function restIndexAtOnsetStaff(cmd: AddNoteCommand): number | null {
     (rh) => rh.staff === staff && Math.abs(rh.onsetSec - cmd.visNote!.time) < 1e-3,
   );
   return r ? r.id : null;
+}
+
+// Shared tail for undo AND redo of a duration edit. The model has ALREADY mutated (undo restored
+// the bar via restoreDuration; redo re-applied via changeDuration), and a duration edit keeps the
+// pitched-note handle ids stable, so we re-derive the falling notes from the model, re-select the
+// same handle, announce the reversal/redo, and pulse the changed note. The announce uses the
+// command's recorded value + direction (Designer P3-6: "Undid lengthen to half" / mirror for redo).
+function undoOrRedoDuration(cmd: ChangeDurationCommand, mode: "undo" | "redo"): void {
+  if (!scoreModel) return;
+  const notes = rederiveVisNotesFromModel(handleToVisIndex);
+  selectedHandle = cmd.handleId;
+  const verb = cmd.direction === "longer" ? "lengthen" : "shorten";
+  // The value the edit landed on (record.toName); for a CLAMP fill there is no plain ladder name, so
+  // fall back to the post-edit value name on redo / "fill the bar" phrasing.
+  const landed = cmd.record?.toName || "fill the bar";
+  const announce =
+    mode === "undo" ? `Undid ${verb} to ${landed}` : `Redid ${verb} to ${landed}`;
+  finishEdit(announce, notes);
+  pulseSelection();
 }
 
 // Load MusicXML into OSMD and rebuild the pipeline. Shared by the direct MusicXML file
@@ -2277,6 +2485,10 @@ canvas.addEventListener("pointerdown", (e) => {
 // cluster are DIATONIC (the staff's native unit, the discoverable mirror of the staff arrows).
 pitchUpBtn.addEventListener("click", () => staffPitchStep("diatonic", 1));
 pitchDownBtn.addEventListener("click", () => staffPitchStep("diatonic", -1));
+// Duration steppers (Smart Edit P3 v1): walk the value ladder one notch. Disabled at the ladder
+// ends (reflectDurationButtons), so a click only ever fires for a legal step.
+durShorterBtn.addEventListener("click", () => changeDurationEdit("shorter"));
+durLongerBtn.addEventListener("click", () => changeDurationEdit("longer"));
 // Trash button: delete the shared-selected note (model-level, fixed-bar, undoable).
 deleteNoteBtn.addEventListener("click", () => deleteSelectedNote());
 // "Add a note" button (ADD-a-note v1): fill the selected rest. A button press following a MOUSE
@@ -2362,6 +2574,16 @@ window.addEventListener("keydown", (e) => {
       e.preventDefault();
       addSelectedRestFromKeyboard();
     }
+    return;
+  }
+
+  // Comma / period change the selected NOTE's duration on BOTH surfaces (Smart Edit P3 v1): comma =
+  // shorter, period = longer. preventDefault so the keys never type into the page; a no-op on a rest
+  // selection (selectedHandle is null then) and announced once via changeDurationEdit. Handled
+  // before the selectedHandle guard so the preventDefault still fires on a rest (a clean no-op).
+  if (e.key === "," || e.key === ".") {
+    e.preventDefault();
+    if (selectedHandle !== null) changeDurationEdit(e.key === "," ? "shorter" : "longer");
     return;
   }
 

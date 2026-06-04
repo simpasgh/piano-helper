@@ -10,7 +10,13 @@
 // re-render / re-derive / reloadNotes path, so undo restores both surfaces + audio exactly like
 // a fresh edit. This keeps the stack logic unit-testable against a tiny model stub.
 
-import type { AddRecord, DeleteRecord, ModelPitch, ScoreModel } from "./edit-model";
+import type {
+  AddRecord,
+  ChangeDurationRecord,
+  DeleteRecord,
+  ModelPitch,
+  ScoreModel,
+} from "./edit-model";
 
 // A pitch edit on one model note. `handleId` is the stable handle index; `before`/`after` are
 // the written pitches. apply() sets `after`; invert() sets `before`. Used by BOTH surfaces (the
@@ -60,7 +66,25 @@ export interface AddNoteCommand {
   visNote: VisNoteSnapshot | null;
 }
 
-export type EditCommand = SetPitchCommand | DeleteNoteCommand | AddNoteCommand;
+// A CHANGE-DURATION of one note (Smart Edit P3 v1): step it one notch shorter/longer along the
+// plain value ladder, FIXED-BAR. `handleId` is the stable handle id (a duration edit never adds or
+// removes a pitched note, so the id is stable). apply() steps it via the model and stashes the
+// ChangeDurationRecord (a bar snapshot) for undo; invert() restores the bar from that record. Like
+// delete/add, the orchestrator (main.ts) re-derives the falling notes itself (a lengthen ripples
+// following onsets and a shorten changes a duration + adds a rest), so the command stack ignores
+// the vis bookkeeping. `direction` is recorded so a redo reproduces the same step deterministically.
+export interface ChangeDurationCommand {
+  kind: "changeDuration";
+  handleId: number;
+  direction: "shorter" | "longer";
+  record: ChangeDurationRecord | null; // filled by apply(); used by invert(). Re-filled on redo.
+}
+
+export type EditCommand =
+  | SetPitchCommand
+  | DeleteNoteCommand
+  | AddNoteCommand
+  | ChangeDurationCommand;
 
 export function applyCommand(model: ScoreModel, cmd: EditCommand): void {
   switch (cmd.kind) {
@@ -77,6 +101,11 @@ export function applyCommand(model: ScoreModel, cmd: EditCommand): void {
       // deterministic, so a redo reproduces the same rest -> note at the same pitch.
       cmd.record = model.addNote(cmd.restId, cmd.pitch);
       break;
+    case "changeDuration":
+      // Re-derive the record on every apply (initial push AND redo): the step is deterministic
+      // given the restored bar, so a redo reproduces the same shorten/lengthen.
+      cmd.record = model.changeDuration(cmd.handleId, cmd.direction);
+      break;
   }
 }
 
@@ -90,6 +119,9 @@ export function invertCommand(model: ScoreModel, cmd: EditCommand): void {
       break;
     case "addNote":
       if (cmd.record) model.removeNote(cmd.record);
+      break;
+    case "changeDuration":
+      if (cmd.record) model.restoreDuration(cmd.record);
       break;
   }
 }

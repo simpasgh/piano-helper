@@ -54,6 +54,14 @@ export interface NoteHandle {
   pitch: ModelPitch;
   isChordMember: boolean;
   isTieContinuation: boolean;
+  // Time geometry of the note, so a duration edit can step the value ladder and re-derive the
+  // falling note (which needs SECONDS) without a re-parse, and so the readout/announce can name
+  // the current value. `durationDivs` is the <duration> in this measure's `divisions`; `divisions`
+  // is that measure's <divisions> per quarter (load-bearing 4 for our OMR). `durationSec` is the
+  // note's length in seconds (parallel to RestHandle.durationSec) at the model's tempo.
+  durationDivs: number;
+  divisions: number;
+  durationSec: number;
 }
 
 // A handle on one <rest> in the model (ADD-a-note v1). A rest is SELECTABLE and CONVERTIBLE to a
@@ -268,6 +276,30 @@ export interface AddRecord {
   restClone: Element;
 }
 
+// What a CHANGE-DURATION captured, so it can be inverted exactly. A duration edit can touch SEVERAL
+// elements in one bar (the edited note's <duration>/<type>/<dot>, a freed-time REST inserted on
+// shorten, and shrunk/removed trailing rests on lengthen + ripple), so rather than tracking each
+// surgical change we snapshot the edited note's whole parent <measure> children (deep clones) BEFORE
+// mutating. invert() clears the live measure's children and re-appends the snapshot, restoring the
+// bar exactly (durations, onsets, rests, order), then re-indexes. The measure ELEMENT itself is
+// never replaced (only its children), so this reference survives undo/redo. Model-internal (live
+// DOM refs). `outcome`/`from`/`to`/`dottedSnap` describe the edit for the orchestrator's announce.
+export interface ChangeDurationRecord {
+  measureEl: Element; // the <measure> whose children were mutated (stable node, never replaced)
+  childrenBefore: Node[]; // deep clones of measureEl's children at edit time, for invert
+  outcome: "stepped" | "clamped" | "noRoom" | "atEnd";
+  // The value NAMES for the announce (current Names mode is applied by the orchestrator's pitch
+  // label, but the value words come from here). `fromName` is the pre-edit value (possibly dotted);
+  // `toName` is the new value ("" when clamped to a fill duration that has no plain ladder name).
+  fromName: string;
+  toName: string;
+  // A dotted/odd arrival was snapped to the nearest plain rung as part of this edit (folds into the
+  // announce, e.g. "Dotted quarter to quarter"). False for a plain-to-plain step.
+  dottedSnap: boolean;
+  // The direction the user asked for, so the announce/undo can say "lengthen"/"shorten".
+  direction: "shorter" | "longer";
+}
+
 // The editable score model. Holds the parsed DOM and the ordered pitched-note handles. Edits
 // mutate the DOM through handles; serialize() re-emits MusicXML for Verovio.
 //
@@ -299,6 +331,19 @@ export interface ScoreModel {
   // Invert an add: swap the original rest back in for the added note and re-index, so the rest
   // reclaims its original rest-handle id (literally the standalone delete path).
   removeNote(record: AddRecord): void;
+  // CHANGE-DURATION v1: step the note `id` one notch SHORTER or LONGER along the plain value ladder
+  // (16th..whole), FIXED-BAR. Shorten shrinks the note and inserts a REST of the freed time right
+  // after it (the bar stays full, following onsets unchanged). Lengthen grows the note, ripples the
+  // following same-voice events later, and absorbs trailing REST space; if the next rung overflows
+  // the room it CLAMPS to the barline (the note fills the bar). A dotted/odd ARRIVAL snaps to the
+  // nearest plain rung first. Sets BOTH <duration> and <type>; a plain-rung step writes ZERO <dot>
+  // and removes existing dots. Returns the record needed to invert (snapshots the bar), or null for
+  // an invalid id, a rest end-clamp no-op, or a no-room no-op (the record's `outcome` distinguishes
+  // them so the caller can announce). Note handle ids are STABLE (no pitched note is added/removed),
+  // so the selection stays on the same handle; rest ids may shift, so the caller rebuilds the maps.
+  changeDuration(id: number, direction: "shorter" | "longer"): ChangeDurationRecord | null;
+  // Invert a change-duration: restore the snapshotted measure children and re-index.
+  restoreDuration(record: ChangeDurationRecord): void;
   fifthsForHandle(id: number): number;
   // The key signature (fifths) in effect at a REST handle, so the add can spell its accidental
   // diatonically (parallel to fifthsForHandle for note handles).
@@ -327,7 +372,9 @@ export function restDurationName(type: string): string {
 // The standard MusicXML note-value tokens, each with its length in QUARTER-NOTE units. A whole is
 // 4 quarters, an eighth half a quarter, etc. `breve` (double whole = 8q) is included because the
 // model's REST_TYPE_NAMES recognises it; nothing shorter than a 64th is emitted by our OMR.
-const NOTE_VALUE_QUARTERS: ReadonlyArray<{ type: string; quarters: number }> = [
+// Exported so the duration-edit ladder (changeDuration) is anchored to the SAME canonical table
+// noteTypeForDuration scans, never a second hand-kept list.
+export const NOTE_VALUE_QUARTERS: ReadonlyArray<{ type: string; quarters: number }> = [
   { type: "breve", quarters: 8 },
   { type: "whole", quarters: 4 },
   { type: "half", quarters: 2 },
@@ -337,6 +384,81 @@ const NOTE_VALUE_QUARTERS: ReadonlyArray<{ type: string; quarters: number }> = [
   { type: "32nd", quarters: 0.125 },
   { type: "64th", quarters: 0.0625 },
 ];
+
+// The PLAIN value ladder the duration edit walks (Smart Edit P3 CHANGE-DURATION v1), shortest to
+// longest: 16th, eighth, quarter, half, whole. NO dotted values, NO tuplets (Designer P3-3). Each
+// notch is one ladder index; a step shorter is index-1, a step longer is index+1, both CLAMPED at
+// the ends. `quarters` is the value's length in quarter-note units; multiply by `divisions` to get
+// <duration> in a measure's divisions (e.g. divisions=4: 16th=1, eighth=2, quarter=4, half=8,
+// whole=16, the load-bearing mapping the task pins). Drawn from NOTE_VALUE_QUARTERS so the tokens
+// match noteTypeForDuration exactly.
+const LADDER_TYPES: readonly string[] = ["16th", "eighth", "quarter", "half", "whole"];
+export const DURATION_LADDER: ReadonlyArray<{ type: string; quarters: number }> = LADDER_TYPES.map(
+  (type) => {
+    const entry = NOTE_VALUE_QUARTERS.find((v) => v.type === type);
+    // LADDER_TYPES is a subset of NOTE_VALUE_QUARTERS, so this is always found; assert for types.
+    return { type, quarters: entry!.quarters };
+  },
+);
+
+// Human duration names for a note's <type> token (e.g. "quarter"), parallel to REST_TYPE_NAMES but
+// WITHOUT the trailing " rest". Used by the readout/announce so a value reads as a plain word.
+const NOTE_TYPE_NAMES: Record<string, string> = {
+  breve: "double whole",
+  whole: "whole",
+  half: "half",
+  quarter: "quarter",
+  eighth: "eighth",
+  "16th": "sixteenth",
+  "32nd": "thirty-second",
+  "64th": "sixty-fourth",
+};
+
+// A spoken value name for a <type>+dots pair, e.g. "quarter", "dotted quarter", "double dotted
+// half". v1 never PRODUCES dots, but a note can ARRIVE dotted (OMR inferred dots from an odd
+// <duration>), so the readout names the arrival value before the snap. Unknown type -> "note".
+export function noteValueName(type: string, dots: number): string {
+  const base = NOTE_TYPE_NAMES[type];
+  if (!base) return "note";
+  if (dots === 1) return `dotted ${base}`;
+  if (dots === 2) return `double dotted ${base}`;
+  return base;
+}
+
+// The spoken value name for a <duration> in `divisions` (infers the type+dots first). The readout
+// uses this to append the current value to the selected-note label ("D5, quarter").
+export function durationValueName(durDivs: number, divisions: number): string {
+  const { type, dots } = noteTypeForDuration(durDivs, divisions);
+  return noteValueName(type, dots);
+}
+
+// The index of a duration on the PLAIN ladder, or -1 if it is not exactly a plain ladder value (a
+// dotted/tuplet/odd duration that must SNAP before stepping). Matches by quarter-length within a
+// small epsilon so float division (durDivs/divisions) lands cleanly.
+export function ladderIndexForDuration(durDivs: number, divisions: number): number {
+  const q = divisions > 0 ? durDivs / divisions : 0;
+  const EPS = 1e-6;
+  return DURATION_LADDER.findIndex((v) => Math.abs(v.quarters - q) < EPS);
+}
+
+// The NEAREST plain ladder index to a duration (used to SNAP a dotted/odd arrival onto the ladder).
+// Ties (a dotted value sits exactly between two ladder rungs, e.g. a dotted quarter = 1.5q is
+// equidistant from quarter and half) break toward the SHORTER rung, so a dotted quarter snaps to
+// quarter (the spec's "Dotted quarter to quarter"), not half.
+export function nearestLadderIndex(durDivs: number, divisions: number): number {
+  const q = divisions > 0 ? durDivs / divisions : 0;
+  let best = 0;
+  let bestDelta = Infinity;
+  for (let i = 0; i < DURATION_LADDER.length; i++) {
+    const delta = Math.abs(DURATION_LADDER[i].quarters - q);
+    // Strict < keeps the FIRST (shorter, since the ladder is shortest-first) on a tie.
+    if (delta < bestDelta - 1e-9) {
+      bestDelta = delta;
+      best = i;
+    }
+  }
+  return best;
+}
 
 // The inferred note-value (base <type> + dot count) for a duration expressed in divisions. Real OMR
 // (and some publishers) emit a bare `<note>` with a `<duration>` but NO `<type>`; Verovio then draws
@@ -547,6 +669,9 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
                 pitch,
                 isChordMember: isChord,
                 isTieContinuation,
+                durationDivs: durDivs,
+                divisions,
+                durationSec: (durDivs / divisions) * secPerQuarter,
               });
               handleFifths.push(fifths);
             }
@@ -739,11 +864,404 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
       }
       reindexHandles();
     },
+    changeDuration(id: number, direction: "shorter" | "longer"): ChangeDurationRecord | null {
+      const handle = handles[id];
+      if (!handle) return null;
+      // A duration edit acts on the whole CHORD: members share one onset + one duration, so editing
+      // a member's duration alone would desync the chord. `noteEl` is the chord's ONSET note (the one
+      // that advances the cursor, which the fixed-bar math is scoped to); `chordGroup` is the onset +
+      // all its members, every one of which gets the new duration/type together. For a non-chord note
+      // the group is just the note itself.
+      const chordGroup = chordGroupFor(handle.el);
+      const noteEl = chordGroup[0];
+      // The measure is the bar the fixed-bar math is scoped to. Walk up to the enclosing <measure>.
+      const measureEl = ancestorNamed(noteEl, "measure");
+      if (!measureEl) return null;
+      const divisions = handle.divisions > 0 ? handle.divisions : 1;
+      // Bar math keys on the ONSET note's duration (members are parallel), which equals the selected
+      // member's anyway for a well-formed chord; read it from the onset note to be exact.
+      const oldDivs = num(child(noteEl, "duration"), handle.durationDivs);
+      // Current value name (for the announce), computed BEFORE any mutation (covers a dotted
+      // arrival, e.g. "dotted quarter").
+      const fromName = durationValueName(oldDivs, divisions);
+
+      // Is the note already on a plain ladder rung? If not (a dotted/odd arrival), SNAP to the
+      // nearest rung first; that snap is folded into this edit (Designer P3-3).
+      let curIndex = ladderIndexForDuration(oldDivs, divisions);
+      const dottedSnap = curIndex < 0;
+      if (dottedSnap) {
+        const snapIndex = nearestLadderIndex(oldDivs, divisions);
+        const snapped = DURATION_LADDER[snapIndex];
+        // Pick the target rung from the snapped rung in the requested direction: if the snap already
+        // moved in that direction (shorter: snapped < old; longer: snapped > old), the snap IS the
+        // edit; otherwise take one more notch so the press still moves the value the asked way.
+        const snappedDivs = snapped.quarters * divisions;
+        if (direction === "shorter") {
+          curIndex = snappedDivs < oldDivs ? snapIndex : Math.max(0, snapIndex - 1);
+        } else {
+          curIndex =
+            snappedDivs > oldDivs ? snapIndex : Math.min(DURATION_LADDER.length - 1, snapIndex + 1);
+        }
+      } else {
+        curIndex += direction === "shorter" ? -1 : 1;
+      }
+
+      // Ladder-end clamp: a step off either end is a disabled no-op (the caller announces "already
+      // the shortest/longest"). No DOM change, so return a record marked `atEnd` with no snapshot.
+      if (curIndex < 0 || curIndex > DURATION_LADDER.length - 1) {
+        return {
+          measureEl,
+          childrenBefore: [],
+          outcome: "atEnd",
+          fromName,
+          toName: fromName,
+          dottedSnap: false,
+          direction,
+        };
+      }
+
+      const targetDivs = DURATION_LADDER[curIndex].quarters * divisions;
+
+      // Snapshot the bar BEFORE mutating, for an exact invert (covers every surgical change below).
+      const snapshot = (): Node[] => Array.from(measureEl.children).map((c) => c.cloneNode(true));
+
+      if (direction === "longer" && targetDivs > oldDivs) {
+        // LENGTHEN: grow the note, ripple the following same-voice events later, and absorb trailing
+        // REST space. The bar must never overflow, so the growth is limited by the rest divisions
+        // available after the note (+ any slack to the barline, normally 0 on a full bar).
+        const voice = num(child(noteEl, "voice"), 1);
+        const following = followingVoiceEvents(measureEl, noteEl, voice);
+        const restRoom = following
+          .filter((e) => child(e, "rest") !== null)
+          .reduce((sum, e) => sum + num(child(e, "duration"), 0), 0);
+        const slack = Math.max(0, measureCapacityDivs(measureEl, divisions) - voiceFilledDivs(measureEl, voice));
+        const room = restRoom + slack;
+        const wanted = targetDivs - oldDivs; // divisions the next rung would add
+        const grow = Math.min(wanted, room);
+        if (grow <= 0) {
+          // No rest room to grow into: a no-op at the bar boundary (announce "No room ...").
+          return {
+            measureEl,
+            childrenBefore: [],
+            outcome: "noRoom",
+            fromName,
+            toName: fromName,
+            dottedSnap: false,
+            direction,
+          };
+        }
+        const childrenBefore = snapshot();
+        const newDivs = oldDivs + grow;
+        // Consume `grow` divisions of trailing rest, from the FIRST following rest onward: shrink a
+        // rest that is larger than what is left to consume, remove one fully consumed. Following
+        // NOTES keep their durations (their onsets ripple right via the cursor as the note grows).
+        let toConsume = grow;
+        for (const e of following) {
+          if (toConsume <= 0) break;
+          if (child(e, "rest") === null) continue; // a note: untouched (it ripples by onset)
+          const restDur = num(child(e, "duration"), 0);
+          if (restDur <= toConsume) {
+            e.parentNode?.removeChild(e);
+            toConsume -= restDur;
+          } else {
+            setNoteDuration(e, restDur - toConsume, divisions, { keepDots: false });
+            toConsume = 0;
+          }
+        }
+        // A full-rung step (grow == wanted) lands on a plain ladder value (zero dots); a CLAMP
+        // (grow < wanted) fills to the barline at a possibly-dotted value so the bar stays exactly
+        // full and Verovio engraves a valid in-bar note (the documented v1 clamp exception). Apply to
+        // EVERY chord member so the chord keeps one shared duration.
+        const clamped = grow < wanted;
+        for (const m of chordGroup) setNoteDuration(m, newDivs, divisions, { keepDots: clamped });
+        reindexHandles();
+        return {
+          measureEl,
+          childrenBefore,
+          outcome: clamped ? "clamped" : "stepped",
+          fromName,
+          toName: clamped ? durationValueName(newDivs, divisions) : DURATION_LADDER[curIndex].type,
+          dottedSnap,
+          direction,
+        };
+      }
+
+      // SHORTEN (or a dotted-snap that lands shorter): shrink the note to the target value and insert
+      // a REST of the freed divisions RIGHT AFTER it, so the bar stays full and the following onsets
+      // are unchanged (the rhythm_repair "complete the bar with rests" idiom, MEMORY.md). When the
+      // arrival was dotted the freed amount is oldDivs - targetDivs (which may exceed one rung's
+      // worth); a single rest of exactly that span keeps the math correct.
+      const freed = oldDivs - targetDivs;
+      if (freed <= 0) {
+        // The chosen rung is not actually shorter (defensive; should not happen for "shorter").
+        return {
+          measureEl,
+          childrenBefore: [],
+          outcome: "atEnd",
+          fromName,
+          toName: fromName,
+          dottedSnap: false,
+          direction,
+        };
+      }
+      const childrenBefore = snapshot();
+      // Shrink EVERY chord member to the target value (one shared duration), then insert the freed
+      // rest AFTER the last member so it does not split the chord.
+      for (const m of chordGroup) setNoteDuration(m, targetDivs, divisions, { keepDots: false });
+      const lastInChord = chordGroup[chordGroup.length - 1];
+      // Build the freed-time rest from the (now-shortened) onset note so it carries the same
+      // voice/staff, give it the freed duration + matching type, and insert it after the chord.
+      const freedRest = makeRestFrom(noteEl);
+      setNoteDuration(freedRest, freed, divisions, { keepDots: false });
+      lastInChord.parentNode?.insertBefore(freedRest, lastInChord.nextSibling);
+      reindexHandles();
+      return {
+        measureEl,
+        childrenBefore,
+        outcome: "stepped",
+        fromName,
+        toName: DURATION_LADDER[curIndex].type,
+        dottedSnap,
+        direction,
+      };
+    },
+    restoreDuration(record: ChangeDurationRecord): void {
+      // A no-op edit (ladder-end / no-room) snapshotted nothing: invert is also a no-op.
+      if (record.childrenBefore.length === 0) return;
+      // Restore the bar exactly: drop the live children, re-append the deep-cloned snapshot. The
+      // measure element is the same node, so this reverses every surgical change (the note's
+      // duration/type/dots, an inserted freed rest, shrunk/removed trailing rests) in one move.
+      while (record.measureEl.firstChild) {
+        record.measureEl.removeChild(record.measureEl.firstChild);
+      }
+      for (const c of record.childrenBefore) {
+        record.measureEl.appendChild(c.cloneNode(true));
+      }
+      reindexHandles();
+    },
     serialize(): string {
       return serializer.serializeToString(doc);
     },
   };
   return model;
+}
+
+// The CHORD GROUP a <note> belongs to (Smart Edit P3 duration edit): the onset note + all its
+// <chord/> members, in document order, so a duration edit can set ONE shared duration across the
+// whole chord (editing a single member's <duration> would desync it). If `el` is a chord MEMBER
+// (carries <chord/>), walk BACK to the onset note (the first preceding sibling <note> in the same
+// voice WITHOUT a <chord/>); then collect that onset + the consecutive following <chord/> members.
+// A standalone note returns just itself. Same-voice is matched so a backup-separated voice is not
+// pulled in.
+function chordGroupFor(el: Element): Element[] {
+  const voice = num(child(el, "voice"), 1);
+  // Find the onset note: el itself if it has no <chord/>, else the nearest preceding non-chord note.
+  let onset = el;
+  if (child(el, "chord") !== null) {
+    let n: Node | null = el.previousSibling;
+    while (n) {
+      if (n.nodeType === 1) {
+        const e = n as Element;
+        if (e.tagName.toLowerCase() === "note" && num(child(e, "voice"), 1) === voice) {
+          onset = e;
+          if (child(e, "chord") === null) break; // reached the onset note
+        } else if (e.tagName.toLowerCase() === "backup" || e.tagName.toLowerCase() === "forward") {
+          break; // do not cross a voice boundary
+        }
+      }
+      n = n.previousSibling;
+    }
+  }
+  // Collect the onset + consecutive following <chord/> members of the same voice.
+  const group: Element[] = [onset];
+  let n: Node | null = onset.nextSibling;
+  while (n) {
+    if (n.nodeType === 1) {
+      const e = n as Element;
+      if (e.tagName.toLowerCase() !== "note") break;
+      if (child(e, "chord") === null) break; // the next onset note: the chord ended
+      if (num(child(e, "voice"), 1) !== voice) break;
+      group.push(e);
+    }
+    n = n.nextSibling;
+  }
+  return group;
+}
+
+// The nearest ancestor element of `el` whose tag is `tag` (case-insensitive), or null. Used to find
+// the <measure> a note belongs to so the duration edit can scope its fixed-bar math to that bar.
+function ancestorNamed(el: Element, tag: string): Element | null {
+  let n: Element | null = el.parentElement;
+  while (n) {
+    if (n.tagName.toLowerCase() === tag) return n;
+    n = n.parentElement;
+  }
+  return null;
+}
+
+// The events (notes + rests) that FOLLOW `noteEl` in the SAME voice within its measure, in document
+// order, stopping at the next <backup>/<forward> (a voice boundary). These are the events a lengthen
+// ripples + absorbs rest space from. Same-voice is matched by the <voice> child (default 1).
+function followingVoiceEvents(measureEl: Element, noteEl: Element, voice: number): Element[] {
+  const out: Element[] = [];
+  let seen = false;
+  for (const node of Array.from(measureEl.children)) {
+    const tag = node.tagName.toLowerCase();
+    if (node === noteEl) {
+      seen = true;
+      continue;
+    }
+    if (!seen) continue;
+    // A backup/forward ends this contiguous voice run; stop collecting (the ripple is scoped to the
+    // edited note's own voice run, not whatever a later <backup> jumps to).
+    if (tag === "backup" || tag === "forward") break;
+    if (tag !== "note") continue;
+    if (num(child(node, "voice"), 1) !== voice) continue;
+    out.push(node);
+  }
+  return out;
+}
+
+// The bar's capacity in divisions from its <time> signature (beats * divisions * 4 / beat-type), or
+// a fallback when no time signature is in scope. divisions is per quarter note, so a beat worth of
+// divisions is divisions * (4 / beat-type); times `beats` gives the full bar. The <time> may sit in
+// THIS measure's <attributes> or be inherited; we read the most recent one at/ before this measure.
+function measureCapacityDivs(measureEl: Element, divisions: number): number {
+  const time = timeSignatureFor(measureEl);
+  if (!time) {
+    // No time signature found: fall back to the bar's own filled length so a lengthen finds no slack
+    // (room then comes only from explicit trailing rests, which is the safe, never-overflow default).
+    return voiceFilledDivsMax(measureEl);
+  }
+  return time.beats * divisions * (4 / time.beatType);
+}
+
+// The <time> beats/beat-type in scope for `measureEl`: the LAST <time> in this measure or any
+// earlier measure of the same part (MusicXML time signatures persist until changed). Null if none.
+function timeSignatureFor(measureEl: Element): { beats: number; beatType: number } | null {
+  const part = ancestorNamed(measureEl, "part");
+  if (!part) return readTime(measureEl);
+  let found: { beats: number; beatType: number } | null = null;
+  for (const m of Array.from(part.getElementsByTagName("measure"))) {
+    const t = readTime(m);
+    if (t) found = t;
+    if (m === measureEl) break; // do not look past the edited measure
+  }
+  return found;
+}
+
+function readTime(measureEl: Element): { beats: number; beatType: number } | null {
+  const time = measureEl.getElementsByTagName("time").item(0);
+  if (!time) return null;
+  const beats = num(time.getElementsByTagName("beats").item(0), 0);
+  const beatType = num(time.getElementsByTagName("beat-type").item(0), 0);
+  if (beats > 0 && beatType > 0) return { beats, beatType };
+  return null;
+}
+
+// The filled divisions of ONE voice's contiguous run in a measure: sum the durations of its notes
+// (non-chord) and rests up to the next <backup>/<forward>. Used to compute the slack to the barline
+// for that voice (capacity - filled). Chord members are parallel (no advance), matching the walk.
+function voiceFilledDivs(measureEl: Element, voice: number): number {
+  let sum = 0;
+  for (const node of Array.from(measureEl.children)) {
+    const tag = node.tagName.toLowerCase();
+    if (tag === "backup" || tag === "forward") {
+      // Only count the FIRST contiguous run for this voice (the run the edit lives in). A later
+      // backup starts a different voice/run; stop once we have started counting and hit a boundary.
+      if (sum > 0) break;
+      continue;
+    }
+    if (tag !== "note") continue;
+    if (num(child(node, "voice"), 1) !== voice) continue;
+    if (child(node, "chord") !== null) continue; // chord member: parallel, no advance
+    sum += num(child(node, "duration"), 0);
+  }
+  return sum;
+}
+
+// The maximum forward extent of a measure across all voices (the cursor walk's furthest reach), used
+// as a no-time-signature capacity fallback. Mirrors the parse walk: backup/forward move the cursor,
+// non-chord notes/rests advance it, chord members are parallel.
+function voiceFilledDivsMax(measureEl: Element): number {
+  let cursor = 0;
+  let extent = 0;
+  for (const node of Array.from(measureEl.children)) {
+    const tag = node.tagName.toLowerCase();
+    const dur = num(child(node as Element, "duration"), 0);
+    if (tag === "backup") cursor -= dur;
+    else if (tag === "forward") cursor += dur;
+    else if (tag === "note") {
+      if (child(node as Element, "chord") !== null) continue;
+      cursor += dur;
+    }
+    if (cursor > extent) extent = cursor;
+  }
+  return extent;
+}
+
+// Set a <note>/<rest> element's <duration> and matching <type>, fixed to `divisions`. Rewrites the
+// <duration> text and the <type> token (inferred via noteTypeForDuration). v1's plain-rung steps
+// pass keepDots:false: ALL existing <dot> children are removed and none are written, so the note
+// lands on a clean plain value. The lengthen CLAMP passes keepDots:true so a fill-to-the-barline
+// duration keeps the dots its value needs (the documented v1 exception) and Verovio stays valid.
+function setNoteDuration(
+  el: Element,
+  durDivs: number,
+  divisions: number,
+  opts: { keepDots: boolean },
+): void {
+  const doc = el.ownerDocument;
+  // <duration>
+  let durEl = child(el, "duration");
+  if (!durEl) {
+    durEl = doc.createElement("duration");
+    // <duration> follows <pitch>/<rest>/<chord>/<grace>; insert before <voice>/<type>/... if present.
+    const anchor = child(el, "voice") ?? child(el, "type") ?? null;
+    el.insertBefore(durEl, anchor);
+  }
+  durEl.textContent = String(durDivs);
+
+  const { type, dots } = noteTypeForDuration(durDivs, divisions);
+  // <type>
+  let typeEl = child(el, "type");
+  if (!typeEl) {
+    typeEl = doc.createElement("type");
+    // <type> goes after <duration>/<voice>; insert before the first child that must follow it.
+    const AFTER_TYPE = new Set([
+      "dot",
+      "accidental",
+      "notations",
+      "staff",
+      "beam",
+      "stem",
+      "lyric",
+      "time-modification",
+    ]);
+    let anchor: Node | null = null;
+    for (const c of Array.from(el.children)) {
+      if (AFTER_TYPE.has(c.tagName.toLowerCase())) {
+        anchor = c;
+        break;
+      }
+    }
+    el.insertBefore(typeEl, anchor);
+  }
+  typeEl.textContent = type;
+
+  // Remove every existing <dot>, then (only when keeping dots, the clamp exception) re-emit them
+  // immediately after <type> in valid DTD order.
+  for (const dot of Array.from(el.getElementsByTagName("dot"))) {
+    dot.parentNode?.removeChild(dot);
+  }
+  if (opts.keepDots) {
+    let after: Node = typeEl;
+    for (let i = 0; i < dots; i++) {
+      const dotEl = doc.createElement("dot");
+      el.insertBefore(dotEl, after.nextSibling);
+      after = dotEl;
+    }
+  }
 }
 
 // The next ELEMENT sibling of `el` whose tag is `tag` immediately following it (skipping text

@@ -161,6 +161,9 @@ export class Visualizer {
   // When the canvas is the de-emphasized MIRROR during a drag on the OTHER surface (the staff),
   // its selected bar dims to ~55% so it reads as "about to change" (Designer P1-5). Null = full.
   private mirrorDeemphasisIndex: number | null = null;
+  // Transient accent-pulse bar (Smart Edit P3): the bar whose duration just changed flashes a
+  // stronger brass glow for ~150ms before settling to the steady selection halo. Null = no pulse.
+  private accentPulseIndex: number | null = null;
   private width = 0;
   private height = 0;
   private dpr = 1;
@@ -198,6 +201,14 @@ export class Visualizer {
   // index is into the current `notes`; the caller is responsible for passing a valid index.
   setSelected(index: number | null): void {
     this.selectedIndex = index;
+  }
+
+  // Transient accent pulse on a bar (Smart Edit P3): on a duration commit the changed bar flashes a
+  // stronger brass glow for ~150ms before settling to the steady selection halo, so the eye catches
+  // a length change that does not move the bar's x/y. The caller sets the index then clears it (to
+  // null) after the timeout; while set, the bar is drawn with an extra accent ring + heavier glow.
+  setAccentPulse(index: number | null): void {
+    this.accentPulseIndex = index;
   }
 
   // Set (or clear) the transient pitch-drag preview (Smart Edit P1). While set, the previewed
@@ -431,11 +442,15 @@ export class Visualizer {
       // focus-ring border and a soft brass halo so the edit target reads clearly. Drawn on the
       // real (non-clamped) bar only; the selection survives play being paused.
       if (this.selectedIndex === i) {
+        // A duration-commit pulse (Smart Edit P3) draws a heavier brass ring + glow for its ~150ms
+        // window, on top of (and brighter than) the steady selection halo, so a length change that
+        // does not move the bar still catches the eye. Falls back to the steady halo otherwise.
+        const pulsing = this.accentPulseIndex === i;
         ctx.save();
-        ctx.lineWidth = 2;
-        ctx.strokeStyle = "#f0c66b"; // --focus-ring
+        ctx.lineWidth = pulsing ? 3 : 2;
+        ctx.strokeStyle = pulsing ? "#d8a23a" : "#f0c66b"; // --accent : --focus-ring
         ctx.shadowColor = "rgba(216, 162, 58, 0.55)"; // --accent-glow
-        ctx.shadowBlur = 16;
+        ctx.shadowBlur = pulsing ? 28 : 16;
         ctx.globalAlpha = 1;
         this.roundRect(x, top, w, barHeight, 4);
         ctx.stroke();
