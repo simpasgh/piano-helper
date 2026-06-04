@@ -1027,6 +1027,263 @@ button:focus-visible,
   padding: 1rem;
 }
 
+/* ===================================================================== */
+/*  OMR streaming "recognition scan-line" loader (design.md STREAM-1..5). */
+/*  An overlay child of the scrolled #sheet content (like #sheet-labels), */
+/*  one absolutely-positioned box per staff system. CSS lifted verbatim   */
+/*  from docs/design/streaming-loader-demo.html (concept A). The only      */
+/*  per-frame JS flips data-state; the motion is pure CSS. No fake notes:  */
+/*  pending rows are empty ruled staves with a brass skeleton shimmer.     */
+/* ===================================================================== */
+#sheet-stream {
+  /* loader-local tokens (mirror the demo's :root loader block) */
+  --ink: #20242b; /* near-black engraving ink */
+  --staff-line: rgba(32, 36, 43, 0.78);
+  --scan-line: var(--accent);
+  --scan-glow: var(--accent-glow);
+  --skeleton-base: rgba(107, 79, 31, 0.16); /* brass-brown wash on paper */
+  --skeleton-sheen: rgba(216, 162, 58, 0.42); /* brass sheen sweep */
+
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none; /* never block clicks on the engraving beneath */
+  z-index: 2; /* above #sheet-labels (z-index 1), below the edit toolbar */
+}
+
+/* one system box, sized + positioned in px by sheet-stream-overlay.ts */
+.sys-box {
+  position: absolute;
+}
+
+/* the grand staff ruling: two 5-line staves drawn with gradients, so an empty
+   pending system still reads as music paper (no fake notes). */
+.sys-staff {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 38%;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent 7px,
+    var(--staff-line) 7px,
+    var(--staff-line) 8px
+  );
+}
+.sys-staff.treble {
+  top: 7%;
+}
+.sys-staff.bass {
+  bottom: 7%;
+}
+.sys-barline {
+  position: absolute;
+  top: 7%;
+  bottom: 7%;
+  width: 1.5px;
+  background: var(--staff-line);
+}
+.sys-barline.l {
+  left: 0;
+}
+.sys-barline.r {
+  right: 0;
+}
+.sys-brace {
+  position: absolute;
+  left: -7px;
+  top: 5%;
+  bottom: 5%;
+  width: 3px;
+  border-radius: 3px;
+  background: var(--ink);
+  opacity: 0.55;
+}
+
+/* DONE: the real engraved notes show through beneath; the overlay box adds nothing
+   visible (full-strength staff lines belong to the engraving, not the overlay). So a
+   done box hides its own ruling + skeletons and carries no animation. */
+.sys-box[data-state="done"] .sys-staff,
+.sys-box[data-state="done"] .sys-barline,
+.sys-box[data-state="done"] .sys-brace,
+.sys-box[data-state="done"] .sys-skel,
+.sys-box[data-state="done"] .sys-scanband {
+  display: none;
+}
+
+/* PENDING + ACTIVE staff ruling reads fainter than a finished system. */
+.sys-box[data-state="pending"] .sys-staff,
+.sys-box[data-state="active"] .sys-staff {
+  opacity: 0.5;
+}
+.sys-box[data-state="pending"] .sys-brace,
+.sys-box[data-state="pending"] .sys-barline,
+.sys-box[data-state="active"] .sys-brace,
+.sys-box[data-state="active"] .sys-barline {
+  opacity: 0.35;
+}
+
+/* ACTIVE: a brass beam sweeps top->bottom, leaving a faint "recognized so far" wash
+   above it. The beam lives only on the active box; skeletons are hidden there. */
+.sys-scanband {
+  display: none;
+}
+.sys-box[data-state="active"] .sys-scanband {
+  display: block;
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 100%;
+  pointer-events: none;
+  overflow: hidden;
+}
+.sys-box[data-state="active"] .sys-scanband::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 100%;
+  transform-origin: top;
+  background: linear-gradient(
+    to bottom,
+    rgba(216, 162, 58, 0.16),
+    rgba(216, 162, 58, 0.04)
+  );
+  animation: sys-scan-wash 2.4s ease-in-out infinite;
+}
+.sys-box[data-state="active"] .sys-scanband::after {
+  content: "";
+  position: absolute;
+  left: -4%;
+  right: -4%;
+  height: 10px;
+  top: 0;
+  border-radius: 6px;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    var(--scan-line) 45%,
+    #fff6e2 50%,
+    var(--scan-line) 55%,
+    transparent
+  );
+  filter: drop-shadow(0 0 6px var(--scan-glow));
+  animation: sys-scan-beam 2.4s ease-in-out infinite;
+}
+.sys-box[data-state="active"] .sys-skel {
+  display: none; /* the active row uses the beam, not skeletons */
+}
+@keyframes sys-scan-beam {
+  0% {
+    top: -6px;
+    opacity: 0;
+  }
+  12% {
+    opacity: 1;
+  }
+  88% {
+    opacity: 1;
+  }
+  100% {
+    top: calc(100% - 4px);
+    opacity: 0;
+  }
+}
+@keyframes sys-scan-wash {
+  0% {
+    transform: scaleY(0.02);
+  }
+  100% {
+    transform: scaleY(1);
+  }
+}
+
+/* PENDING: note-SHAPED skeleton blocks (rounded brass-brown bars, deliberately block-like
+   so they read as placeholder, NOT notes) with a brass sheen sweeping left->right, staggered
+   per row (--sys-row, set inline) so the page ripples instead of pulsing in lockstep. */
+.sys-box[data-state="pending"] .sys-skel {
+  position: absolute;
+  height: 9px;
+  width: 5%;
+  border-radius: 5px;
+  background: var(--skeleton-base);
+  overflow: hidden;
+}
+.sys-box[data-state="pending"] .sys-skel.treble {
+  top: 22%;
+}
+.sys-box[data-state="pending"] .sys-skel.bass {
+  bottom: 22%;
+}
+.sys-box[data-state="pending"] .sys-skel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    transparent 20%,
+    var(--skeleton-sheen) 50%,
+    transparent 80%
+  );
+  transform: translateX(-130%);
+  animation: sys-skel-sheen 1.8s ease-in-out infinite;
+  animation-delay: calc(var(--sys-row, 0) * 0.15s);
+}
+@keyframes sys-skel-sheen {
+  0% {
+    transform: translateX(-130%);
+  }
+  60% {
+    transform: translateX(130%);
+  }
+  100% {
+    transform: translateX(130%);
+  }
+}
+
+/* REDUCED MOTION: collapse to one calm static state (STREAM-4). No sweep, no sheen. A
+   pending row shows a single static brass-brown wash on the empty staff; the active row
+   shows a static brass left marker + a slightly brighter static wash. Progress is still
+   conveyed by which rows are done vs pending vs active plus the status line. */
+@media (prefers-reduced-motion: reduce) {
+  #sheet-stream * {
+    animation: none !important;
+    transition: none !important;
+  }
+  .sys-box[data-state="pending"] .sys-skel {
+    display: block;
+    background: var(--skeleton-base);
+  }
+  .sys-box[data-state="pending"] .sys-skel::after {
+    display: none;
+  }
+  .sys-box[data-state="active"] .sys-scanband {
+    display: block;
+  }
+  .sys-box[data-state="active"] .sys-scanband::after {
+    display: none; /* no moving beam */
+  }
+  .sys-box[data-state="active"] .sys-scanband::before {
+    transform: scaleY(1); /* a static brighter wash, no growth */
+    animation: none;
+  }
+  .sys-box[data-state="active"]::before {
+    content: "";
+    position: absolute;
+    left: -10px;
+    top: 4%;
+    bottom: 4%;
+    width: 3px;
+    border-radius: 3px;
+    background: var(--accent);
+  }
+}
+
 /* Smart Edit Mode P0: while editing, the Verovio engraving REPLACES the OSMD view in the sheet
    pane. main.ts adds `.editing` to #sheet and renders the Verovio SVG into #verovio-host. OSMD
    wraps its SVG in an inner `div#osmdCanvasPageN` (confirmed against the installed package), and

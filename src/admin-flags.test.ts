@@ -65,6 +65,17 @@ describe("withFlag dependency cascade", () => {
     expect(off.OMR_PROGRESSIVE_PAGES).toBe(false);
   });
 
+  it("block-streaming enables BOTH progressive and the fusion engine (+ geom)", () => {
+    const on = withFlag(emptyState(), "OMR_PROGRESSIVE_BLOCKS", true);
+    expect(on.OMR_PROGRESSIVE_BLOCKS).toBe(true);
+    expect(on.OMR_PROGRESSIVE).toBe(true);
+    expect(on.OMR_GEOM_FUSION).toBe(true);
+    expect(on.OMR_GEOM).toBe(true); // transitive: fusion needs geom
+    // Turning OFF either prerequisite cascades block-streaming off.
+    expect(withFlag(on, "OMR_GEOM_FUSION", false).OMR_PROGRESSIVE_BLOCKS).toBe(false);
+    expect(withFlag(on, "OMR_PROGRESSIVE", false).OMR_PROGRESSIVE_BLOCKS).toBe(false);
+  });
+
   it("does not mutate the input state", () => {
     const base = emptyState();
     withFlag(base, "OMR_GEOM", true);
@@ -92,7 +103,11 @@ describe("transitiveRequires / dependentsOf", () => {
     expect(transitiveRequires("OMR_PROGRESSIVE_PAGES")).toContain("OMR_PROGRESSIVE");
   });
 
-  it("dependentsOf geom includes primary and fusion", () => {
-    expect(dependentsOf("OMR_GEOM").sort()).toEqual(["OMR_GEOM_FUSION", "OMR_GEOM_PRIMARY"]);
+  it("dependentsOf geom includes primary, fusion, and block-streaming (transitive via fusion)", () => {
+    expect(dependentsOf("OMR_GEOM").sort()).toEqual([
+      "OMR_GEOM_FUSION",
+      "OMR_GEOM_PRIMARY",
+      "OMR_PROGRESSIVE_BLOCKS",
+    ]);
   });
 });

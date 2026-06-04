@@ -57,6 +57,12 @@ import fusion
 import progressive
 import flag_config
 
+# clarity_stream is the block-by-block Clarity DRIVER (OMR_PROGRESSIVE_BLOCKS). Its top level is pure
+# stdlib (the torch/Clarity imports happen inside its main(), which only ever runs in Clarity's venv
+# as a subprocess), so importing it here in the worker venv is free. We use its pure argv builder +
+# emit-path/exit constants; the worker never imports Clarity itself.
+import clarity_stream
+
 # rhythm_repair is PURE stdlib (no boto3/torch), like reconcile/fusion, so importing it is free.
 # It is the final post-transform: a music-theory pass that makes each measure's note durations sum
 # to the time signature (never-raise, never-worse). See rhythm_repair.py.
@@ -193,8 +199,12 @@ def fusion_enabled():
 # Default OFF = exactly one write at the end, byte-identical to today. OMR_PROGRESSIVE_PAGES is a
 # refinement (only meaningful with OMR_PROGRESSIVE): stream a multi-page PDF PAGE BY PAGE (each page
 # transcribed + appended in document order) instead of fast-then-refine on the whole file.
+# OMR_PROGRESSIVE_BLOCKS is a finer refinement still (also needs OMR_PROGRESSIVE + OMR_GEOM_FUSION):
+# stream REAL rhythm per staff SYSTEM within ONE warm Clarity invocation (no geom placeholder), and
+# takes precedence over PAGES + fast-then-refine when on.
 PROGRESSIVE_ENV = "OMR_PROGRESSIVE"
 PROGRESSIVE_PAGES_ENV = "OMR_PROGRESSIVE_PAGES"
+PROGRESSIVE_BLOCKS_ENV = "OMR_PROGRESSIVE_BLOCKS"
 
 
 def progressive_enabled():
@@ -210,6 +220,18 @@ def progressive_pages_enabled():
     """True when OMR_PROGRESSIVE_PAGES is truthy: within progressive, stream a multi-page PDF page by
     page. Only meaningful when progressive_enabled() is also True. Mirrors geom_primary."""
     raw = os.environ.get(PROGRESSIVE_PAGES_ENV)
+    if raw is None:
+        return False
+    return raw.strip().lower() in ("1", "true")
+
+
+def progressive_blocks_enabled():
+    """True when OMR_PROGRESSIVE_BLOCKS is truthy: within progressive, stream REAL rhythm per staff
+    SYSTEM from ONE warm Clarity invocation (geom whole-page pitch + Clarity's growing per-system
+    rhythm prefix, fused + published per system). Only meaningful when progressive_enabled() AND
+    fusion_enabled() are also True. Takes precedence over per-page + fast-then-refine. Mirrors
+    geom_primary."""
+    raw = os.environ.get(PROGRESSIVE_BLOCKS_ENV)
     if raw is None:
         return False
     return raw.strip().lower() in ("1", "true")
@@ -557,6 +579,11 @@ CLARITY_OMR_DIR_ENV = "CLARITY_OMR_DIR"
 CLARITY_PYTHON_ENV = "CLARITY_PYTHON"
 CLARITY_SCRIPT_NAME = "omr.py"
 
+# The block-by-block streaming driver (clarity_stream.py) lives BESIDE this file and runs in
+# Clarity's venv (CLARITY_PYTHON), importing Clarity from CLARITY_OMR_DIR. It emits one cumulative
+# MusicXML per staff system as Stage B decodes it. Used only on the OMR_PROGRESSIVE_BLOCKS path.
+CLARITY_STREAM_SCRIPT_NAME = "clarity_stream.py"
+
 # Our trained geometric engine runs as a subprocess in its OWN venv (torch/ultralytics, which
 # cannot co-install with oemer's stack), exactly like Clarity. GEOM_PYTHON points to that venv's
 # python; GEOM_WEIGHTS to the trained notehead .pt. The script lives beside this file.
@@ -618,6 +645,104 @@ def run_clarity(pdf_path, workdir, timeout=None):
         return out_path
     # Clarity may have named it differently; fall back to a scan of the work dirs.
     return find_musicxml(workdir, clarity_work)
+
+
+def _parse_stream_line(line):
+    """Parse one 'STREAM <k> <total> <path>' progress line from clarity_stream.py into
+    (k, total, path), or None if the line is not a stream line / is malformed. PURE. The path may
+    contain spaces, so split into at most 4 fields and keep the remainder as the path."""
+    if not line:
+        return None
+    parts = line.strip().split(None, 3)
+    if len(parts) != 4 or parts[0] != clarity_stream.STREAM_LINE_PREFIX:
+        return None
+    try:
+        return int(parts[1]), int(parts[2]), parts[3]
+    except ValueError:
+        return None
+
+
+def run_clarity_stream(pdf_path, workdir, on_system, timeout=None):
+    """Run the block-by-block Clarity driver (clarity_stream.py) in Clarity's venv and invoke
+    on_system(index, total, clarity_xml_bytes) for EACH staff system as it is decoded, where
+    clarity_xml_bytes is the CUMULATIVE Clarity MusicXML for systems 1..index. Returns the final
+    (complete) cumulative bytes on success, or None on ANY failure (env unset/missing, no systems,
+    subprocess error/timeout) so the caller falls back to whole-file fusion. NEVER raises into
+    process_job.
+
+    Reads the driver's stdout line by line (Popen) so a system's result is surfaced the moment its
+    file is written, not buffered to the end. on_system is the publish hook; an exception inside it
+    is logged and swallowed so a publish hiccup never aborts the stream."""
+    omr_dir = os.environ.get(CLARITY_OMR_DIR_ENV)
+    python = os.environ.get(CLARITY_PYTHON_ENV)
+    if not omr_dir or not python:
+        return None
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), CLARITY_STREAM_SCRIPT_NAME)
+    if not os.path.isfile(python) or not os.path.isfile(script) or not os.path.isdir(omr_dir):
+        log("clarity-stream env set but python/script/dir missing (python=%r dir=%r)" % (python, omr_dir))
+        return None
+
+    out_path = os.path.join(workdir, "clarity-stream.musicxml")
+    emit_dir = os.path.join(workdir, "clarity-stream-emit")
+    stream_work = os.path.join(workdir, "clarity-stream-work")
+    os.makedirs(emit_dir, exist_ok=True)
+    os.makedirs(stream_work, exist_ok=True)
+    argv = clarity_stream.build_stream_argv(
+        python, script, pdf_path, omr_dir, out_path, emit_dir, stream_work, device="cpu", fast=True
+    )
+
+    final_bytes = None
+    try:
+        # Popen as a context manager closes the pipes and reaps the child on exit, so neither a
+        # normal finish nor an exception leaks a zombie or an open fd.
+        with subprocess.Popen(
+            argv, cwd=workdir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        ) as proc:
+            try:
+                for line in proc.stdout:
+                    parsed = _parse_stream_line(line)
+                    if parsed is None:
+                        continue
+                    index, total, path = parsed
+                    try:
+                        with open(path, "rb") as fh:
+                            sys_bytes = fh.read()
+                    except OSError as err:
+                        log("clarity-stream: cannot read system %d file %r (%r)" % (index, path, err))
+                        continue
+                    final_bytes = sys_bytes  # the latest cumulative emit is the running "complete"
+                    is_last = index >= total
+                    if not is_last:
+                        try:
+                            on_system(index, total, sys_bytes)
+                        except Exception as err:  # a publish hiccup must not abort the stream
+                            log("clarity-stream: on_system hook failed at %d (%r)" % (index, err))
+                ret = proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                log("clarity-stream timed out after %ss" % timeout)
+                proc.kill()
+                return None
+            if ret != 0:
+                # EXIT_NO_SYSTEMS (clean "nothing here") and any error both fall back to whole-file.
+                stderr_tail = ""
+                try:
+                    stderr_tail = (proc.stderr.read() or "")[-500:]
+                except Exception:
+                    pass
+                log("clarity-stream exited %d; whole-file fusion. stderr: %s" % (ret, stderr_tail))
+                return None
+    except (OSError, ValueError) as err:
+        log("clarity-stream failed to run: %r" % err)
+        return None
+    # Prefer the explicit -o file the driver copies the final system into; fall back to the last
+    # cumulative emit we read off stdout.
+    if os.path.isfile(out_path):
+        try:
+            with open(out_path, "rb") as fh:
+                return fh.read()
+        except OSError:
+            pass
+    return final_bytes
 
 
 def geom_command(python, script, image_path, weights, out_path, device="cpu"):
@@ -1336,6 +1461,77 @@ def _transcribe_one_page(page_pdf, page_dir):
         return None
 
 
+def _fusion_block_stream(job_id, input_path, workdir, geom_body, publish_partial):
+    """BLOCK-BY-BLOCK progressive fusion (OMR_PROGRESSIVE_BLOCKS, PDF only). geom runs ONCE over the
+    whole page for pitch; Clarity streams REAL rhythm per staff SYSTEM from ONE warm invocation
+    (run_clarity_stream). For each system k, publish a partial that holds ONLY the FINISHED systems:
+    geom truncated to the Clarity prefix's measure count, fused with the Clarity prefix for systems
+    1..k (fusion.fuse_prefix). The pending (not-yet-decoded) systems are ABSENT from the partial
+    MusicXML, so the client draws their loading skeletons rather than geom placeholder rhythm. Each
+    partial is stamped with the system FRONTIER (total, done=k) so the client knows how many skeleton
+    rows to draw and which system is active.
+
+    The FINAL write is geom-WHOLE + Clarity-WHOLE = today's whole-file fusion path, byte-equivalent,
+    so this is a pure refinement of WHEN/which rows appear, never a different final result.
+
+    geom and the Clarity stream run CONCURRENTLY (geom ~5s finishes well before Clarity's first
+    system ~28s), so the geom future is ready by the first fuse. Returns the final fused MusicXML
+    bytes (the COMPLETE body process_job writes), or None to fall back to whole-file fusion (Clarity
+    stream unavailable, no systems, or nothing fusable) so it is never worse than the path below.
+    NEVER raises."""
+    try:
+        # Kick geom off in the background; resolve it lazily on the first system so a slow geom does
+        # not stall the stream's startup but is still ready before we need its pitch.
+        geom_holder = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            geom_future = pool.submit(geom_body)
+
+            def on_system(index, total, clarity_prefix_bytes):
+                if "bytes" not in geom_holder:
+                    try:
+                        geom_holder["bytes"] = geom_future.result()
+                    except Exception as err:
+                        log("%s block-stream: geom failed (%r)" % (job_id, err))
+                        geom_holder["bytes"] = None
+                geom_bytes = geom_holder.get("bytes")
+                if not geom_bytes and not clarity_prefix_bytes:
+                    return
+                # FINISHED-ONLY partial: geom truncated to the Clarity prefix's measure count + the
+                # Clarity prefix, so the pending systems are absent (the client skeletons them).
+                fused = fusion.fuse_prefix(geom_bytes, clarity_prefix_bytes)
+                if not fused:
+                    return
+                # Collapse to ONE grand-staff part like the per-page path: a clarity-only prefix (geom
+                # produced nothing) can be 2 parts, which publish_partial's own merge would also fix,
+                # but doing it here keeps the partial shape identical to the complete write. The
+                # frontier (total systems, done=index) lets the client lay out the skeleton rows.
+                publish_partial(merge_to_grand_staff(fused), systems_total=total, systems_done=index)
+                log("%s block-stream published system %d/%d" % (job_id, index, total))
+
+            clarity_whole = run_clarity_stream(input_path, workdir, on_system)
+
+        if not clarity_whole:
+            return None  # stream unavailable / no systems -> whole-file fusion.
+        # Resolve geom one last time in case there were zero systems streamed before the final (the
+        # callback only fires for non-last systems); the final fuse must still have geom's pitch.
+        if "bytes" not in geom_holder:
+            try:
+                geom_holder["bytes"] = geom_future.result()
+            except Exception as err:
+                log("%s block-stream: geom failed at final (%r)" % (job_id, err))
+                geom_holder["bytes"] = None
+        geom_bytes = geom_holder.get("bytes")
+        fused_final = fusion.fuse(geom_bytes, clarity_whole)
+        if not fused_final:
+            return None
+        # Note: process_job runs the shared post-transform chain (merge -> normalize -> rhythm
+        # repair) on whatever we return, so the returned body matches the whole-file fusion complete.
+        return fused_final
+    except Exception as err:
+        log("block-stream failed for %s (%r); whole-file fusion" % (job_id, err))
+        return None
+
+
 def _fusion_per_page(job_id, input_path, workdir, publish_partial):
     """PER-PAGE progressive fusion (OMR_PROGRESSIVE_PAGES). Split the PDF into single pages, transcribe
     each (geom + Clarity, fused) in document order, APPEND its measures to the growing score
@@ -1401,7 +1597,7 @@ def process_job(client, bucket, job_id):
         # the job, and the final complete write still happens at the end of process_job.
         partial_version = [0]
 
-        def publish_partial(raw_body):
+        def publish_partial(raw_body, systems_total=None, systems_done=None):
             try:
                 partial_version[0] += 1
                 # Same post-transform chain as the complete write (merge -> normalize -> rhythm
@@ -1409,7 +1605,12 @@ def process_job(client, bucket, job_id):
                 finalized = rhythm_repair.repair_measure_durations(
                     normalize_ties(merge_to_grand_staff(raw_body))
                 )
-                stamped = progressive.stamp_partial(finalized, partial_version[0])
+                # The block-by-block path supplies the system FRONTIER (total + done) so the client
+                # draws the per-system loader; the other progressive paths pass neither (a whole-page
+                # partial has no frontier), and stamp_partial then omits those fields.
+                stamped = progressive.stamp_partial(
+                    finalized, partial_version[0], systems_total, systems_done
+                )
                 # The client reads partial-vs-complete from the IN-BODY marker (the result endpoint
                 # drops object metadata), so NEVER write an unmarked body to the result key mid-job: an
                 # unmarked body reads as a COMPLETE result and stops the client polling early. If
@@ -1461,12 +1662,24 @@ def process_job(client, bucket, job_id):
         # non-PDF upload this degrades to geom alone (fuse returns geom unchanged with no Clarity).
         # Takes precedence over geom_primary.
         if geom_enabled() and fusion_enabled():
+            # BLOCK-BY-BLOCK streaming (OMR_PROGRESSIVE + OMR_PROGRESSIVE_BLOCKS, PDF only): geom runs
+            # once for pitch and Clarity streams REAL rhythm per staff SYSTEM from ONE warm
+            # invocation, fusing geom + the growing Clarity prefix and publishing per system. Highest
+            # precedence: it is the finest streaming unit (no geom placeholder) and its final result
+            # equals whole-file fusion. Returns None to fall back (stream unavailable / no systems),
+            # so it is a pure refinement of the paths below.
+            if progressive_enabled() and progressive_blocks_enabled() and is_pdf_input:
+                streamed = _fusion_block_stream(job_id, input_path, workdir, _geom_body, publish_partial)
+                if streamed is not None:
+                    body, source = streamed, "fusion"
+                    log("%s recognized via fusion (block-by-block progressive)" % job_id)
+
             # PER-PAGE streaming (OMR_PROGRESSIVE + OMR_PROGRESSIVE_PAGES, multi-page PDF only): each
             # page is transcribed + appended + published in document order, so the score grows page by
             # page (measure 1 shows while measure 20 is still being recognized). Returns None to fall
             # back to whole-file fusion (single page, split unavailable, or nothing recognized), so it
-            # is a pure refinement of the path below.
-            if progressive_enabled() and progressive_pages_enabled() and is_pdf_input:
+            # is a pure refinement of the path below. Skipped if block-streaming already produced a body.
+            if body is None and progressive_enabled() and progressive_pages_enabled() and is_pdf_input:
                 paged = _fusion_per_page(job_id, input_path, workdir, publish_partial)
                 if paged is not None:
                     body, source = paged, "fusion"

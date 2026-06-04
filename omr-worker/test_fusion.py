@@ -344,3 +344,83 @@ class TestReadTime:
     def test_never_raises_on_unparseable(self):
         assert fusion._read_time(b"<not xml") is None
         assert fusion._read_time(None) is None
+
+
+def _mcount(xml):
+    """Number of <measure> elements in a fused document (its system/measure size)."""
+    return len(ET.fromstring(xml).findall("part/measure"))
+
+
+class TestFusePrefix:
+    """fuse_prefix builds a STREAMING PARTIAL that contains ONLY the finished systems: geom truncated
+    to the Clarity prefix's measure count, fused with the prefix. Pending systems are ABSENT (the
+    client skeletons them), never shown with geom placeholder rhythm."""
+
+    def test_partial_keeps_only_finished_measures(self):
+        # geom has 3 measures (3 systems of pitch); the Clarity prefix covers only the first 2.
+        geom = _xml([
+            {"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []},
+            {"staff1": [{"duration": 1, "pitches": [{"step": "D", "octave": 5}]}], "staff2": []},
+            {"staff1": [{"duration": 1, "pitches": [{"step": "E", "octave": 5}]}], "staff2": []},
+        ])
+        clarity_prefix = _xml([
+            {"staff1": [{"duration": 4, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []},
+            {"staff1": [{"duration": 8, "pitches": [{"step": "D", "octave": 5}]}], "staff2": []},
+        ])
+        partial = fusion.fuse_prefix(geom, clarity_prefix)
+        # Only the 2 finished measures appear; the 3rd (pending) geom measure is dropped.
+        assert _mcount(partial) == 2
+        # The kept measures carry geom's pitch (C5, D5) with the borrowed Clarity durations.
+        assert _midis(partial) == [72, 74]
+        assert _durs(partial) == [4, 8]
+
+    def test_prefix_of_one_keeps_one_measure(self):
+        geom = _xml([
+            {"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []},
+            {"staff1": [{"duration": 1, "pitches": [{"step": "D", "octave": 5}]}], "staff2": []},
+        ])
+        clarity_prefix = _xml([
+            {"staff1": [{"duration": 4, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []},
+        ])
+        partial = fusion.fuse_prefix(geom, clarity_prefix)
+        assert _mcount(partial) == 1
+        assert _midis(partial) == [72]   # only the finished system's pitch
+
+    def test_full_prefix_equals_plain_fuse(self):
+        # When the Clarity prefix covers ALL geom measures (the would-be last system), fuse_prefix is
+        # the same shape as the plain whole-file fuse (same measure count + same notes/durations).
+        geom = _xml([
+            {"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []},
+            {"staff1": [{"duration": 1, "pitches": [{"step": "D", "octave": 5}]}], "staff2": []},
+        ])
+        clarity = _xml([
+            {"staff1": [{"duration": 4, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []},
+            {"staff1": [{"duration": 8, "pitches": [{"step": "D", "octave": 5}]}], "staff2": []},
+        ])
+        prefix = fusion.fuse_prefix(geom, clarity)
+        whole = fusion.fuse(geom, clarity)
+        assert _mcount(prefix) == _mcount(whole) == 2
+        assert _midis(prefix) == _midis(whole)
+        assert _durs(prefix) == _durs(whole)
+
+    def test_falls_back_to_fuse_when_clarity_empty(self):
+        # No Clarity prefix yet (geom-only): nothing to truncate to, so fall back to the plain fuse
+        # (which returns geom unchanged). NEVER worse than the whole-file path.
+        geom = _xml([{"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]}],
+                      "staff2": []}])
+        assert fusion.fuse_prefix(geom, None) == fusion.fuse(geom, None)
+        assert fusion.fuse_prefix(geom, b"") == fusion.fuse(geom, b"")
+
+    def test_never_raises_on_garbage(self):
+        # Unparseable inputs degrade to the plain fuse, never raise.
+        assert fusion.fuse_prefix(b"<not xml", b"<also not") == fusion.fuse(b"<not xml", b"<also not")
+        assert fusion.fuse_prefix(None, None) is None
+
+
+class TestMeasureCount:
+    def test_counts_distinct_measures(self):
+        cells = {(1, 1): [], (1, 2): [], (2, 1): [], (3, 1): []}
+        assert fusion._measure_count(cells) == 3
+
+    def test_empty_is_zero(self):
+        assert fusion._measure_count({}) == 0

@@ -39,6 +39,15 @@ STATUS_PARTIAL = "partial"
 # poll of the same partial is a no-op). Kept byte-compatible with the regexes in src/omr.ts.
 _STATUS_FIELD = "omr-status"
 _VERSION_FIELD = "omr-version"
+# The SYSTEM FRONTIER for the block-by-block streaming loader (OMR_PROGRESSIVE_BLOCKS). A partial
+# carries ONLY the finished systems; these two fields tell the client how many systems the page has
+# in total and how many are finalized in THIS partial, so the renderer draws (total - done) pending
+# skeleton rows below the engraved ones and marks system index == done active. Optional: the
+# fast-then-refine and per-page partials do not set them (a whole-page partial has no frontier), and
+# the client treats their absence as "no per-system loader" (src/omr.ts). Kept byte-compatible with
+# the regexes in src/omr.ts.
+_SYSTEMS_TOTAL_FIELD = "omr-systems-total"
+_SYSTEMS_DONE_FIELD = "omr-systems-done"
 
 # Byte-pattern the client (src/omr.ts PARTIAL_SENTINEL_RE) uses to detect a partial IN THE BODY.
 # is_partial_marked confirms a body actually carries it before that body is written to the result key.
@@ -56,9 +65,17 @@ def is_partial_marked(xml_bytes) -> bool:
         return False
 
 
-def stamp_partial(xml_bytes, version: int) -> bytes:
+def stamp_partial(xml_bytes, version: int,
+                  systems_total: Optional[int] = None,
+                  systems_done: Optional[int] = None) -> bytes:
     """Mark a MusicXML document as an in-progress PARTIAL result by injecting
     <identification><miscellaneous> fields omr-status="partial" and omr-version=<version>.
+
+    When systems_total and systems_done are BOTH given (the block-by-block streaming path), also
+    stamp omr-systems-total and omr-systems-done so the client knows the SYSTEM FRONTIER: how many
+    skeleton rows to draw and which system is active (index == done). Either being None (the
+    fast-then-refine / per-page partials, which carry the whole page so far) stamps neither, so those
+    partials are frontier-less and the client falls back to its full-stage loader for them.
 
     The fusion/geom builders emit no <identification>, so we create one in schema order (it must
     precede <part-list>). If one already exists we update its fields in place. NEVER raises: returns
@@ -78,6 +95,9 @@ def stamp_partial(xml_bytes, version: int) -> bytes:
             misc = ET.SubElement(ident, "miscellaneous")
         _set_misc_field(misc, _STATUS_FIELD, STATUS_PARTIAL)
         _set_misc_field(misc, _VERSION_FIELD, str(int(version)))
+        if systems_total is not None and systems_done is not None:
+            _set_misc_field(misc, _SYSTEMS_TOTAL_FIELD, str(int(systems_total)))
+            _set_misc_field(misc, _SYSTEMS_DONE_FIELD, str(int(systems_done)))
         return ET.tostring(root, encoding="utf-8", xml_declaration=True)
     except Exception:
         return xml_bytes

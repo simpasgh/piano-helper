@@ -186,6 +186,147 @@ relevant section, dated.
      following events later within the bar.** Confirm this asymmetry (shorten = local rest, lengthen
      = ripple) reads right; it falls out of "the bar always stays full and nothing crosses a barline".
 
+## OMR block-by-block STREAMING loader: the "recognition scan-line" (loading-animation spec)
+
+- **2026-06-04 - We are shipping OMR streaming (branch `feat/omr-block-streaming`): the score
+  renders one SYSTEM (one staff-line row, top to bottom) at a time as the engine finalizes it.
+  Finished systems show crisp REAL notes; the system being decoded right now gets a distinct
+  ACTIVE treatment; systems still pending below the frontier show an animated loading state on
+  EMPTY/skeleton staves. Hard product constraint from the owner: do NOT draw fake/placeholder
+  rhythm on not-yet-recognized systems (that was explicitly rejected); the pending region is a
+  loading animation on empty ruling, never invented notes. Prod CPU timeline: ~28s blank lead-in,
+  then a new system finalizes roughly every ~9s, so the loader has to make a long, lumpy wait feel
+  alive and like progress. Data contract the client has: k systems finalized out of total (the
+  stream knows total + done), so the renderer draws k real systems + (total - k) pending slots and
+  marks system k+1 active. A previewable demo of all three concepts lives at
+  `docs/design/streaming-loader-demo.html` (self-contained, no build step, ~30s loop, concept +
+  reduced-motion toggles). This entry is the design decision; the Tech Lead owns the wiring.**
+
+  ### Decision STREAM-1 (RECOMMENDED) - the "recognition scan-line". The animation IS the recognition.
+
+  **RECOMMENDED concept: a brass "scan-line" that sweeps top-to-bottom across the ACTIVE system,
+  with notes materializing as each system locks in, and a quiet brass-brown skeleton shimmer on the
+  pending systems below.** Why this over the alternatives: it is the only one that is ON-THEME for an
+  OMR app. The engine literally reads the page line by line; a sweep that descends the active staff
+  and leaves a faint "recognized so far" wash behind it mirrors the machine's actual act of optical
+  recognition, so the animation tells the true story of the wait instead of a generic spinner. It
+  also reads as PROGRESS (a frontier moving down the page) rather than mere "waiting", which is what a
+  ~28s-then-9s-per-line wait needs. It fits the Nocturne language exactly: the sweep is brass
+  (`--accent #d8a23a`) with a hot ivory core and an `--accent-glow` bloom, the same lamp-light accent
+  used everywhere else; the skeleton wash is brass-brown (`#6b4f1f` family at low alpha), the page's
+  own annotation ink, so nothing introduces a new hue. It is cheap (one sweeping pseudo-element per
+  active system + a CSS-gradient sheen on pending blocks, transform/opacity only).
+
+  ### Decision STREAM-2 - the THREE states and exactly how each looks.
+
+  - **DONE (system index < k): crisp REAL notes, no animation.** The finalized engraving for that
+    system, full-ink noteheads on full-strength staff lines, exactly as the score renders today. The
+    only motion is the one-shot ENTRANCE the instant a system flips done: each notehead does a 360ms
+    `note-pop` (opacity 0 -> 1, scale 0.6 -> 1, a 3px settle) so the row visibly "locks in" behind the
+    sweep instead of snapping. After that it is static and crisp. Under reduced motion the notes
+    appear instantly with no pop.
+  - **ACTIVE (system index == k, the one decoding now): the scan beam.** A horizontal brass beam
+    (~10px tall, transparent -> `--accent` -> ivory core -> `--accent` -> transparent, with an
+    `--accent-glow` drop-shadow) rides from the top of the system to the bottom on a ~2.4s ease-in-out
+    loop; ABOVE the beam a faint brass wash (`scaleY` growing from the top) reads as "recognized so far
+    in this line". The staff ruling for the active row sits at ~0.5 opacity (present but not yet
+    "inked"). No skeleton blocks on the active row (the beam carries it). This is the single row that
+    says "work is happening right here, right now."
+  - **PENDING (system index > k): skeleton shimmer on EMPTY staves, NO fake notes.** The staff ruling
+    (5-line treble + 5-line bass, brace, edge barlines) is drawn at ~0.5 opacity so the page already
+    looks like ruled music paper, and on each staff sit note-SHAPED skeleton blocks (rounded brass-brown
+    bars, deliberately block-like so they read as placeholder, NOT as notes) with a brass sheen
+    sweeping left-to-right on a ~1.8s loop, staggered per row so the page ripples rather than pulsing in
+    lockstep. The skeleton occupies where notes WILL be without committing to any pitch or rhythm,
+    honoring the "no invented notes" rule while still filling the empty region with life.
+
+  ### Decision STREAM-3 - the two ALTERNATIVES (built in the demo, not recommended).
+
+  - **B. Skeleton shimmer (modern content-loader).** Every not-done system (pending AND active) shows
+    the note-shaped skeleton blocks with the brass sheen; the ACTIVE row shimmers brighter + faster and
+    gets a pulsing brass left-edge marker to single it out. Clean, familiar, very cheap. Rejected as the
+    primary because it is GENERIC: it could be any app loading any content and says nothing about
+    optical recognition, so it wastes the one chance to make the wait feel like the product's core act.
+    It is the right FALLBACK shape, though, and the recommended concept already reuses its skeleton
+    treatment for the pending rows.
+  - **C. Blink / pulse (calmest).** No sweep, no shimmer: empty staves gently breathe in opacity
+    (~0.38 Hz, a 2.6s cycle) and the active row breathes a touch brighter with a brass tint. Lowest
+    energy, lowest risk, least code. Rejected as primary because it reads as "waiting / idle" rather
+    than "working", and gives the weakest sense of a frontier advancing, which is exactly the
+    reassurance a minute-long lumpy wait needs. Its slow opacity breathe IS effectively the
+    reduced-motion fallback for the scan-line concept (see STREAM-4).
+
+  ### Decision STREAM-4 - reduced motion + flash safety (required).
+
+  - **`@media (prefers-reduced-motion: reduce)`: collapse ALL concepts to one calm static state.** No
+    sweep, no sheen, no breathe, no note-pop. Pending rows show a single STATIC brass-brown wash band on
+    the empty staff (the skeleton block with its moving sheen disabled); the active row shows a STATIC
+    brass left-edge marker + a slightly brighter static wash so "this row is being decoded now" stays
+    legible without any motion; done rows show their real notes instantly. Progress is still fully
+    conveyed (which rows are done vs pending vs active) purely by the static layout + the row count, so a
+    reduced-motion user loses nothing but the animation. The demo's "Reduced motion" toggle previews
+    this and auto-engages if the OS setting is on.
+  - **Flash safety:** every looped animation is well under 3 Hz (scan beam ~0.42 Hz, skeleton sheen
+    ~0.56 Hz, blink ~0.38 Hz) and none is a hard on/off flash; they are smooth opacity/translate ramps,
+    so there is no seizure risk. Contrast: the brass accent on cream paper and the brass-brown wash on
+    cream both stay within the page's existing legible palette; the sweep never obscures already-rendered
+    real notes (it only rides the empty active row).
+
+  ### Decision STREAM-5 - renderer ATTACHMENT POINT (for the Tech Lead).
+
+  - **Where it lives:** the score renders into the cream sheet pane `#sheet` (the "real paper" pane,
+    `background:#f6f1e6`, `position:relative`, `overflow-y:auto`). The loader is an OVERLAY layer that is
+    a child of the scrolled sheet content (so it scrolls WITH the engraving, exactly like the
+    `#sheet-labels` note-name overlay already does), holding one absolutely-positioned box PER SYSTEM,
+    each aligned to that system's bounding box.
+  - **What a "system" is in the DOM:** Verovio (PR #195, `src/verovio-view.ts`) lays the score out as
+    `<g class="system"> ( <g class="measure"> <g class="staff"> ... )*`, so a musical system (one
+    staff-line row, top to bottom) is exactly one `<g class="system">`. The streaming renderer can read
+    the first k system groups as DONE (real notes already engraved) and overlay (total - k) PENDING
+    boxes plus one ACTIVE box, sizing each box from the corresponding system group's
+    `getBoundingClientRect()` (in scrolled `#sheet` coords, the same coordinate basis
+    `readNotePositions`/`#sheet-labels` use). If a streamed render does not yet have the pending systems
+    in the SVG at all (only k systems are engraved), the overlay lays out the (total - k) pending slots
+    by stacking them below the last engraved system at a fixed per-system height (the renderer knows
+    total + done, so it can reserve the vertical space). Either way the box positions come from layout
+    geometry, never hard-coded.
+  - **State per box** = `done | active | pending`, set from the stream's k-of-total. The CSS keys off a
+    `data-state` attribute (the demo uses exactly this), so the only per-frame JS is flipping
+    `data-state` when a system finalizes; the animation itself is pure CSS. Mark system k+1 (index == k)
+    active.
+  - **Tokens (all already in `:root`, no new brand colors):** `--accent` (sweep + active marker),
+    `--accent-glow` (sweep bloom + active staff glow), `--focus-ring` not needed here; the skeleton wash
+    is the page's brass-brown ink `#6b4f1f` at ~0.16 alpha and the sheen is `--accent` at ~0.42 alpha
+    (proposed loader-local tokens `--skeleton-base` / `--skeleton-sheen` in the demo). Staff ruling for
+    pending/active is the engraving ink at reduced opacity. The demo is the canonical reference for the
+    exact gradients, durations, and easings; lift them from `docs/design/streaming-loader-demo.html`.
+  - **Relationship to the #86 full-stage scan overlay:** the #86 blocking overlay covers the WHOLE stage
+    for the opaque pre-stream wait (and for audio transcription, which has no per-system stream). Once
+    block streaming begins emitting systems, the per-system loader REPLACES the blocking overlay for the
+    sheet pane: the user watches the page fill in rather than staring at one centered spinner. The #86
+    overlay stays for non-streaming paths and for the brief moment before the first system arrives.
+
+  ### IMPLEMENTATION NOTES (Tech Lead, 2026-06-04) - two deviations from STREAM-5, both deliberate.
+
+  - **The loader reads OSMD geometry, not Verovio `<g class="system">`.** STREAM-5 named Verovio's
+    `<g class="system">` as the attachment point, but the STREAMING render path is OSMD (the cream sheet
+    pane engraves partials via OSMD; Verovio is edit-mode-only, PR #195), and OSMD/VexFlow emit NO
+    per-system `<g class="system">`. So the production loader (`src/sheet-stream-overlay.ts`) recovers
+    each engraved system's box by CLUSTERING the engraved noteheads by their vertical position, in the
+    exact scrolled-`#sheet` pixel basis the note-name overlay already uses (`readNotePositions`). This
+    honors the spec's intent ("box positions come from layout geometry, never hard-coded", one box per
+    system, scrolls with the engraving as a `#sheet` child like `#sheet-labels`) and is renderer-agnostic
+    (works if the sheet later renders via Verovio). The fixed-per-system-height STACK for not-yet-engraved
+    pending/active rows (the spec's own fallback) is used for ALL of them, since a streamed partial holds
+    only the finished systems. Everything else is lifted verbatim from the demo: scan-beam, skeleton
+    sheen (staggered), reduced-motion static fallback, the brass/brass-brown tokens.
+  - **The one-shot `note-pop` entrance is dropped.** The overlay does not draw notes: a DONE system shows
+    the REAL OSMD noteheads through a hidden overlay box, so there is nothing in the overlay to pop, and
+    re-running OSMD's own note glyphs through a pop on each partial re-render would flash every note, not
+    just the newest row. The core "recognition" motion (scan-line on the active row + skeleton shimmer on
+    pending) is fully delivered; only this finishing flourish is absent. Revisit if the sheet ever moves
+    to an incremental renderer that can animate a single just-landed system.
+
 ## Smart Edit Mode ADD-A-NOTE v1: fill a rest (turn a REST into a NOTE of the same duration) (interaction + visual spec)
 
 - **2026-06-04 - The inverse of P2 delete. P2 (model-level DELETE) shipped: a selected note

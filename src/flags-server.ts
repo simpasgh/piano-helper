@@ -19,6 +19,7 @@ export const KNOWN_FLAGS = [
   "OMR_GEOM_FUSION",
   "OMR_PROGRESSIVE",
   "OMR_PROGRESSIVE_PAGES",
+  "OMR_PROGRESSIVE_BLOCKS",
 ] as const;
 
 export type FlagKey = (typeof KNOWN_FLAGS)[number];

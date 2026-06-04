@@ -258,6 +258,53 @@ def _build(g_cells: Dict, borrowed: Dict, fifths: int, beats: int = 4, beat_type
          "time": {"beats": beats, "beat_type": beat_type}, "measures": measures})
 
 
+def _measure_count(cells: Dict) -> int:
+    """The number of DISTINCT measure numbers present in a _chords_by_cell map (cells keyed by
+    (measure, staff)). 0 for an empty map. PURE."""
+    return len({k[0] for k in cells})
+
+
+def fuse_prefix(geom_xml, clarity_prefix_xml) -> Optional[bytes]:
+    """Fuse for a STREAMING PARTIAL that contains ONLY the systems finalized so far: geom truncated
+    to the Clarity prefix's measure count, fused with the Clarity prefix. The pending (not-yet-decoded)
+    systems are simply ABSENT from the returned MusicXML, so the client draws their skeletons; they
+    are NOT shown with geom's placeholder rhythm.
+
+    geom and Clarity both run over the same page in document order, so the Clarity prefix for systems
+    1..k holds exactly the measures of those first k systems; truncating geom to the same measure
+    COUNT keeps the partial aligned to the finished region. The truncation is imperfect only if the
+    two engines disagree on measures-per-system, but that affects only a transient partial frame
+    (cosmetic): the FINAL write is whole-page fuse(geom_whole, clarity_whole), unchanged. So keep it
+    simple and NEVER worse than the whole-page fuse: on any failure (or if truncation would empty the
+    score) fall back to the ordinary fuse over the same inputs. NEVER raises."""
+    try:
+        if not geom_xml or not clarity_prefix_xml:
+            return fuse(geom_xml, clarity_prefix_xml)
+        g_cells = _chords_by_cell(geom_xml)
+        c_cells = _chords_by_cell(clarity_prefix_xml)
+        keep = _measure_count(c_cells)
+        if not g_cells or keep <= 0:
+            return fuse(geom_xml, clarity_prefix_xml)
+        # Keep only geom cells whose 1-based measure number is within the finalized prefix. geom's
+        # measures are numbered from 1 in document order (llm_omr.score_json_to_musicxml), so the
+        # first `keep` measures are the finished ones.
+        g_measures = sorted({k[0] for k in g_cells})
+        kept_measures = set(g_measures[:keep])
+        g_trunc = {k: v for k, v in g_cells.items() if k[0] in kept_measures}
+        if not g_trunc:
+            return fuse(geom_xml, clarity_prefix_xml)
+        borrowed = _borrow_durations(g_trunc, c_cells)
+        beats, beat_type = _read_time(clarity_prefix_xml) or (4, 4)
+        if beats == beat_type:
+            beats, beat_type = 4, 4
+        built = _build(g_trunc, borrowed, _read_fifths(geom_xml), beats, beat_type)
+        # _build renumbers measures 1..N from its sorted keys, so the kept measures emit as a clean
+        # 1..keep run regardless of which geom measure numbers we sliced.
+        return built or fuse(geom_xml, clarity_prefix_xml)
+    except Exception:
+        return fuse(geom_xml, clarity_prefix_xml)
+
+
 def fuse(geom_xml, clarity_xml) -> Optional[bytes]:
     """Fuse geom pitch+measures with Clarity rhythm AND Clarity's declared <time> (so a non-4/4
     piece declares its real meter, which renders it at true width and lets the rhythm-repair
