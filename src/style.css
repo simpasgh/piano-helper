@@ -483,32 +483,15 @@ button:focus-visible,
   gap: 0.4rem;
 }
 
-/* Correct mode (issue #6) + Edit mode (Smart Edit P0): the ghost toggle turns to an engaged
-   brass fill when active, matching the hand-mute pressed style so the toolbar stays consistent. */
-#correct-btn[aria-pressed="true"],
+/* Edit mode (Smart Edit P1): the ghost toggle turns to an engaged brass fill when active,
+   matching the hand-mute pressed style so the toolbar stays consistent. */
 #edit-btn[aria-pressed="true"] {
   background: rgba(216, 162, 58, 0.28);
   border-color: var(--accent);
   color: var(--text);
 }
 
-/* Compact edit cluster (issue #6): shown only in Correct mode with a note selected. The
-   `:not([hidden])` guard mirrors the hand-mutes group so the native [hidden] -> display:none
-   is not clobbered by display:flex. */
-.note-edit:not([hidden]) {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-}
-
-.note-edit-readout {
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: var(--accent);
-  white-space: nowrap;
-}
-
-/* Stage gains a focus ring in Correct mode (it becomes a focusable application region). */
+/* Stage gains a focus ring in edit mode (it becomes a focusable application region). */
 #stage:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: -2px;
@@ -1021,7 +1004,7 @@ button:focus-visible,
    the note-name overlay is `#sheet-labels`; both are direct children of #sheet. So we hide every
    direct child EXCEPT the Verovio host (not destroyed, just hidden), and exiting edit mode shows
    them again. #sheet stays non-empty, so the :empty placeholder never appears. */
-#sheet.editing > *:not(#verovio-host) {
+#sheet.editing > *:not(#verovio-host):not(#edit-toolbar) {
   display: none !important;
 }
 
@@ -1059,6 +1042,108 @@ button:focus-visible,
    also strokes a ring) so the two never look identical. */
 #verovio-host svg g.note.ph-playing {
   fill: var(--accent);
+}
+
+/* Mirror de-emphasis (Smart Edit P1): while a pitch drag is happening on the CANVAS, the staff
+   is the stale mirror, so its selected notehead dims to ~55% until the edit commits. */
+#verovio-host svg g.note.ph-mirror {
+  opacity: 0.55;
+}
+
+/* The staff host is a focusable application region in edit mode (keyboard editing). */
+#verovio-host:focus-visible {
+  outline: 2px solid var(--accent-deep);
+  outline-offset: 2px;
+}
+
+/* Docked edit toolbar (Smart Edit Mode P1): a thin brass-bordered strip on the cream paper at
+   the top of the sheet pane, shown only in edit mode (main.ts un-hides it). It sticks to the
+   top of the scrolled #sheet so it stays reachable while the staff scrolls. Brass-brown ink on
+   cream matches the staff annotation world (NOT the dark-stage tokens). */
+.edit-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 3; /* above the Verovio SVG, below the topbar */
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.5rem;
+  background: rgba(246, 241, 230, 0.94); /* cream wash so the staff does not show through */
+  border-bottom: 1px solid rgba(107, 79, 31, 0.35);
+  backdrop-filter: blur(2px);
+}
+
+.edit-toolbar[hidden] {
+  display: none;
+}
+
+.edit-tool-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+/* A divider between the history group and the per-selection cluster. */
+.edit-tool-group + .note-edit:not([hidden]) {
+  border-left: 1px solid rgba(107, 79, 31, 0.3);
+  padding-left: 0.5rem;
+  margin-left: 0.25rem;
+}
+
+.edit-tool-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid rgba(107, 79, 31, 0.35);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.5);
+  color: #6b4f1f; /* brass-brown annotation ink */
+  cursor: pointer;
+}
+
+.edit-tool-btn:hover:not(:disabled) {
+  background: rgba(216, 162, 58, 0.22);
+  border-color: var(--accent-deep);
+}
+
+.edit-tool-btn:focus-visible {
+  outline: 2px solid var(--accent-deep);
+  outline-offset: 1px;
+}
+
+/* Ghost-disabled: dimmed so the user can see there is no history to move through. */
+.edit-tool-btn:disabled,
+.edit-tool-btn[aria-disabled="true"] {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Compact per-selection cluster (Smart Edit P1): shown only when a note is selected (main.ts
+   toggles [hidden]). The `:not([hidden])` guard mirrors the hand-mutes group so the native
+   [hidden] -> display:none is not clobbered by display:flex. */
+.note-edit:not([hidden]) {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.note-edit-readout {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #6b4f1f;
+  white-space: nowrap;
+  margin-right: 0.2rem;
+}
+
+/* Phone: 44px tap targets (#33/#84). */
+@media (max-width: 600px) {
+  .edit-tool-btn {
+    width: 44px;
+    height: 44px;
+  }
 }
 
 /* Verovio attribution (LGPL obligation). Sits at the bottom-right of the cream sheet pane,

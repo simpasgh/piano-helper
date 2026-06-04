@@ -83,6 +83,19 @@ export function buildIdToVisNoteIndex(
   return idToIndex;
 }
 
+// The INVERSE of buildIdToVisNoteIndex: VisNote index -> notehead id. Needed for the dual-
+// surface bridge (P1): a selection made on the CANVAS (which is keyed by VisNote index) must
+// highlight the same note's notehead on the staff. Built as the reverse of the id->index map so
+// the two can never disagree. When several ids map to one VisNote index (a unison the falling
+// view draws as one bar), the FIRST id wins, matching id->index's first-wins tie-break.
+export function buildVisIndexToId(idToVisIndex: ReadonlyMap<string, number>): Map<number, string> {
+  const indexToId = new Map<number, string>();
+  for (const [id, index] of idToVisIndex) {
+    if (!indexToId.has(index)) indexToId.set(index, id);
+  }
+  return indexToId;
+}
+
 // The set of note ids sounding at `scoreTimeSec`, derived purely from the timemap so the rAF
 // playback indicator needs no per-frame WASM call. A note is sounding from its onset until the
 // next onset that ends it (the timemap `off` list). We resolve the latest onset at or before the
@@ -120,6 +133,9 @@ export interface VerovioRender {
   timemap: TimemapEntry[];
   stepTimes: number[];
   idToVisIndex: Map<string, number>;
+  // The inverse of idToVisIndex (VisNote index -> notehead id), for the dual-surface bridge:
+  // a canvas selection (by VisNote index) highlights the matching staff notehead.
+  visIndexToId: Map<number, string>;
 }
 
 // Lazy-load the Verovio toolkit + WASM (~7MB) and construct a toolkit instance. The dynamic
@@ -215,5 +231,6 @@ export function renderMusicXml(
 
   const stepTimes = timemapStepTimes(timemap);
   const idToVisIndex = buildIdToVisNoteIndex(notes, visNotes);
-  return { toolkit, svg, pageCount, notes, timemap, stepTimes, idToVisIndex };
+  const visIndexToId = buildVisIndexToId(idToVisIndex);
+  return { toolkit, svg, pageCount, notes, timemap, stepTimes, idToVisIndex, visIndexToId };
 }

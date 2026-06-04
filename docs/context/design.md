@@ -3,6 +3,292 @@
 UX, visual design, interaction decisions. Append durable learnings at the top of the
 relevant section, dated.
 
+## Smart Edit Mode P1: DUAL-SURFACE pitch editing + Correct-mode retirement + undo/redo (interaction + visual spec)
+
+- **2026-06-04 - REVISES the framing below. P0 shipped a Verovio staff viewer behind an Edit toggle
+  with click + Left/Right notehead selection, and the falling canvas in edit mode is currently a
+  read-only mirror. The product owner gave two directives that this entry implements: (1) Edit mode
+  REPLACES Correct mode (one editor, not two), and (2) DUAL-SURFACE editing: the user edits on the
+  falling notes below AS WELL AS on the staff above, both derived from ONE source-of-truth notation
+  model so a change on either surface instantly updates the other and the audio. The "Decision 0"
+  below ("the staff is the editor; the falling view is a live mirror, READ-ONLY") is REVERSED for the
+  parts noted here: the falling view becomes a co-equal editable surface. Everything in the older
+  entry about the staff interaction, the cream/brass visual language, the fixed-bar duration model,
+  and the assists still stands for the staff surface and for later increments; this entry adds the
+  falling-surface half, the shared-selection bridge, and the P1 pitch-only scope. Tech Lead's P1 plan
+  (tech-lead.md, 2026-06-04) is the substrate: an in-house notation model is the single source of
+  truth; an edit -> serialize-to-MusicXML -> Verovio re-render -> re-derive VisNote[]/stepTimes ->
+  rebuild Tone.Part loop (reuse `reloadNotes`); a COMMAND/undo stack from day one; Verovio re-render
+  of the current page is single-digit ms so per-frame drag re-render is fine.**
+
+  ### Decision P1-0 (FRAMING REVERSAL) - two editable surfaces, one model. The falling canvas is no longer read-only.
+
+  In edit mode the user may edit on EITHER surface and both reflect every change live, because both
+  are pure projections of one notation model (Tech Lead's model is the source of truth; the staff SVG
+  and the `VisNote[]` the canvas draws are BOTH re-derived from it after every edit). This is the
+  product-owner directive and it is the right call: a musician reasons about pitch differently on each
+  surface (the staff says "this note is on the wrong line", the falling roll says "this bar is one
+  key too low next to the one beside it"), and forcing them to one surface to make a correction they
+  spotted on the other adds friction for no gain now that there is a single model to keep them honest.
+  The "which view wins" ambiguity that the old read-only framing avoided does not return, because
+  neither view holds state: the model wins, always, and both views redraw from it. When edit mode is
+  OFF the app is exactly today's player on both surfaces (no selection, no hit-testing, no overhead).
+
+  ### Decision P1-1 - SHARED selection is the spine of dual-surface. One selected model note, shown on both surfaces at once.
+
+  There is ONE selection in edit mode: a single model note (P1 keeps single-select; multi-select is
+  later). It is identified by the thing both surfaces can map to, the **VisNote index** (the canvas
+  already selects by index; the staff already has `idToVisIndex` mapping a notehead id to that same
+  index). Selecting on either surface sets that one selection and BOTH surfaces show it simultaneously:
+
+  - **On the staff:** the existing `.ph-selected` brass halo on the notehead (`fill: --focus-ring`,
+    `stroke: --accent`). Unchanged from P0.
+  - **On the falling canvas:** the existing selection treatment in `drawFallingNotes` (solid 2px
+    `--focus-ring` outline + soft `--accent-glow` halo on the bar), already wired to `setSelected(index)`.
+  - **The selection is live on the NON-active surface too.** If you click a notehead on the staff and
+    that note's bar is currently on-screen in the falling lane, the bar lights with the same halo at
+    the same instant; if you select a bar on the canvas, its notehead on the staff gets the halo. The
+    user always sees "the same note, highlighted in both places", which is what makes the single-model
+    idea legible rather than abstract.
+  - **Selection mapping caveats (inherit P0's contract):** the staff->canvas map is `idToVisIndex`
+    keyed on (midi, onset). A tie CONTINUATION notehead has no VisNote (score.ts merges ties into one
+    bar), so selecting a tie continuation on the staff selects the START bar on the canvas and the
+    halo lands on the start notehead; announce the start note. The canvas->staff direction needs the
+    inverse (VisNote index -> notehead id); build it as the reverse of `idToVisIndex` at render time
+    (Tech Lead). When a canvas bar maps to no notehead (should not happen for a real note, but a
+    defensive case), the staff simply shows no halo and the canvas halo alone carries selection.
+  - **Off-screen on the mirror is fine.** If the selected note's bar has scrolled out of the falling
+    lane, the canvas shows nothing (it only draws on-screen bars, by design) while the staff shows the
+    halo. We do NOT auto-scroll the falling lane to chase a staff selection in P1 (the falling view is
+    a time-scrubbed surface; yanking the playhead on every staff click would be disorienting). The
+    reverse already holds: a canvas selection is by definition on-screen because you clicked a visible
+    bar. The aria announcement names the note either way, so a keyboard/SR user is never lost.
+
+  ### Decision P1-2 - the dual-surface PITCH edit: mouse + keyboard on each surface
+
+  Scope is PITCH ONLY (move a note up/down). Time/onset never changes (preserves the sync invariant;
+  the falling bar stays in its column, the staff note stays on its beat). Duration, add, delete, and
+  cross-staff are later increments (P2+), except that delete is addressed in the retirement plan below.
+
+  **STAFF surface (Verovio SVG), confirming + refining the older spec:**
+
+  | Path | Gesture | Result |
+  | --- | --- | --- |
+  | Mouse | **Vertical drag** the selected notehead. As the pointer moves, the note SNAPS to the nearest staff position (line/space = a diatonic step), live-previewing at each snapped step. Horizontal movement is ignored (time is fixed). Release commits the pitch the note is showing. | Diatonic, key-signature aware (drag up from E in C major previews F, not E#). A drag is ONE undo step (coalesced), not one per crossed line. |
+  | Keyboard | **Up/Down = diatonic step** (key-sig aware). **Ctrl/Cmd+Up/Down = chromatic semitone** (raw +-1, the way you reach an accidental). **Shift+Up/Down = octave** (chosen over PageUp/PageDown so the modifier story is uniform: plain = diatonic, Ctrl = chromatic, Shift = octave; see conflicts note). | Same model edit as the drag; each keypress is its own undo step. |
+
+  **FALLING-NOTES surface (canvas piano-roll, NOT DOM noteheads), new in P1:**
+
+  The canvas is a semitone grid (each key column is a semitone), so the natural falling-surface model
+  is CHROMATIC, matching what the lane shows (it has no key signature, no staff lines; a bar is just
+  "this key"). This is the right asymmetry: the staff edits diatonically (its native unit is the
+  line/space), the roll edits chromatically (its native unit is the semitone/key). Folding in the old
+  Correct +/- nudge:
+
+  | Path | Gesture | Result |
+  | --- | --- | --- |
+  | Mouse | **Select a bar** (click, as P0/Correct already does via `hitTestBars`), then **vertical drag** the selected bar. The bar tracks the pointer and SNAPS to semitone rows (each row = one key); a faint target-key tint shows where it will land. Release commits. Horizontal drag is ignored (time fixed). A drag is ONE coalesced undo step. | Chromatic (+-1 semitone per row). Reuses the existing `nudgePitch` transform per snapped step under the hood, but committed as a single model edit on release. |
+  | Keyboard | **Plus/Minus = chromatic semitone up/down** (the existing Correct `+`/`-`/`=`/`_` bindings, now living in edit mode). **Up/Down stay SELECTION movement** on the canvas (as Correct mode uses them today: move the selection to the nearest earlier/later onset), so they do not clash. **Shift+Plus/Minus = octave** (a fast way to fix the common octave-off OMR error from the roll). | Each keypress is its own undo step. |
+
+  Why plus/minus for pitch on the canvas and arrows for pitch on the staff: the canvas already owns
+  Up/Down for selection stepping (Left/Right/Space are transport), so its pitch keys must be the
+  +/- pair, which is exactly the muscle memory Correct already taught. The staff is paused with no
+  transport stepping, so its arrows are free to mean pitch. Two surfaces, two idioms, each matching
+  what that surface already does. The plus/minus pitch keys also work on the staff as an alias (so a
+  user who learned them on the canvas is not punished), but the canvas does NOT alias arrows-for-pitch
+  (arrows are its selection nav). Document both in the aria-label per surface.
+
+  ### Decision P1-3 - LIVE SYNC: exactly what the user sees on the non-active surface, during and after
+
+  This is the heart of "single source of truth, two editable views". Define both phases precisely.
+
+  - **DURING a drag (the active surface previews; the mirror does NOT thrash).** While dragging on
+    one surface, only the ACTIVE surface shows the moving preview (the notehead gliding between lines,
+    or the bar gliding between key rows, with the snap tint). The mirror surface and the audio are NOT
+    updated per frame: a drag is a preview, and re-engraving the staff or rebuilding the Tone.Part 60
+    times a second while the user is still choosing a pitch is both wasteful and visually noisy on the
+    far surface. The mirror holds the PRE-DRAG state, lightly de-emphasized (see visual language) so it
+    reads as "this is about to change", and updates in one step on release. Rationale: Tech Lead's
+    re-render is single-digit ms so we COULD live-mirror, but the UX win of a calm mirror beats a
+    twitching one, and it keeps the model write to one atomic commit per gesture (which is also one
+    clean undo step). A keyboard pitch press is instantaneous (no drag), so it commits immediately and
+    both surfaces + audio update at once with no preview phase.
+  - **AFTER commit (release, or a keypress): both surfaces and audio update together, in one step.**
+    The model takes the edit, serializes, Verovio re-renders the staff, the `VisNote[]` re-derives and
+    the canvas redraws, and `reloadNotes` rebuilds the Tone.Part (it already pauses/restores the
+    transport so the swap is inaudible). The selection STAYS on the same model note on both surfaces
+    (the halo moves with it: the notehead is now on the new line, the bar is now in the new key row).
+    The change is announced once (Decision P1-5). Net: edit on either surface, and within one frame the
+    other surface shows the same note moved and the next Play will sound it at the new pitch.
+  - **"Hear it" stays available.** The older spec's Space-to-audition-selection / Shift+Space-loop-bar
+    assist applies to BOTH surfaces unchanged; after a pitch edit on the canvas you can tap it to hear
+    the fix just as on the staff. (Audition is scoped playback, not transport, so it does not trip the
+    "Play exits edit" rule.)
+
+  ### Decision P1-4 - CORRECT-MODE RETIREMENT without a capability gap (clear recommendation)
+
+  Correct mode does two things today: pitch-nudge (+/-) and delete. Edit mode P1 absorbs pitch-nudge
+  on BOTH surfaces. Edit mode does NOT yet have delete (that is P2). So:
+
+  - **RECOMMENDATION: remove the Correct toggle in P1 and carry its one missing capability (delete)
+    forward as a minimal edit-mode action, then remove Correct's code in P2 when model-level delete
+    lands.** Concretely, the no-regression path is:
+    1. **P1 (this slice): remove the `Correct` button from the toolbar** (delete the `#correct-btn`
+       markup + its toggle wiring). Edit mode is now the only editor. To avoid the delete capability
+       gap for the one release before P2, **carry delete as a minimal edit-mode action**: the existing
+       `deleteNote` transform already works on a VisNote index, and edit mode already has the selected
+       index, so wire **Delete/Backspace (and a small trash button in the edit cluster) to delete the
+       selected note in edit mode**. This is a tiny lift (the transform and the index both exist) and
+       it means shipping P1 loses NOTHING Correct could do except add (below). It also front-runs P2's
+       delete on the easy (VisNote-level) path; P2 then upgrades delete to the model-level fixed-bar
+       "leaves a rest" behavior the older spec describes.
+    2. **P2: replace the stopgap VisNote-delete with the model-level delete** (turns the note into a
+       rest of the same duration, fixed-bar) and DELETE the `note-edit.ts` Correct transforms +
+       `#note-edit` panel + all `correctMode` state from main.ts. Correct is fully gone.
+  - **Why not "keep both until P2":** the product owner directive is one editor. Two visible toggles
+    (Correct and Edit) that both pause playback and both select notes is exactly the confusion we are
+    told to remove, and Correct's falling-canvas selection would now COMPETE with edit mode's falling
+    selection on the same surface (two selection systems on one canvas). Removing the button in P1 and
+    carrying delete forward as a small reuse is strictly less code and zero capability loss. The only
+    thing P1 cannot do that Correct could is ADD a note; Correct's add was always marked minimal ("add
+    as unknown hand") and is low-traffic, so deferring add to P2 (where it gets a real model
+    representation) is acceptable and should be called out to the PM, not silently dropped.
+  - **Exact button/label changes:**
+    - **Remove** `#correct-btn` (the "Correct" toggle) entirely in P1.
+    - **Keep** `#edit-btn` ("Edit", `pencil-square` icon, `aria-pressed`). Update its title to reflect
+      that it is now THE editor: off = "Edit mode off. Click to fix wrong notes on the staff or the
+      falling notes."; on = "Edit mode on. Click to exit." (state-explicit, matching the #37 wording
+      rule). Drop "This view is read-only for now" from the on-enter announcement.
+    - **Re-home the edit cluster** (the +/- and delete controls) so it serves edit mode. P0 put the
+      staff edit affordances in the docked sheet toolbar; the falling surface needs its pitch controls
+      reachable too. Single rule: the edit cluster (readout + pitch down + pitch up + delete) is
+      shown whenever edit mode is on AND a note is selected, regardless of which surface the selection
+      came from, and it acts on the one shared selection. It can live in the docked sheet edit-toolbar
+      (the staff is always visible in edit mode) so there is ONE control cluster, not one per surface;
+      the canvas does not grow its own floating panel in P1 (keyboard +/- and drag cover the canvas,
+      and the shared cluster is on screen). This keeps the chrome to a single learnable place.
+
+  ### Decision P1-5 - VISUAL LANGUAGE for a pitch edit (per surface), snap feedback, and the "edited" marker question
+
+  - **Staff, during drag:** the dragged notehead glides vertically and snaps to each line/space; the
+    target line/space gets a faint brass wash (`--accent` at low alpha) the instant the note would land
+    there, so the snap is visible before release. The note keeps the `.ph-selected` halo throughout.
+    Accidentals that the new pitch implies are NOT drawn during the preview (avoid flicker); they
+    appear on the committed re-engrave. After commit: the note is simply engraved at the new pitch
+    (correct by construction); the halo stays on it.
+  - **Canvas, during drag:** the dragged bar glides vertically and snaps to key rows; the target KEY
+    on the keybed AND the target row tint faintly in the bar's own pitch hue (so the user sees both
+    "which key" and "which lane row"). The bar keeps the focus-ring + glow selection treatment. After
+    commit: the bar is redrawn in its NEW pitch hue (the falling colors are pitch-class keyed, so the
+    bar changes color to match its new pitch, which is itself strong confirmation the edit landed) at
+    the new key column, still selected.
+  - **The mirror during a drag:** de-emphasize the pre-edit note on the NON-active surface to ~55%
+    opacity (a quiet "this is mid-edit" state) so the user understands the mirror is stale-by-one-
+    gesture; restore to full on commit. This is cheap (one alpha on one element/bar) and only during
+    an active drag. For a keyboard press there is no drag, so no mirror de-emphasis is needed.
+  - **No permanent "edited" marker (CONFIRMED for dual-surface).** The older spec already argued the
+    staff needs no per-note divergence marker because it is correct by construction once re-engraved.
+    Under dual-surface this is even clearer: BOTH surfaces are now projections of the corrected model,
+    so neither diverges from "the truth" anymore (the model IS the truth). RETIRE the falling canvas's
+    dashed brass "edited" outline (the `note.edited` path in `drawFallingNotes` + the `edited` flag on
+    VisNote + the "Edited. The sheet below still shows the original scan." status line): it described a
+    divergence that no longer exists once the staff re-renders from the same model. The OPTIONAL
+    "show original scan ghost" toggle from the older spec remains the right way to compare against the
+    raw OMR (opt-in triage, not a permanent warning); it is not part of P1 but stays on the roadmap.
+    Decision: P1 SHIPS WITHOUT any permanent edited marker on either surface; remove the dashed
+    outline + status line as part of the Correct retirement.
+
+  ### Decision P1-6 - UNDO / REDO UX (required)
+
+  Undo/redo is mandatory in P1 (Tech Lead builds the command stack from day one). Design:
+
+  - **Controls: two icon buttons in the docked sheet edit-toolbar**, a left-curving arrow (undo) and a
+    right-curving arrow (redo), grouped together at the LEADING edge of the toolbar (before the pitch
+    cluster) so they are in the conventional top-left "history" spot and do not move when the
+    per-selection cluster shows/hides. Heroicons `arrow-uturn-left` / `arrow-uturn-right`, ghost-button
+    styling, 44px tap targets on phone (#33/#84).
+  - **Keyboard: Ctrl/Cmd+Z = undo, Ctrl/Cmd+Shift+Z = redo, and Ctrl/Cmd+Y = redo too** (Windows
+    muscle memory). These are active whenever edit mode is on (not gated on a selection, since undo
+    must work after a delete cleared the selection) and ignored while a form field is focused (the
+    rename input stays safe). They `preventDefault` so the browser's own undo does not also fire.
+  - **Scope: a drag is ONE undo step** (coalesced on release); each discrete keyboard pitch step is its
+    own step; delete is one step. Undo restores BOTH surfaces and audio together (it is just another
+    model mutation routed through the same re-render/re-derive/reloadNotes path) and RESTORES the
+    selection to the affected note where it still exists (after undoing a delete, the note returns
+    selected; after undoing a pitch move, the note is selected at its prior pitch).
+  - **Disabled states:** undo disabled (`disabled` + `aria-disabled="true"`) when the undo stack is
+    empty (fresh load, nothing done yet); redo disabled when the redo stack is empty (nothing undone,
+    or a new edit cleared the redo branch). The buttons visibly dim when disabled (ghost-disabled
+    styling) so the user can see whether there is history to move through.
+  - **Aria announcements (polite, the shared edit-live region):** each undo announces what it reversed,
+    "Undid raise to E4" / "Undid delete of C4"; each redo announces "Redid raise to E4". When a stack
+    is empty and the key is pressed, announce "Nothing to undo" / "Nothing to redo" rather than going
+    silent, so a keyboard/SR user knows the press registered. The button disabled state covers the
+    pointer user; the announcement covers the keyboard user who pressed the shortcut anyway.
+
+  ### Decision P1-7 - ACCESSIBILITY: both surfaces fully keyboard-drivable, every pitch change announced
+
+  - **Both surfaces are focusable application regions in edit mode.** P0 already makes the staff pane a
+    keyboard target and Correct already makes the canvas `role="application" tabindex="0"`. In edit
+    mode, the CANVAS keeps that treatment (so its +/- pitch, Up/Down selection, octave, delete, and
+    undo/redo all work from the keyboard with no pointer), and the staff pane keeps its P0 treatment
+    (arrows = diatonic/chromatic/octave pitch, Left/Right = selection step). Tab moves focus between
+    the two surfaces and the edit toolbar, so a keyboard user can choose which surface to edit on and
+    drive it fully. Each surface's `aria-label` enumerates ITS keys (the canvas: "Up and down select a
+    note; plus and minus change its pitch by a semitone; Shift with plus or minus moves an octave;
+    Delete removes it; Ctrl Z undoes." / the staff: "Left and right select a note; up and down change
+    its pitch by a step; Ctrl with up or down changes by a semitone; Shift with up or down by an
+    octave; Delete removes it; Ctrl Z undoes.").
+  - **ONE shared live region for edits, replacing the two P0 regions.** P0 has `#edit-live` (canvas)
+    and `#staff-edit-live` (staff) as separate polite regions, which made sense when they were two
+    independent selections. Dual-surface has ONE selection and ONE history, so collapse to ONE polite
+    `aria-live` region for all edit/selection/undo announcements (keep a single id, e.g. reuse
+    `#edit-live`; remove `#staff-edit-live`). This prevents the double-announce that two regions would
+    produce when one model change updates both surfaces.
+  - **Pitch-change announcements name the FROM and the TO pitch.** Required form: "D4 up to E4" (and
+    "E4 down to D4", "C4 up an octave to C5"). This is more informative than P0/Correct's "Raised to
+    D4" because it states the starting note too, which a non-sighted user needs to confirm the right
+    note moved. Use the current Names mode (solfege/letters) for the pitch tokens so the announcement
+    matches what is on screen. Selection announces "Selected D4, right hand" (name + hand, as Correct
+    does). Snap during a drag is not announced per step (too chatty); only the committed result is.
+  - **Undo/redo announcements** as in P1-6. Focus ring = shared `--focus-ring`. Reduced-motion: the
+    selection halos and any snap tint are static (no animation/pulse), matching #86/#6.
+
+  ### Tokens / classes (P1 deltas on top of the older spec's list)
+  - Reuse `--accent`, `--accent-glow`, `--focus-ring`, `--on-accent`; canvas selection + staff
+    `.ph-selected` are already wired.
+  - **New:** a canvas drag-preview state (the gliding bar + target-key/row tint) and a staff
+    drag-preview (gliding notehead + target line/space wash); the mirror de-emphasis is a transient
+    ~55% alpha on the non-active surface's selected element during a drag only.
+  - **New:** undo/redo buttons (`arrow-uturn-left`/`-right`, ghost styling, disabled states) in the
+    docked edit-toolbar, leading edge.
+  - **Removed:** `#correct-btn` + `.correct-toggle` wiring; the `note.edited` dashed outline +
+    `VisNote.edited` flag + the "Edited..." status line; `#staff-edit-live` (collapse into `#edit-live`).
+    `note-edit.ts` Correct transforms survive only as the P1 delete stopgap, removed at P2.
+  - Edit state in main.ts: ONE shared `selectedIndex` (model note), `editMode`, drag state per surface,
+    and the command/undo stack (Tech Lead owns the stack shape).
+
+  ### Open decisions to flag to the main agent / product owner
+  1. **ADD-a-note is deferred to P2.** P1 covers pitch on both surfaces and carries delete forward, but
+     it does NOT add notes (Correct's minimal add retires with Correct). Confirm that losing "add a
+     note" for the one release between P1 and P2 is acceptable; it is low-traffic and gets a proper
+     model-level representation in P2. (Recommendation: acceptable.)
+  2. **Drag previews the active surface only; the mirror updates on release, not per frame.** I chose a
+     calm mirror over a live-twitching one even though the re-render is fast enough to live-mirror.
+     Confirm that "the other surface updates when you let go, not while you are still dragging" matches
+     the product-owner's mental model of "instantly updates the other"; instant-on-commit is what I
+     read the directive to mean for a continuous gesture, and discrete keypress edits ARE instant on
+     both surfaces. If the owner wants the mirror to track mid-drag, it is a small change (drop the
+     debounce) but noisier; flagging the deliberate choice.
+  3. **Surface asymmetry: staff edits DIATONICALLY, canvas edits CHROMATICALLY** (each matching its
+     native unit, with modifiers for the other axis). Confirm this asymmetry is wanted rather than
+     forcing both to the same model; I believe it is correct because the surfaces ARE different
+     instruments, but it is a learnable difference worth ratifying.
+  4. **Keybinding modifiers (carried from the older open item, narrowed to pitch):** plain arrows =
+     diatonic (staff), plus/minus = chromatic (canvas + staff alias), Shift = octave, Ctrl/Cmd =
+     chromatic on the staff arrows. Confirm Shift=octave (vs PageUp/PageDown) is the preferred octave
+     modifier for a uniform plain/Ctrl/Shift story.
+
 ## Smart Edit Mode: edit the staff directly, sheet becomes source of truth (epic interaction spec)
 
 - **2026-06-04 - Interaction + visual spec for "Smart Edit Mode": a simplified MuseScore-style

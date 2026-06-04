@@ -5,6 +5,7 @@ import {
   fitBarLabel,
   isBlackKey,
   isHandMuted,
+  keyAtX,
   keyLabelFits,
   labelableFallingNotes,
   midiToLabel,
@@ -31,10 +32,15 @@ export interface VisNote {
   // for a "Db". Drives the label NAME only (color, octave, and geometry stay MIDI-driven).
   // Absent for audio-transcribed scores, which fall back to the always-sharp name.
   spelling?: NoteSpelling;
-  // Set true by the OMR correction transforms (issue #6) when the user has nudged or otherwise
-  // changed this note away from the scan. drawFallingNotes outlines an edited bar with a thin
-  // dashed brass border so the divergence from the (authoritative, unchanged) sheet is legible.
-  edited?: boolean;
+}
+
+// A transient pitch-drag preview on the falling canvas (Smart Edit Mode P1): while the user
+// drags a selected bar sideways to a new key, the bar is drawn at `previewMidi`'s column (NOT
+// its model pitch) with the target key tinted, until release commits the edit. `index` is into
+// the current notes. Null = no drag in progress.
+export interface DragPreview {
+  index: number;
+  previewMidi: number;
 }
 
 // Geometry of one falling bar in canvas px, computed purely from the layout + a note's time
@@ -146,9 +152,15 @@ export class Visualizer {
   // and so the run-dedupe / per-hand-consistency decision is made once, not every frame.
   private labelableNote: boolean[] = [];
   private mutedHands = { left: false, right: false };
-  // Index of the note selected in Correct mode (issue #6), or null when nothing is selected.
+  // Index of the note selected in edit mode (Smart Edit P1), or null when nothing is selected.
   // A selected bar gets a solid focus-ring outline + brass halo so the edit target is obvious.
   private selectedIndex: number | null = null;
+  // Transient pitch-drag preview (Smart Edit P1): the selected bar is drawn at a preview key
+  // while the user drags it, until release commits the model edit. Null = no drag.
+  private dragPreview: DragPreview | null = null;
+  // When the canvas is the de-emphasized MIRROR during a drag on the OTHER surface (the staff),
+  // its selected bar dims to ~55% so it reads as "about to change" (Designer P1-5). Null = full.
+  private mirrorDeemphasisIndex: number | null = null;
   private width = 0;
   private height = 0;
   private dpr = 1;
@@ -182,10 +194,30 @@ export class Visualizer {
     this.labelMode = mode;
   }
 
-  // Mark the selected note for the correction UI (issue #6); null clears the selection. The
+  // Mark the selected note for edit mode (Smart Edit P1); null clears the selection. The
   // index is into the current `notes`; the caller is responsible for passing a valid index.
   setSelected(index: number | null): void {
     this.selectedIndex = index;
+  }
+
+  // Set (or clear) the transient pitch-drag preview (Smart Edit P1). While set, the previewed
+  // bar is drawn at `previewMidi`'s key column with that key tinted, until the caller commits
+  // the model edit and clears the preview.
+  setDragPreview(preview: DragPreview | null): void {
+    this.dragPreview = preview;
+  }
+
+  // De-emphasize the selected bar to the mirror state (~55% alpha) while a drag is happening on
+  // the OTHER surface (the staff). null restores full opacity. Pass the selected index so only
+  // that bar dims.
+  setMirrorDeemphasis(index: number | null): void {
+    this.mirrorDeemphasisIndex = index;
+  }
+
+  // The MIDI of the key column under a canvas x coordinate, or null outside the keybed. Used by
+  // the canvas pitch drag to snap the dragged bar to the key under the pointer.
+  midiAtX(px: number): number | null {
+    return keyAtX(this.keys, px);
   }
 
   // Build the current bar layout (key columns + scale) so the pure hit-test sees exactly the
@@ -272,6 +304,25 @@ export class Visualizer {
 
     this.drawFallingNotes(currentTime, keyboardTop, pps);
     this.drawKeyboard(keyboardTop, active, approaching);
+    this.drawDragTargetKey(keyboardTop);
+  }
+
+  // Tint the target KEY in the dragged bar's pitch hue while a canvas pitch drag is in progress
+  // (Smart Edit P1), so the user sees which key the bar will land on, not just the lane column.
+  // Drawn over the keybed after the keyboard so it reads as a highlight on the target key.
+  private drawDragTargetKey(keyboardTop: number): void {
+    if (!this.dragPreview) return;
+    const key = this.keyByMidi.get(this.dragPreview.previewMidi);
+    if (!key) return;
+    const { ctx } = this;
+    const colors = noteColor(this.dragPreview.previewMidi);
+    const kbH = this.keyboardHeight;
+    const h = key.black ? kbH * 0.62 : kbH;
+    ctx.save();
+    ctx.globalAlpha = 0.55;
+    ctx.fillStyle = key.black ? colors.activeBlackKey : colors.activeWhiteKey;
+    ctx.fillRect(key.x, keyboardTop, key.width, h);
+    ctx.restore();
   }
 
   private drawFallingNotes(
@@ -298,16 +349,23 @@ export class Visualizer {
       const delta = note.time - currentTime;
       if (delta > LOOK_AHEAD || delta + note.duration < 0) continue; // off-screen
 
+      // Pitch-drag preview (Smart Edit P1): while this bar is being dragged to a new key, draw
+      // it at the PREVIEW pitch's column + hue (time is unchanged), so the user sees where it
+      // will land before release. Only the horizontal position / color use the preview midi;
+      // the vertical (time) window stays the note's own.
+      const renderMidi =
+        this.dragPreview?.index === i ? this.dragPreview.previewMidi : note.midi;
+
       // On narrow screens the visible keyboard is a sub-window of the 88 keys (issue #33).
       // Notes outside the window clamp to the nearest edge column and draw dimmed so the
       // player still sees them coming without them vanishing.
       const offRange =
-        note.midi < this.firstVisibleMidi || note.midi > this.lastVisibleMidi;
+        renderMidi < this.firstVisibleMidi || renderMidi > this.lastVisibleMidi;
       const lookupMidi = offRange
-        ? note.midi < this.firstVisibleMidi
+        ? renderMidi < this.firstVisibleMidi
           ? this.firstVisibleMidi
           : this.lastVisibleMidi
-        : note.midi;
+        : renderMidi;
       const key = this.keyByMidi.get(lookupMidi);
       if (!key) continue;
 
@@ -315,13 +373,13 @@ export class Visualizer {
       const bottom = keyboardTop - delta * pps;
       const top = bottom - barHeight;
 
-      const black = isBlackKey(note.midi);
+      const black = isBlackKey(renderMidi);
       const w = noteBarWidth(key.width, black);
       const x = key.x + (key.width - w) / 2;
 
       // Per-pitch-class colors come from a precomputed table (no per-bar string
       // building). Active bars get a brighter fill and a wider glow.
-      const colors = noteColor(note.midi);
+      const colors = noteColor(renderMidi);
       // Active fill is per-note, gated on this bar's own time window (issue #131), not the
       // per-pitch `active` set, so a same-pitch bar still in flight stays inactive until it
       // arrives. `active` (pitch-keyed) is still passed through for the keyboard-key lights.
@@ -332,6 +390,9 @@ export class Visualizer {
       let alpha = 1;
       if (offRange) alpha = 0.35;
       if (muted) alpha = Math.min(alpha, 0.3);
+      // Mirror de-emphasis (Smart Edit P1): when a drag is happening on the staff, the canvas is
+      // the stale mirror, so its selected bar dims to ~55% until the edit commits.
+      if (this.mirrorDeemphasisIndex === i) alpha = Math.min(alpha, 0.55);
       ctx.globalAlpha = alpha;
       ctx.fillStyle = isActive
         ? colors.activeFill
@@ -366,22 +427,7 @@ export class Visualizer {
         ctx.fillRect(x + 1, top + 1 + capH, w - 2, 1);
       }
 
-      // Edited-note divergence outline (issue #6): a thin DASHED brass border on any bar the
-      // user changed (pitch nudge), drawn AFTER the body fill and independent of the #27 contact
-      // stroke and #131 active fill. It marks where the falling-notes model now disagrees with
-      // the authoritative, unchanged sheet below. Persistent (not gated on contact), no glow.
-      if (note.edited) {
-        ctx.save();
-        ctx.shadowBlur = 0;
-        ctx.lineWidth = 1.5;
-        ctx.strokeStyle = "#d8a23a"; // --accent (brass)
-        ctx.setLineDash([4, 3]);
-        this.roundRect(x, top, w, barHeight, 4);
-        ctx.stroke();
-        ctx.restore();
-      }
-
-      // Selection outline + halo (issue #6): the note picked in Correct mode gets a solid 2px
+      // Selection outline + halo (Smart Edit P1): the note picked in edit mode gets a solid 2px
       // focus-ring border and a soft brass halo so the edit target reads clearly. Drawn on the
       // real (non-clamped) bar only; the selection survives play being paused.
       if (this.selectedIndex === i) {
