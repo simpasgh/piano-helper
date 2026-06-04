@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it, expect, beforeAll } from "vitest";
+import { CIRCLE_OF_FIFTHS, buildKeyOptionButton, keyRowLabel } from "./key-names";
 
 // Regression for the LARGE-score edit-toolbar disappearance (root-caused in a browser on the
 // user's 185-note reverie): #edit-toolbar used to be nested INSIDE #sheet. OSMD owns #sheet and an
@@ -202,6 +203,90 @@ describe("Save / Discard commit controls (Smart Edit COMMIT v1) live in the edit
     for (const b of [save, discard]) {
       expect(b.getAttribute("title") ?? "").not.toContain("—");
       expect(b.getAttribute("aria-label") ?? "").not.toContain("—");
+    }
+  });
+});
+
+describe("Key-signature pill (Smart Edit SIGNATURE EDITING, SIG-2) lives in the edit toolbar", () => {
+  it("has #key-sig-btn inside #edit-toolbar (not in OSMD's #sheet)", () => {
+    const pill = doc.getElementById("key-sig-btn");
+    expect(pill, "#key-sig-btn should exist").not.toBeNull();
+    expect(editToolbar.contains(pill!)).toBe(true);
+    // Same OSMD-cannot-detach invariant as the rest of the toolbar (it is a #sheet sibling).
+    expect(sheet.contains(pill)).toBe(false);
+  });
+
+  it("sits in a signatures group BETWEEN #add-note and the commit group (history | selection | signatures | commit)", () => {
+    const pill = doc.getElementById("key-sig-btn") as HTMLElement;
+    const sigGroup = pill.closest(".edit-sig-group") as HTMLElement;
+    expect(sigGroup, ".edit-sig-group should wrap the pill").not.toBeNull();
+    const kids = Array.from(editToolbar.children);
+    const addNote = doc.getElementById("add-note") as HTMLElement;
+    const commit = editToolbar.querySelector(".edit-commit-group") as HTMLElement;
+    expect(kids.indexOf(sigGroup)).toBeGreaterThan(kids.indexOf(addNote));
+    expect(kids.indexOf(sigGroup)).toBeLessThan(kids.indexOf(commit));
+  });
+
+  it("is a labeled PILL that opens a dialog popover (aria-haspopup, aria-expanded, aria-controls)", () => {
+    const pill = doc.getElementById("key-sig-btn") as HTMLButtonElement;
+    expect(pill.getAttribute("aria-haspopup")).toBe("dialog");
+    expect(pill.getAttribute("aria-expanded")).toBe("false"); // starts closed
+    expect(pill.getAttribute("aria-controls")).toBe("key-sig-menu");
+    // The pill carries the brass text variant class + the current key as readable text.
+    expect(pill.classList.contains("edit-sig-btn")).toBe(true);
+    expect(doc.getElementById("key-sig-label")?.textContent).toBe("C major"); // seeded label
+  });
+
+  it("seeds the aria-label as the current key with no em dash (SIG-5 spoken name)", () => {
+    const pill = doc.getElementById("key-sig-btn") as HTMLButtonElement;
+    expect(pill.getAttribute("aria-label")).toBe("Key signature: C major. Change the key.");
+    expect(pill.getAttribute("aria-label") ?? "").not.toContain("—");
+    expect(pill.getAttribute("title") ?? "").not.toContain("—");
+  });
+
+  it("has an empty popover container (role=dialog, hidden) anchored in the signatures wrap", () => {
+    const menu = doc.getElementById("key-sig-menu") as HTMLElement;
+    expect(menu, "#key-sig-menu should exist").not.toBeNull();
+    expect(menu.getAttribute("role")).toBe("dialog");
+    expect(menu.hasAttribute("hidden")).toBe(true);
+    expect(menu.children.length).toBe(0); // rows are built at runtime in main.ts
+    expect(sheet.contains(menu)).toBe(false);
+  });
+});
+
+describe("Key-signature popover OPTIONS (built via the shared builder, SIG-4)", () => {
+  // The rows are built at runtime in main.ts from buildKeyOptionButton; test that builder directly so
+  // the option structure (incl. aria-checked on the current key) is pinned without main.ts side effects.
+  it("builds 15 keys from 7 flats to 7 sharps in circle-of-fifths order", () => {
+    expect(CIRCLE_OF_FIFTHS).toHaveLength(15);
+    expect(CIRCLE_OF_FIFTHS[0].fifths).toBe(-7);
+    expect(CIRCLE_OF_FIFTHS[14].fifths).toBe(7);
+    // Strictly increasing fifths (the circle-of-fifths layout flats..natural..sharps).
+    for (let i = 1; i < CIRCLE_OF_FIFTHS.length; i++) {
+      expect(CIRCLE_OF_FIFTHS[i].fifths).toBe(CIRCLE_OF_FIFTHS[i - 1].fifths + 1);
+    }
+  });
+
+  it("each option carries aria-checked (true only for the current key) + the spoken row label", () => {
+    const d = new DOMParser().parseFromString("<!doctype html><html><body></body></html>", "text/html");
+    // The current key is C major (fifths 0); build the row for it CHECKED and a neighbour UNCHECKED.
+    const current = buildKeyOptionButton(d, 0, true);
+    const other = buildKeyOptionButton(d, 2, false);
+    expect(current.getAttribute("aria-checked")).toBe("true");
+    expect(other.getAttribute("aria-checked")).toBe("false");
+    // The spoken label leads with the accidental count + both names (SIG-4).
+    expect(current.getAttribute("aria-label")).toBe("no sharps or flats, C major or A minor");
+    expect(other.getAttribute("aria-label")).toBe("2 sharps, D major or B minor");
+    // data-fifths stores the value the click applies; the row is a radio option.
+    expect(current.dataset.fifths).toBe("0");
+    expect(other.getAttribute("role")).toBe("menuitemradio");
+  });
+
+  it("every key row's spoken label is em-dash-free (project style rule)", () => {
+    for (const k of CIRCLE_OF_FIFTHS) {
+      const label = keyRowLabel(k.fifths);
+      expect(label).not.toContain("—");
+      expect(label).not.toContain("–");
     }
   });
 });

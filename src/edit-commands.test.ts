@@ -11,6 +11,7 @@ import {
   type DeleteNoteCommand,
   type AddNoteCommand,
   type ChangeDurationCommand,
+  type SetKeyCommand,
 } from "./edit-commands";
 import type {
   AddRecord,
@@ -18,6 +19,7 @@ import type {
   DeleteRecord,
   ModelPitch,
   ScoreModel,
+  SetKeyRecord,
 } from "./edit-model";
 
 const p = (step: ModelPitch["step"], octave: number, alter = 0): ModelPitch => ({
@@ -38,6 +40,9 @@ function stubModel(): ScoreModel & {
   removed: AddRecord[];
   durationChanges: { id: number; direction: "shorter" | "longer" | "dot" }[];
   durationRestores: ChangeDurationRecord[];
+  keyChanges: number[];
+  keyRestores: SetKeyRecord[];
+  currentFifths: number;
 } {
   const pitches = new Map<number, ModelPitch>();
   const deleted: number[] = [];
@@ -46,7 +51,9 @@ function stubModel(): ScoreModel & {
   const removed: AddRecord[] = [];
   const durationChanges: { id: number; direction: "shorter" | "longer" | "dot" }[] = [];
   const durationRestores: ChangeDurationRecord[] = [];
-  return {
+  const keyChanges: number[] = [];
+  const keyRestores: SetKeyRecord[] = [];
+  const self = {
     pitches,
     deleted,
     restored,
@@ -54,6 +61,9 @@ function stubModel(): ScoreModel & {
     removed,
     durationChanges,
     durationRestores,
+    keyChanges,
+    keyRestores,
+    currentFifths: 0,
     handles: [],
     restHandles: [],
     fifthsForHandle: () => 0,
@@ -107,8 +117,23 @@ function stubModel(): ScoreModel & {
       durationRestores.push(record);
     },
     dotState: () => ({ dotted: false, canToggle: true }),
+    initialFifths: () => self.currentFifths,
+    setKeyFifths: (newFifths: number): SetKeyRecord | null => {
+      // A no-op when the key is unchanged (mirrors the real model, so a SetKeyCommand with after ==
+      // current pushes no real edit). Otherwise record the change + advance the stub's current key.
+      if (newFifths === self.currentFifths) return null;
+      keyChanges.push(newFifths);
+      const old = self.currentFifths;
+      self.currentFifths = newFifths;
+      return { oldFifths: old, newFifths, measures: [], changedCount: 0 };
+    },
+    restoreKey: (record: SetKeyRecord) => {
+      keyRestores.push(record);
+      self.currentFifths = record.oldFifths; // invert: back to the prior key
+    },
     serialize: () => "",
   };
+  return self;
 }
 
 const setPitch = (handleId: number, before: ModelPitch, after: ModelPitch): SetPitchCommand => ({
@@ -141,6 +166,13 @@ const changeDuration = (
   kind: "changeDuration",
   handleId,
   direction,
+  record: null,
+});
+
+const setKey = (before: number, after: number): SetKeyCommand => ({
+  kind: "setKey",
+  before,
+  after,
   record: null,
 });
 
@@ -436,5 +468,77 @@ describe("ChangeDurationCommand via pushApplied (a no-op model edit is never rec
     expect(stack.canRedo()).toBe(true);
     // ... a no-op duration press happens here but pushes nothing ...
     expect(stack.canRedo()).toBe(true); // the redo future is intact
+  });
+});
+
+describe("SetKeyCommand (apply / invert / stack) - the key-signature edit", () => {
+  it("apply rewrites the key via the model and stashes the record; invert restores the prior key", () => {
+    const model = stubModel(); // starts at fifths 0 (C major)
+    const cmd = setKey(0, 2); // C major -> D major
+    applyCommand(model, cmd);
+    expect(model.keyChanges).toEqual([2]); // routed through model.setKeyFifths
+    expect(model.currentFifths).toBe(2);
+    expect(cmd.record).not.toBeNull();
+    expect(cmd.record?.oldFifths).toBe(0);
+    expect(cmd.record?.newFifths).toBe(2);
+    const captured = cmd.record;
+    invertCommand(model, cmd);
+    expect(model.keyRestores).toEqual([captured]); // restoreKey got the captured record
+    expect(model.currentFifths).toBe(0); // back to C major
+  });
+
+  it("push applies a key change and undo restores it (round-trip through the stack)", () => {
+    const model = stubModel();
+    const stack = new CommandStack(model);
+    stack.push(setKey(0, -3)); // C major -> E flat major
+    expect(model.currentFifths).toBe(-3);
+    expect(stack.canUndo()).toBe(true);
+    stack.undo();
+    expect(model.keyRestores.length).toBe(1);
+    expect(model.currentFifths).toBe(0);
+    expect(stack.canRedo()).toBe(true);
+  });
+
+  it("redo re-applies, re-deriving a fresh record (the rewrite is deterministic)", () => {
+    const model = stubModel();
+    const stack = new CommandStack(model);
+    const cmd = setKey(0, 4); // C major -> E major
+    stack.push(cmd);
+    const recordAfterPush = cmd.record;
+    stack.undo();
+    expect(model.currentFifths).toBe(0);
+    stack.redo();
+    expect(model.currentFifths).toBe(4);
+    expect(model.keyChanges).toEqual([4, 4]); // applied on push AND on redo
+    expect(cmd.record).not.toBeNull();
+    expect(cmd.record).not.toBe(recordAfterPush); // a fresh record, not the stale one
+  });
+
+  it("pushApplied records a directly-run key edit without re-applying it (mirrors the orchestrator)", () => {
+    // main.ts runs model.setKeyFifths DIRECTLY (so a no-op does not push), then records via
+    // pushApplied. The model is already mutated; pushApplied must not run it again.
+    const model = stubModel();
+    const stack = new CommandStack(model);
+    const cmd = setKey(0, 2);
+    cmd.record = model.setKeyFifths(cmd.after); // the direct (already-applied) edit
+    expect(model.keyChanges).toEqual([2]); // applied ONCE
+    expect(model.currentFifths).toBe(2);
+    stack.pushApplied(cmd);
+    expect(model.keyChanges).toHaveLength(1); // pushApplied did not re-apply
+    stack.undo();
+    expect(model.currentFifths).toBe(0); // undo still reverses it
+  });
+
+  it("a key edit then a pitch edit, both undone in LIFO order, route to the right model calls", () => {
+    const model = stubModel();
+    const stack = new CommandStack(model);
+    stack.push(setKey(0, 1)); // C major -> G major
+    stack.push(setPitch(5, p("C", 4), p("D", 4)));
+    expect(model.currentFifths).toBe(1);
+    expect(model.pitches.get(5)).toEqual(p("D", 4));
+    stack.undo(); // undoes the pitch edit first
+    expect(model.pitches.get(5)).toEqual(p("C", 4));
+    stack.undo(); // then the key edit
+    expect(model.currentFifths).toBe(0);
   });
 });

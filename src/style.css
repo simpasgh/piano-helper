@@ -1605,6 +1605,110 @@ button:focus-visible,
   cursor: default;
 }
 
+/* SIGNATURE EDITING (SIG-2): the key-signature PILL is a WIDER text variant of the ghost icon button.
+   Unlike the 32px icon squares it reads its current value as text + a trailing caret, so it auto-sizes
+   (auto width, horizontal padding) while keeping the same height, border, fill, ink, and focus ring so
+   it sits flush in the strip. The popover anchors to .edit-sig-wrap (position: relative) like the
+   export menu. */
+.edit-sig-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.edit-sig-btn {
+  width: auto;
+  gap: 0.3rem;
+  padding: 0 0.6rem;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.edit-sig-caret {
+  flex: none;
+  opacity: 0.8;
+}
+
+/* The key picker popover: same `--bar-surface` panel + open animation as the export menu, anchored
+   under the pill. The `:not([hidden])` guard is load-bearing (a bare display:flex would override the
+   native [hidden] -> display:none, exactly like .export-menu / .hand-mutes). */
+.edit-sig-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  min-width: 240px;
+  max-width: calc(100vw - 24px);
+  max-height: min(60vh, 360px);
+  overflow-y: auto;
+  padding: 6px;
+  background: var(--bar-surface);
+  border: 1px solid var(--bar-border);
+  border-radius: 8px;
+  box-shadow: 0 12px 30px rgba(8, 6, 3, 0.5);
+}
+
+.edit-sig-menu:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  animation: export-pop 120ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .edit-sig-menu:not([hidden]) {
+    animation: none;
+  }
+}
+
+/* Each key is a full-width ghost row: a leading check column (filled only on the current key) + the
+   key name (accidental count, major or relative minor). Mirrors .export-item's look. */
+.edit-sig-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.45rem 0.55rem;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.edit-sig-item:hover,
+.edit-sig-item:focus-visible {
+  background: var(--ghost-bg-hover);
+  color: #fbf6ea;
+  outline: none;
+}
+
+/* The check column: a brass tick reserved as a fixed-width gutter so names align; shown only on the
+   current (aria-checked) key. */
+.edit-sig-check {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  opacity: 0;
+  color: var(--accent);
+}
+
+.edit-sig-item[aria-checked="true"] .edit-sig-check {
+  opacity: 1;
+}
+
+.edit-sig-item[aria-checked="true"] {
+  font-weight: 700;
+}
+
 /* Compact per-selection cluster (Smart Edit P1): shown only when a note is selected (main.ts
    toggles [hidden]). The `:not([hidden])` guard mirrors the hand-mutes group so the native
    [hidden] -> display:none is not clobbered by display:flex. */
