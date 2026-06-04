@@ -52,6 +52,16 @@ except Exception as exc:  # pragma: no cover - exercised only in a numpy/scipy/P
 
 import llm_omr  # PURE stdlib MusicXML builder; always importable.
 
+# The shared 18-class symbol taxonomy is the SINGLE source of truth (synth_render.CLASS_NAMES, per
+# the roadmap), used by the full-symbol decode below to turn the detector's class INDICES into glyph
+# roles. synth_render imports verovio under a guard, so this is safe even on a verovio-less box
+# (CLASS_NAMES is pure data). Guarded so a degenerate env still imports geom_omr (the pitch-only
+# path is unaffected; the full-symbol decode then declines safely on an empty taxonomy).
+try:
+    from synth_render import CLASS_NAMES  # noqa: E402
+except Exception:  # pragma: no cover - synth_render is a committed sibling; this is belt-and-braces
+    CLASS_NAMES = []
+
 
 # --- Pitch geometry (PURE: no numpy needed, runs everywhere) -----------------------------
 
@@ -749,3 +759,447 @@ def _segment_to_measures(treble, bass, barlines) -> List[dict]:
         return _chords_to_measures([p for (_x, p) in treble], [p for (_x, p) in bass])
     except Exception:
         return []
+
+
+# --- Full-symbol decode: durations / key / accidentals / clefs / rests FROM glyphs --------
+#
+# The trained MULTI-CLASS detector (geom_detector) finds EVERY glyph, not just notehead centers:
+# heads (filled/open), stems, flags, beams, dots, the 5 accidentals, clefs (g/f/c), rests, the
+# time-sig, ties, and ottava. This decode READS the musical content from those glyphs by geometry
+# ("measure, do not predict"), extending the exact pitch decode to:
+#   - DURATIONS: head fill (open vs filled) + stem presence + beam/flag COUNT + augmentation dots.
+#   - KEY SIGNATURE: the run of accidental glyphs between the clef and the first notehead.
+#   - per-note ACCIDENTALS: an accidental glyph immediately left of a head overrides the keyed alter.
+#   - CLEFS: the leftmost clef glyph sets each staff-region's pitch reference (no treble/bass-by-
+#     index assumption); a later clef glyph is a mid-score clef CHANGE from that x onward.
+#   - RESTS: rest glyphs become rest events placed by x.
+# It SHARES the pitch decode (decode_pitch), interline, barline segmentation (detect_barlines), the
+# key prior (keyed_alter), and the MusicXML builder with the notehead-only path. The geometric
+# basis is measured in ~/omr-train/inspect_geom.py (see memory full-symbol-duration-geometry):
+# fill+stem give whole/half/quarter cleanly; the 8th-vs-16th subdivision rides on beam/flag count
+# and is detector-quality-dependent, so it is gated on the real-score eval, not synthetic.
+# NEVER raises (the public entry guards; helpers are defensive).
+
+# accidental class name -> chromatic alter, and the inverse for the engraved <accidental> glyph.
+_ACCID_ALTER = {
+    "accidental_sharp": 1, "accidental_flat": -1, "accidental_natural": 0,
+    "accidental_double_sharp": 2, "accidental_double_flat": -2,
+}
+_ALTER_GLYPH = {2: "double-sharp", 1: "sharp", 0: "natural", -1: "flat", -2: "double-flat"}
+# base note value -> ticks at divisions=4 (1 tick == one sixteenth). 32nd is not representable at
+# divisions=4 (load-bearing for the fusion), so it clamps to a 16th (32nds are rare in piano).
+_DUR_TICKS = {"whole": 16, "half": 8, "quarter": 4, "eighth": 2, "16th": 1, "32nd": 1}
+_LEVEL_TYPE = {0: "quarter", 1: "eighth", 2: "16th", 3: "32nd"}
+_CLEF_LINE = {"G": 2, "F": 4, "C": 3}
+
+
+def decode_note_duration(filled, has_stem, n_beams=0, n_flags=0, n_dots=0):
+    """Map the measured glyphs around a notehead to (type_name, dots, ticks-at-divisions-4). PURE.
+    From the rendered geometry: head FILL splits open (whole/half) from filled (quarter and
+    shorter); STEM splits whole (none) from half; beam/flag COUNT gives the subdivision; DOTS
+    multiply (1 dot x1.5, 2 dots x1.75). NEVER raises."""
+    try:
+        nd = max(0, min(int(n_dots), 2))
+        if not filled:
+            type_name = "half" if has_stem else "whole"
+        else:
+            level = max(int(n_beams), int(n_flags))
+            type_name = _LEVEL_TYPE.get(min(level, 3), "16th") if level > 0 else "quarter"
+        base = _DUR_TICKS.get(type_name, 4)
+        ticks = base if nd == 0 else int(round(base * (2.0 - 0.5 ** nd)))
+        return type_name, nd, max(1, ticks)
+    except Exception:
+        return "quarter", 0, 4
+
+
+def _assign_symbols_to_staves(symbols, staves, max_interlines: float = 8.0):
+    """Assign every detected symbol (cls, x, y, w, h[, conf]) to its nearest staff by the vertical
+    distance from the symbol's center to the staff's line span (mirrors geom_detector._assign_to_
+    staves but for all classes; the generous max_interlines keeps ledger notes + their stems/beams
+    with their staff). Returns a per-staff dict {class_name: [(x, y, w, h), ...]}. NEVER raises."""
+    per_staff = [{name: [] for name in CLASS_NAMES} for _ in staves]
+    try:
+        spans = []
+        for lines in staves:
+            sl = sorted(float(v) for v in lines)
+            sp = _interline(sl) or 1.0
+            spans.append((sl[0], sl[-1], sp))
+        for s in symbols:
+            try:
+                c = int(s[0])
+                x, y, w, h = float(s[1]), float(s[2]), float(s[3]), float(s[4])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if not (0 <= c < len(CLASS_NAMES)):
+                continue
+            cy = y + h / 2.0
+            best, best_d = -1, None
+            for i, (top, bottom, sp) in enumerate(spans):
+                d = 0.0 if top <= cy <= bottom else (top - cy if cy < top else cy - bottom)
+                if best_d is None or d < best_d:
+                    best, best_d = i, d
+            if best >= 0 and best_d <= max_interlines * spans[best][2]:
+                per_staff[best][CLASS_NAMES[c]].append((x, y, w, h))
+        return per_staff
+    except Exception:
+        return per_staff
+
+
+def _staff_clefs(syms):
+    """Clef glyphs on a staff as (left_x, right_x, center_x, sign), sorted by center x. The first
+    is the opening clef; any later one is a mid-score clef change. NEVER raises."""
+    try:
+        clefs = []
+        for cls, sign in (("clef_g", "G"), ("clef_f", "F"), ("clef_c", "C")):
+            for (x, y, w, h) in syms.get(cls, []):
+                clefs.append((x, x + w, x + w / 2.0, sign))
+        clefs.sort(key=lambda c: c[2])
+        return clefs
+    except Exception:
+        return []
+
+
+def _first_note_x(syms):
+    heads = syms.get("notehead_filled", []) + syms.get("notehead_open", [])
+    return min((b[0] for b in heads), default=None)
+
+
+def _detect_key_fifths(syms, clefs, sp):
+    """Read the key signature from the run of accidental glyphs between the opening clef and the
+    first notehead (bounded on the right by the time signature if present, else just before the
+    first note so a note's own inline accidental is not miscounted). sharps>flats -> +count,
+    flats>sharps -> -count, clamped to +/-7. Returns None when it cannot tell (no clef / no notes),
+    0 for an empty zone (C major). PURE-ish (reads only boxes). NEVER raises."""
+    try:
+        if not clefs:
+            return None
+        first_x = _first_note_x(syms)
+        if first_x is None:
+            return None
+        clef_right = clefs[0][1]
+        ts = syms.get("timesig", [])
+        zone_right = (min(t[0] for t in ts) if ts else first_x - 1.2 * sp)
+        sharps = flats = 0
+        for (x, y, w, h) in syms.get("accidental_sharp", []):
+            if clef_right - 0.2 * sp < x + w / 2.0 < zone_right:
+                sharps += 1
+        for (x, y, w, h) in syms.get("accidental_flat", []):
+            if clef_right - 0.2 * sp < x + w / 2.0 < zone_right:
+                flats += 1
+        if sharps > flats:
+            return min(7, sharps)
+        if flats > sharps:
+            return -min(7, flats)
+        return 0
+    except Exception:
+        return None
+
+
+def _find_stem(head_cx, head_cy, stems, sp):
+    """The stem box attached to a notehead: a vertical run within ~0.9 interline of the head center
+    x whose y-span reaches the head. Returns (sx, sy, sw, sh) or None. NEVER raises."""
+    try:
+        best, best_dx = None, None
+        for st in stems:
+            sx, sy, sw, sh = st
+            scx = sx + sw / 2.0
+            dx = abs(scx - head_cx)
+            if dx < 0.9 * sp and not (sy > head_cy + 2.0 * sp or sy + sh < head_cy - 2.0 * sp):
+                if best_dx is None or dx < best_dx:
+                    best, best_dx = st, dx
+        return best
+    except Exception:
+        return None
+
+
+def _count_beams_flags(chord_cy, stem, beams, flags, sp):
+    """(n_beams, n_flags) for a note/chord given its stem. Beams: beam boxes whose x-range covers
+    the stem column and whose y-range overlaps the stem (a 16th run shows 2 stacked beams a stem
+    crosses on real/DeepScores-style detections; the synthetic render unions a group to ONE box, so
+    this under-reads synthetic 16ths -> eighths, gated on real_eval). Flags: flag boxes near the
+    stem's FREE end (the end away from the heads). NEVER raises."""
+    if stem is None:
+        return 0, 0
+    try:
+        sx, sy, sw, sh = stem
+        scx = sx + sw / 2.0
+        nb = 0
+        for (bx, by, bw, bh) in beams:
+            if bx - 0.3 * sp <= scx <= bx + bw + 0.3 * sp and not (by > sy + sh or by + bh < sy):
+                nb += 1
+        # the free end is the stem extreme farther from the head cluster.
+        free_y = sy + sh if chord_cy < sy + sh / 2.0 else sy
+        nf = 0
+        for (fx, fy, fw, fh) in flags:
+            if abs(fx + fw / 2.0 - scx) < 1.6 * sp and abs(fy + fh / 2.0 - free_y) < 3.5 * sp:
+                nf += 1
+        return nb, nf
+    except Exception:
+        return 0, 0
+
+
+def _count_dots(head_cx, head_right, head_cy, dots, sp):
+    """Augmentation dots: dot boxes just right of the head (within ~2.2 interline), at the head's
+    vertical level. Capped at 2 (double-dotted). NEVER raises."""
+    try:
+        n = 0
+        for (dx, dy, dw, dh) in dots:
+            dcx, dcy = dx + dw / 2.0, dy + dh / 2.0
+            if head_right - 0.4 * sp < dcx < head_cx + 2.2 * sp and abs(dcy - head_cy) < 0.9 * sp:
+                n += 1
+        return min(n, 2)
+    except Exception:
+        return 0
+
+
+def _group_heads_into_chords(heads, sp):
+    """Group heads [(x, y, w, h, filled), ...] that share an x-cluster into chords (same logic as
+    group_chords, carrying the fill flag). Returns a list of chords, each a list of head tuples.
+    NEVER raises."""
+    try:
+        if not heads:
+            return []
+        ordered = sorted(heads, key=lambda hh: hh[0] + hh[2] / 2.0)
+        chords, cur, cur_x = [], [ordered[0]], ordered[0][0] + ordered[0][2] / 2.0
+        for hh in ordered[1:]:
+            cx = hh[0] + hh[2] / 2.0
+            if cx - cur_x <= 1.2 * sp:
+                cur.append(hh)
+            else:
+                chords.append(cur)
+                cur, cur_x = [hh], cx
+        chords.append(cur)
+        return chords
+    except Exception:
+        return []
+
+
+def _decode_staff(staff_lines, syms, fifths, default_sign="G"):
+    """Decode one staff's glyphs into (events, opening_clef_sign, clef_changes):
+      events        : [(rep_x, event_dict), ...] x-ordered (notes/chords with duration+type+dots+
+                      pitches incl. inline accidentals, plus rests).
+      opening_clef  : the staff's opening clef sign ("G"/"F"/"C") or None if no clef glyph.
+      clef_changes  : [(x, sign), ...] for any clef glyph beyond the opening (mid-score change).
+    default_sign is the clef assumed when NO clef glyph is detected on the staff; it MUST match the
+    by-index opening clef the caller prints ("G" treble / "F" bass), so a missed clef glyph cannot
+    desync the decoded pitch from the labeled clef (an octave error in that hand). NEVER raises."""
+    try:
+        sp = _interline(staff_lines)
+        if sp is None:
+            return [], None, []
+        clefs = _staff_clefs(syms)
+        opening = clefs[0][3] if clefs else None
+
+        def active_clef(nx):
+            sign = opening or default_sign
+            for (lo, ro, xc, s) in clefs:
+                if xc <= nx + 0.5 * sp:
+                    sign = s
+                else:
+                    break
+            return sign
+
+        # key-signature zone (to exclude key accidentals from inline-accidental matching).
+        first_x = _first_note_x(syms)
+        clef_right = clefs[0][1] if clefs else -1e18
+        ts = syms.get("timesig", [])
+        zone_right = (min(t[0] for t in ts) if ts
+                      else (first_x - 1.2 * sp if first_x is not None else -1e18))
+        inline_acc = []  # (center_x, center_y, alter) for accidentals OUTSIDE the key zone
+        for cls, alter in _ACCID_ALTER.items():
+            for (x, y, w, h) in syms.get(cls, []):
+                xc = x + w / 2.0
+                if not (clef_right - 0.2 * sp < xc < zone_right):
+                    inline_acc.append((xc, y + h / 2.0, alter))
+
+        stems = syms.get("stem", [])
+        beams = syms.get("beam", [])
+        flags = syms.get("flag", [])
+        dots = syms.get("dot", [])
+        heads = ([(b[0], b[1], b[2], b[3], True) for b in syms.get("notehead_filled", [])]
+                 + [(b[0], b[1], b[2], b[3], False) for b in syms.get("notehead_open", [])])
+
+        events = []
+        for chord in _group_heads_into_chords(heads, sp):
+            rep_x = sum(h[0] + h[2] / 2.0 for h in chord) / len(chord)
+            clef = active_clef(rep_x)
+            pitches = []
+            for (hx, hy, hw, hh, filled) in chord:
+                cy = hy + hh / 2.0
+                p = decode_pitch(cy, staff_lines, clef, fifths=0)
+                if p is None:
+                    continue
+                step, _a0, octave = p
+                # inline accidental immediately left of THIS head (overrides the key for one note).
+                alter, best_dx = None, None
+                for (axc, ayc, aalter) in inline_acc:
+                    dx = hx - axc  # accidental sits just left of the head's left edge
+                    if 0.0 < dx < 2.0 * sp and abs(ayc - cy) < 0.7 * sp and (best_dx is None or dx < best_dx):
+                        best_dx, alter = dx, aalter
+                pd = {"step": step, "octave": octave}
+                if alter is None:
+                    pd["alter"] = keyed_alter(step, fifths)
+                else:
+                    pd["alter"] = alter
+                    glyph = _ALTER_GLYPH.get(alter)
+                    if glyph is not None:
+                        pd["accidental"] = glyph
+                pitches.append(pd)
+            if not pitches:
+                continue
+            chord_cy = sum(h[1] + h[3] / 2.0 for h in chord) / len(chord)
+            stem = None
+            for h in chord:
+                stem = _find_stem(h[0] + h[2] / 2.0, h[1] + h[3] / 2.0, stems, sp)
+                if stem is not None:
+                    break
+            nb, nf = _count_beams_flags(chord_cy, stem, beams, flags, sp)
+            nd = max((_count_dots(h[0] + h[2] / 2.0, h[0] + h[2], h[1] + h[3] / 2.0, dots, sp)
+                      for h in chord), default=0)
+            filled_any = any(h[4] for h in chord)
+            type_name, dots_n, ticks = decode_note_duration(filled_any, stem is not None, nb, nf, nd)
+            ev = {"duration": ticks, "type": type_name, "pitches": pitches}
+            if dots_n:
+                ev["dots"] = dots_n
+            events.append((rep_x, ev))
+
+        for (x, y, w, h) in syms.get("rest", []):
+            # rests are metric-neutral (the scorer ignores them); a placeholder quarter keeps the
+            # event in the right measure (placed by x) and lets rhythm_repair complete the bar.
+            events.append((x + w / 2.0, {"rest": True, "duration": 4, "type": "quarter"}))
+
+        events.sort(key=lambda e: e[0])
+        clef_changes = [(c[2], c[3]) for c in clefs[1:]]
+        return events, opening, clef_changes
+    except Exception:
+        return [], None, []
+
+
+def _segment_events_to_measures(treble, bass, barlines, t_changes, b_changes):
+    """Bucket each hand's (rep_x, event) stream into measures by barline x (real bars), or fall
+    back to ~4 onsets/bar without barlines. A mid-staff clef CHANGE (t_changes/b_changes =
+    [(x, sign), ...]) sets that measure's <clef> for staff 1 / staff 2 (invisible to the scorer;
+    a rendering nicety). Opening clefs are set by the caller on the GLOBAL first measure. NEVER
+    raises."""
+    try:
+        edges = sorted(barlines) if barlines else []
+        clef_by_meas: dict = {}
+        if len(edges) >= 2:
+            nmeas = len(edges) - 1
+
+            def which(xc):
+                k = 0
+                while k < nmeas and xc >= edges[k + 1]:
+                    k += 1
+                return min(k, nmeas - 1)
+
+            tb = [[] for _ in range(nmeas)]
+            bb = [[] for _ in range(nmeas)]
+            for (x, ev) in treble:
+                tb[which(x)].append((x, ev))
+            for (x, ev) in bass:
+                bb[which(x)].append((x, ev))
+            for (xc, sign) in t_changes:
+                clef_by_meas.setdefault(which(xc), {})[1] = sign
+            for (xc, sign) in b_changes:
+                clef_by_meas.setdefault(which(xc), {})[2] = sign
+        else:
+            import math
+            per_bar = 4
+            nmeas = max(1, math.ceil(len(treble) / per_bar), math.ceil(len(bass) / per_bar))
+            tb = [treble[m * per_bar:(m + 1) * per_bar] for m in range(nmeas)]
+            bb = [bass[m * per_bar:(m + 1) * per_bar] for m in range(nmeas)]
+
+        out = []
+        for m in range(nmeas):
+            s1 = [ev for (_x, ev) in sorted(tb[m], key=lambda c: c[0])]
+            s2 = [ev for (_x, ev) in sorted(bb[m], key=lambda c: c[0])]
+            if not s1 and not s2:
+                continue
+            md = {"staff1": s1, "staff2": s2}
+            if m in clef_by_meas:
+                md["clefs"] = [{"number": num, "sign": sign, "line": _CLEF_LINE.get(sign, 2)}
+                               for num, sign in sorted(clef_by_meas[m].items())]
+            out.append(md)
+        return out
+    except Exception:
+        return []
+
+
+def decode_symbols_to_musicxml(staves, symbols, key_fifths=None, gray=None):
+    """Decode the FULL multi-class symbol set into grand-staff MusicXML, reading durations, key,
+    per-note accidentals, clefs, and rests from the glyphs (not just notehead centers). This is the
+    trained full-symbol engine's decode tail (geom_detector.transcribe_with_symbols feeds it).
+
+    staves       : per-staff lists of 5 staff-line y-centers (from detect_systems).
+    symbols      : global list of detected glyphs (cls, x, y, w, h[, conf]) in image pixels.
+    key_fifths   : None -> DETECT the key from the engraved key signature (the deployed behavior);
+                   an int pins it (oracle, for the eval ceiling).
+    gray         : the grayscale image, for barline detection (real measures). None -> even binning.
+
+    Returns MusicXML bytes or None. NEVER raises."""
+    try:
+        if not staves or not symbols:
+            return None
+        per_staff = _assign_symbols_to_staves(symbols, staves)
+
+        fifths = key_fifths
+        if fifths is None:  # detect from the first staff that yields a confident key (treble first)
+            for i, staff_lines in enumerate(staves):
+                sp = _interline(staff_lines)
+                if sp is None:
+                    continue
+                k = _detect_key_fifths(per_staff[i], _staff_clefs(per_staff[i]), sp)
+                if k is not None:
+                    fifths = k
+                    break
+            if fifths is None:
+                fifths = 0
+
+        barlines = detect_barlines(gray, staves) if gray is not None else [[] for _ in staves]
+
+        measures: List[dict] = []
+        any_event = False
+        first_signs = None
+        for pi in range((len(staves) + 1) // 2):
+            ti, bi = 2 * pi, 2 * pi + 1
+            # default_sign matches the by-index opening clef printed below (treble upper, bass
+            # lower), so a staff with NO detected clef glyph decodes pitch under the SAME clef it
+            # is labeled with (no treble/bass desync if the detector misses a clef).
+            t_ev, t_open, t_chg = (_decode_staff(staves[ti], per_staff[ti], fifths, default_sign="G")
+                                   if ti < len(staves) else ([], None, []))
+            b_ev, b_open, b_chg = (_decode_staff(staves[bi], per_staff[bi], fifths, default_sign="F")
+                                   if bi < len(staves) else ([], None, []))
+            if t_ev or b_ev:
+                any_event = True
+            if first_signs is None and (t_ev or b_ev):
+                first_signs = (t_open or "G", b_open or "F")
+            blx = barlines[ti] if ti < len(barlines) else []
+            measures.extend(_segment_events_to_measures(t_ev, b_ev, blx, t_chg, b_chg))
+
+        if not any_event or not measures:
+            return None
+        # Opening clefs on the global first measure (detected signs; treble/bass by index is the
+        # fallback only when no clef glyph was found). A first measure that already carries a clef
+        # CHANGE keeps it.
+        t_sign, b_sign = first_signs or ("G", "F")
+        if "clefs" not in measures[0]:
+            measures[0] = dict(measures[0])
+            measures[0]["clefs"] = [
+                {"number": 1, "sign": t_sign, "line": _CLEF_LINE.get(t_sign, 2)},
+                {"number": 2, "sign": b_sign, "line": _CLEF_LINE.get(b_sign, 4)},
+            ]
+
+        data = {
+            "divisions": 4,
+            "key_fifths": fifths,
+            # The timesig GLYPH is detected (it bounds the key-signature zone), but reading its
+            # numeric VALUE (the digits) is a separate rung; the meter stays 4/4, consistent with
+            # the rest of the pipeline (divisions=4 is load-bearing for the fusion). The fusion can
+            # still borrow Clarity's real <time> downstream.
+            "time": {"beats": 4, "beat_type": 4},
+            "measures": measures,
+        }
+        return llm_omr.score_json_to_musicxml(data)
+    except Exception:
+        return None

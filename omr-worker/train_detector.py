@@ -15,9 +15,14 @@ Design choices that matter for MUSIC (not generic COCO):
   - the trained weights are a few MB and run fast on the CPU cx33 box.
 
 Run (after synth_dataset.py / deepscores_to_yolo.py build <ds>/data.yaml):
-    python train_detector.py --data <ds>/data.yaml --epochs 60 --imgsz 1280 \
-        --project C:/Users/pascu/omr-train/runs --name symbols1
+    python train_detector.py --data <ds>/data.yaml --epochs 60 --imgsz 1536 --batch 4 \
+        --workers 0 --mosaic 0 --project C:/Users/pascu/omr-train/runs --name symbols1
 Best weights land at <project>/<name>/weights/best.pt.
+
+WINDOWS GOTCHA: keep --workers 0. The default ultralytics multiprocessing dataloader (workers=8)
+HANGS pre-epoch-1 on this Windows box (the worker processes never spawn; a 12-minute run logged 0
+epochs). workers=0 (a single-process loader) trains fine. For DENSE real pages (DeepScores) at a
+high imgsz, also use --mosaic 0: a mosaic batch of 4 dense pages spills past the 16G card.
 """
 from __future__ import annotations
 
@@ -25,7 +30,7 @@ import argparse
 
 
 def train(data: str, model: str, epochs: int, imgsz: int, batch, project: str,
-          name: str, device: str, mosaic: float = 1.0) -> str:
+          name: str, device: str, mosaic: float = 1.0, workers: int = 0) -> str:
     from ultralytics import YOLO
 
     yolo = YOLO(model)  # transfer-learn from the pretrained COCO checkpoint (or a prior .pt)
@@ -37,6 +42,8 @@ def train(data: str, model: str, epochs: int, imgsz: int, batch, project: str,
         device=device,
         project=project,
         name=name,
+        # 0 = single-process loader. The default 8 HANGS pre-epoch-1 on this Windows box.
+        workers=workers,
         patience=20,
         # --- augmentation tuned for sheet music ---
         fliplr=0.0,          # MUST: horizontal flip invalidates clef/staff geometry
@@ -59,8 +66,8 @@ def train(data: str, model: str, epochs: int, imgsz: int, batch, project: str,
     return best
 
 
-def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Train YOLOv8 notehead detector")
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(description="Train YOLOv8 multi-class symbol detector")
     ap.add_argument("--data", required=True, help="path to dataset data.yaml")
     ap.add_argument("--model", default="yolov8s.pt", help="base checkpoint (yolov8n/s/m.pt)")
     ap.add_argument("--epochs", type=int, default=60)
@@ -71,10 +78,16 @@ def main(argv=None) -> int:
     ap.add_argument("--device", default="0", help="'0' for first GPU, 'cpu' otherwise")
     ap.add_argument("--mosaic", type=float, default=1.0,
                     help="mosaic aug prob; set 0 for dense real pages (memory + small noteheads)")
-    args = ap.parse_args(argv)
+    ap.add_argument("--workers", type=int, default=0,
+                    help="dataloader workers; KEEP 0 on Windows (default 8 hangs pre-epoch-1)")
+    return ap
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
     batch = int(args.batch)
     train(args.data, args.model, args.epochs, args.imgsz, batch,
-          args.project, args.name, args.device, mosaic=args.mosaic)
+          args.project, args.name, args.device, mosaic=args.mosaic, workers=args.workers)
     return 0
 
 

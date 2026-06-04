@@ -73,6 +73,38 @@ class NoteheadDetector:
         except Exception:
             return []
 
+    def detect_symbols(self, image, imgsz: Optional[int] = None) -> List[Tuple[int, float, float, float, float, float]]:
+        """Run the MULTI-CLASS detector and return every detected glyph as
+        (class_idx, x, y, w, h, confidence) with (x, y) the box TOP-LEFT in image pixels (the shape
+        geom_omr.decode_symbols_to_musicxml consumes). This is the full-symbol counterpart of
+        detect() (which returns notehead centers only). NEVER raises; [] on failure.
+
+        On a single-class (notehead-only) checkpoint this returns just class-0 boxes; on the trained
+        full-symbol checkpoint it returns all 18 glyph classes."""
+        if not DETECTOR_AVAILABLE:
+            return []
+        try:
+            model = self._load()
+            res = model.predict(
+                source=image, imgsz=(imgsz or self.imgsz), conf=self.conf, iou=self.iou,
+                max_det=self.max_det, device=self.device, verbose=False,
+            )
+            if not res:
+                return []
+            r = res[0]
+            if r.boxes is None or len(r.boxes) == 0:
+                return []
+            xywh = r.boxes.xywh.cpu().numpy()   # (n, 4): x_center, y_center, w, h
+            clss = r.boxes.cls.cpu().numpy()
+            confs = r.boxes.conf.cpu().numpy()
+            out = []
+            for (xc, yc, w, h), c, cf in zip(xywh, clss, confs):
+                out.append((int(c), float(xc - w / 2.0), float(yc - h / 2.0),
+                            float(w), float(h), float(cf)))
+            return out
+        except Exception:
+            return []
+
 
 def _auto_imgsz(shape, base: int = 1280, ref: float = 4096.0, cap: int = 2560) -> int:
     """Pick a YOLO inference size that keeps noteheads detectable on TALL multi-page stitches.
@@ -169,6 +201,36 @@ def transcribe_with_detector(image, detector: NoteheadDetector,
         return None
 
 
+def transcribe_with_symbols(image, detector: NoteheadDetector,
+                            key_fifths: Optional[int] = None) -> Optional[bytes]:
+    """End-to-end transcription with the trained FULL-SYMBOL detector: staff geometry from geom_omr,
+    EVERY glyph (heads/stems/flags/beams/dots/accidentals/clefs/rests/...) from the multi-class
+    detector, then geom_omr.decode_symbols_to_musicxml READS durations, key signature, per-note
+    accidentals, clefs, and rests from those glyphs ("measure, do not predict"). This is the rung
+    past transcribe_with_detector (which reads pitch only and fakes duration:1 + assumes the key).
+
+    image: a file path (preferred) or an ndarray.
+    key_fifths: None DETECTS the key from the engraved key signature (the deployed behavior); an int
+        pins it (oracle, to measure the decode ceiling on synthetic where the key is known).
+
+    Returns MusicXML bytes or None. NEVER raises."""
+    if not (DETECTOR_AVAILABLE and geom_omr.GEOM_AVAILABLE):
+        return None
+    try:
+        gray = geom_omr._to_gray(image)
+        if gray is None:
+            return None
+        staves = geom_omr.detect_systems(gray)
+        if not staves:
+            return None
+        symbols = detector.detect_symbols(image, imgsz=_auto_imgsz(gray.shape))
+        if not symbols:
+            return None
+        return geom_omr.decode_symbols_to_musicxml(staves, symbols, key_fifths=key_fifths, gray=gray)
+    except Exception:
+        return None
+
+
 def main(argv=None) -> int:
     """CLI entry so the worker can run this engine as a SUBPROCESS in its own torch venv (the same
     pattern Clarity uses), keeping the torch/ultralytics stack out of the worker's venv. Reads a
@@ -183,17 +245,24 @@ def main(argv=None) -> int:
     ap.add_argument("--weights", required=True, help="trained YOLO notehead weights (.pt)")
     ap.add_argument("-o", "--out", required=True, help="output MusicXML path")
     ap.add_argument("--device", default="cpu", help="'cpu' (the inference box) or '0' for a GPU")
-    ap.add_argument("--key-fifths", type=int, default=0,
-                    help="key signature for the decode (default 0 = C major). Reading the key FROM "
-                         "the image is a separate rung, so non-C keys decode accidentals as natural "
-                         "until that lands.")
+    ap.add_argument("--symbols", action="store_true",
+                    help="use the FULL-SYMBOL decode (reads durations/key/accidentals/clefs/rests "
+                         "from every glyph) instead of the notehead-only pitch decode")
+    ap.add_argument("--key-fifths", type=int, default=None,
+                    help="pin the key signature for the decode. Omit it: the notehead-only path "
+                         "assumes C major; the --symbols path DETECTS the key from the engraved "
+                         "key signature.")
     args = ap.parse_args(argv)
 
     if not DETECTOR_AVAILABLE:
         print("geom_detector: detector stack unavailable (%s)" % _IMPORT_ERROR, file=sys.stderr)
         return 2
     detector = NoteheadDetector(args.weights, device=args.device)
-    xml = transcribe_with_detector(args.image, detector, key_fifths=args.key_fifths)
+    if args.symbols:
+        xml = transcribe_with_symbols(args.image, detector, key_fifths=args.key_fifths)
+    else:
+        kf = args.key_fifths if args.key_fifths is not None else 0
+        xml = transcribe_with_detector(args.image, detector, key_fifths=kf)
     if not xml:
         return 2
     with open(args.out, "wb") as f:
