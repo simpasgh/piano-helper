@@ -623,12 +623,17 @@ _OTT_BELOW_CLEAR_IL = 10.0  # only scan the 8vb band below a staff when the next
 #                             (its above-band overlaps), so we skip it there to avoid a false shift.
 _OTT_CLUSTER_GAP_IL = 30.0  # split a row's dashes into clusters wherever the gap between consecutive
 #                             dashes exceeds this many interlines, and keep only the LARGEST cluster.
-#                             A real bracket's dashes are ~1 interline apart and a sparse-clutter row's
-#                             runs sit within ~20 interlines, so this large gate fires ONLY on an
-#                             EGREGIOUS far stray (reverie: a lone dash ~68 interlines off chained the
-#                             bass span over 3 unbracketed measures); it never splits a real bracket and
-#                             never concentrates sparse clutter enough to pass the fill gate (which would
-#                             fabricate a shift, the tctab regression a tighter gate caused).
+#                             A real bracket's dashes are ~1 interline apart, so this large gate fires
+#                             ONLY on an EGREGIOUS far stray (reverie: a lone dash ~68 interlines off
+#                             chained the bass span over 3 unbracketed measures) and never splits a real
+#                             bracket. CAUTION: clustering SHRINKS the span, which RAISES fill (ink/span),
+#                             so the fill gate is NOT the backstop against a fabricated shift here -- the
+#                             >= _OTT_MIN_SHORT_RUNS vertically-isolated short runs over a >= _OTT_MIN_SPAN_IL
+#                             span ARE. The 30 is sized so a SPARSE-clutter row (run gaps <=~20 interlines
+#                             on the eval scores) is not split into a dense cluster that clears those gates;
+#                             a tighter 8-interline gate did exactly that and fabricated a tctab 8va. So do
+#                             NOT relax the isolation / run-count / span gates trusting a fill margin that
+#                             clustering removes (precision is empirical on the eval scores, not structural).
 
 # VERTICAL ISOLATION (the precision gate). A true ottava dash is a LONE thin line with a near-blank
 # margin just above AND below it. Other horizontal repetitive structures in the band above a staff --
