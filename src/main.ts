@@ -102,6 +102,7 @@ import {
 } from "./playback";
 import { buildSalamanderSampleMap, SALAMANDER_BASE_URL } from "./sampler";
 import { renderSheetLabels } from "./sheet-overlay";
+import { observeHostReattach } from "./host-reattach";
 import {
   tempoPercentToRate,
   rateToBpm,
@@ -275,6 +276,9 @@ let editMode = false;
 let verovioToolkit: VerovioToolkit | null = null;
 let verovioRender: VerovioRender | null = null;
 let verovioHost: HTMLDivElement | null = null;
+// Watches #sheet during edit mode and re-attaches verovioHost the instant OSMD's autoResize render
+// detaches it, so the edit staff is never left blank by a mid-edit resize (see ./host-reattach).
+let hostReattachObserver: MutationObserver | null = null;
 // Guard against overlapping enter-edit-mode loads (the lazy import is async).
 let editModeLoading = false;
 
@@ -632,6 +636,14 @@ async function enterEditMode(): Promise<void> {
     verovioCredit.hidden = false;
     editToolbar.hidden = false;
     sheetContainer.classList.add("editing");
+    // Guard the staff against OSMD's autoResize render detaching the host mid-edit (see
+    // ./host-reattach); re-attaches it the instant OSMD drops it so the staff is never left blank.
+    hostReattachObserver?.disconnect();
+    hostReattachObserver = observeHostReattach(
+      sheetContainer,
+      () => verovioHost,
+      () => editMode,
+    );
     // Both surfaces become focusable application regions, each enumerating ITS keys.
     canvas.setAttribute("tabindex", "0");
     canvas.setAttribute("role", "application");
@@ -662,6 +674,9 @@ async function enterEditMode(): Promise<void> {
 // instance is kept for a fast re-entry; only the on-screen render + edit state are torn down.
 function exitEditMode(): void {
   editMode = false;
+  // Stop guarding the host now that there is no edit staff to keep attached.
+  hostReattachObserver?.disconnect();
+  hostReattachObserver = null;
   editBtn.setAttribute("aria-pressed", "false");
   editBtn.title =
     "Edit mode off. Click to fix wrong notes on the staff or the falling notes.";
