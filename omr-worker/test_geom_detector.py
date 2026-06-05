@@ -128,3 +128,30 @@ class TestDewarpGate:
     def test_detector_unavailable_returns_none(self, monkeypatch):
         monkeypatch.setattr(geom_detector, "DETECTOR_AVAILABLE", False)
         assert geom_detector.transcribe_with_detector(_page(), _StubDetector()) is None
+
+
+class _FixedDetector:
+    """Returns a preset list of (x, y, conf) centres regardless of the image, so the full
+    assign -> decode tail of transcribe_with_detector runs under test without real YOLO."""
+
+    def __init__(self, centers):
+        self.centers = centers
+
+    def detect(self, image, imgsz=None):
+        return list(self.centers)
+
+
+@requires_geom
+def test_transcribe_kept_dewarp_runs_decode_tail(monkeypatch):
+    # End-to-end through the KEPT-dewarp path: the detector's centres are placed on the DEWARPED
+    # staves (the same space transcribe_with_detector computes internally), so assign + decode must
+    # produce valid MusicXML. If the wiring fed the centres against the wrong (raw) staff space, the
+    # heads would be dropped by _assign_to_staves and the decode would yield None -> this would fail.
+    monkeypatch.setattr(geom_detector, "DETECTOR_AVAILABLE", True)
+    warped = _page(slope=0.05)
+    gray_dw = geom_omr.dewarp_staff_lines(warped)
+    staves = geom_omr.detect_systems(gray_dw)
+    assert len(staves) > len(geom_omr.detect_systems(warped))  # the gate will keep this dewarp
+    centers = [(warped.shape[1] / 2.0, sorted(s)[2], 0.9) for s in staves]  # one head per staff
+    out = geom_detector.transcribe_with_detector(warped, _FixedDetector(centers))
+    assert out is not None and b"score-partwise" in out

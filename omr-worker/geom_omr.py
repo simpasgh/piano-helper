@@ -289,7 +289,7 @@ def _estimate_interline_from_profile(prof1d) -> Optional[float]:
             return None
         p = p - float(p.mean())
         denom = float(np.dot(p, p))
-        if denom <= 1e-6:
+        if not np.isfinite(denom) or denom <= 1e-6:  # blank or NaN-polluted profile -> no estimate
             return None
         lo = 4
         hi = max(lo + 3, min(n // 8, 80))
