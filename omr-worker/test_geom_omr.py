@@ -775,7 +775,7 @@ def test_decode_forwards_normalize_illum(monkeypatch):
         captured["barlines"] = normalize_illum
         return [[] for _ in staves]
 
-    def fake_ottavas(gray, staves, normalize_illum=True):
+    def fake_ottavas(gray, staves, normalize_illum=True, photo=False):
         captured["ottavas"] = normalize_illum
         return [[] for _ in staves]
 

@@ -74,7 +74,7 @@ class TestNoteheadPathShift:
     def test_note_inside_8va_decodes_one_octave_higher(self, monkeypatch):
         # treble head on line 2 (y=40 -> written G4); an 8va span covering its x -> sounding G5.
         monkeypatch.setattr(geom_omr, "detect_ottavas",
-                            lambda gray, staves, normalize_illum=True: [[(100.0, 200.0, 1)]])
+                            lambda gray, staves, normalize_illum=True, photo=False: [[(100.0, 200.0, 1)]])
         monkeypatch.setattr(geom_omr, "detect_barlines",
                             lambda gray, staves, normalize_illum=True, photo=False: [[] for _ in staves])
         out = geom_omr._decode_staves_to_musicxml(
@@ -84,7 +84,7 @@ class TestNoteheadPathShift:
 
     def test_note_inside_8vb_decodes_one_octave_lower(self, monkeypatch):
         monkeypatch.setattr(geom_omr, "detect_ottavas",
-                            lambda gray, staves, normalize_illum=True: [[(100.0, 200.0, -1)]])
+                            lambda gray, staves, normalize_illum=True, photo=False: [[(100.0, 200.0, -1)]])
         monkeypatch.setattr(geom_omr, "detect_barlines",
                             lambda gray, staves, normalize_illum=True, photo=False: [[] for _ in staves])
         out = geom_omr._decode_staves_to_musicxml(
@@ -95,7 +95,7 @@ class TestNoteheadPathShift:
     def test_note_outside_span_is_unchanged(self, monkeypatch):
         # the head's x (150) is OUTSIDE the span (300..400): written octave kept (never-worse).
         monkeypatch.setattr(geom_omr, "detect_ottavas",
-                            lambda gray, staves, normalize_illum=True: [[(300.0, 400.0, 1)]])
+                            lambda gray, staves, normalize_illum=True, photo=False: [[(300.0, 400.0, 1)]])
         monkeypatch.setattr(geom_omr, "detect_barlines",
                             lambda gray, staves, normalize_illum=True, photo=False: [[] for _ in staves])
         out = geom_omr._decode_staves_to_musicxml(
@@ -301,6 +301,87 @@ class TestDetectOttavasRaster:
         staves = geom_omr.detect_systems(gray)
         spans = geom_omr.detect_ottavas(gray, staves)
         assert spans[0] == []
+
+
+@requires_geom
+class TestDetectOttavasPhotoMode:
+    """photo=True loosens the dash gates for a warped-photo raster (faint ink, short span, a smudge in
+    the band) WITHOUT inventing brackets on clutter. Each test shows the clean gate rejecting the photo
+    artifact (photo=False -> []) and the photo gate recovering the real bracket (photo=True -> 1 span).
+    This is the reverie photo bug: the printed 8va survives the photo as faint/broken/smudged ink."""
+
+    def test_faint_dashes_recovered_only_in_photo_mode(self):
+        # A wide dashed rule printed in FAINT gray (~0.57): below the clean <0.5 ink test (invisible),
+        # above the photo <0.62 test. Clean misses it; photo recovers it as an 8va.
+        def draw(d, lines, sp):
+            y = lines[0] - 2 * sp
+            x = int(2 * sp)
+            dash, gap = max(4, int(0.7 * sp)), max(4, int(0.9 * sp))
+            while x < 960:
+                d.line([(x, y), (x + dash, y)], fill=145, width=2)  # 145/255 ~= 0.57 gray
+                x += dash + gap
+
+        gray, _ = _draw_staff_with_band(draw)
+        staves = geom_omr.detect_systems(gray)
+        assert geom_omr.detect_ottavas(gray, staves, photo=False)[0] == []   # clean misses faint ink
+        spans = geom_omr.detect_ottavas(gray, staves, photo=True)
+        assert len(spans[0]) == 1 and spans[0][0][2] == 1                     # photo recovers the 8va
+
+    def test_short_span_rule_recovered_only_in_photo_mode(self):
+        # A dark dashed rule spanning ~30 interlines (a 2-3 measure 8va): below the clean 40-il floor,
+        # above the photo 24-il floor. reverie's system-2 8va measures 38.6 il and is lost this way.
+        def draw(d, lines, sp):
+            y = lines[0] - 2 * sp
+            x = int(5 * sp)
+            dash, gap = max(4, int(0.7 * sp)), max(4, int(0.9 * sp))
+            while x < int(5 * sp + 30 * sp):  # ~30-interline span
+                d.line([(x, y), (x + dash, y)], fill=0, width=2)
+                x += dash + gap
+
+        gray, _ = _draw_staff_with_band(draw, width=1200)
+        staves = geom_omr.detect_systems(gray)
+        assert geom_omr.detect_ottavas(gray, staves, photo=False)[0] == []   # clean 40-il floor rejects
+        spans = geom_omr.detect_ottavas(gray, staves, photo=True)
+        assert len(spans[0]) == 1 and spans[0][0][2] == 1                     # photo 24-il floor accepts
+
+    def test_smudge_in_band_voids_clean_but_not_photo(self):
+        # A full dashed rule PLUS a few long smudges (beam bleed) in the same band row. Clean rejects
+        # the whole row on any long run; photo drops up to _OTT_MAX_LONG_PHOTO of them and keeps the rule.
+        def draw(d, lines, sp):
+            y = lines[0] - 2 * sp
+            x = int(2 * sp)
+            dash, gap = max(4, int(0.7 * sp)), max(4, int(0.9 * sp))
+            while x < 960:
+                d.line([(x, y), (x + dash, y)], fill=0, width=2)
+                x += dash + gap
+            for sx in (int(10 * sp), int(20 * sp), int(30 * sp)):  # 3 long smudges (> _OTT_MAX_RUN_IL)
+                d.line([(sx, y), (sx + int(3 * sp), y)], fill=0, width=2)
+
+        gray, _ = _draw_staff_with_band(draw)
+        staves = geom_omr.detect_systems(gray)
+        assert geom_omr.detect_ottavas(gray, staves, photo=False)[0] == []   # one long run voids the row
+        spans = geom_omr.detect_ottavas(gray, staves, photo=True)
+        assert len(spans[0]) == 1 and spans[0][0][2] == 1                     # smudges dropped, rule kept
+
+    def test_photo_mode_does_not_fabricate_on_blank(self):
+        # The precision guard: loosened gates must NOT invent a bracket where there is no mark.
+        gray, _ = _draw_staff_with_band(lambda d, lines, sp: None)
+        staves = geom_omr.detect_systems(gray)
+        assert geom_omr.detect_ottavas(gray, staves, photo=True)[0] == []
+
+    def test_photo_mode_still_rejects_short_local_run(self):
+        # A few-dash local mark (hairpin / rehearsal) stays below _OTT_MIN_SHORT_RUNS even in photo mode.
+        def draw(d, lines, sp):
+            y = lines[0] - 2 * sp
+            x = int(2 * sp)
+            dash, gap = max(4, int(0.7 * sp)), max(4, int(0.9 * sp))
+            for _ in range(5):
+                d.line([(x, y), (x + dash, y)], fill=0, width=2)
+                x += dash + gap
+
+        gray, _ = _draw_staff_with_band(draw)
+        staves = geom_omr.detect_systems(gray)
+        assert geom_omr.detect_ottavas(gray, staves, photo=True)[0] == []
 
 
 def test_largest_dash_cluster_drops_far_stray():
