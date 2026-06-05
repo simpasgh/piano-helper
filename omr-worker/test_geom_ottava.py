@@ -74,9 +74,9 @@ class TestNoteheadPathShift:
     def test_note_inside_8va_decodes_one_octave_higher(self, monkeypatch):
         # treble head on line 2 (y=40 -> written G4); an 8va span covering its x -> sounding G5.
         monkeypatch.setattr(geom_omr, "detect_ottavas",
-                            lambda gray, staves: [[(100.0, 200.0, 1)]])
+                            lambda gray, staves, normalize_illum=True: [[(100.0, 200.0, 1)]])
         monkeypatch.setattr(geom_omr, "detect_barlines",
-                            lambda gray, staves: [[] for _ in staves])
+                            lambda gray, staves, normalize_illum=True: [[] for _ in staves])
         out = geom_omr._decode_staves_to_musicxml(
             [self.TREBLE], [[(150.0, 40.0)]], gray=object())
         assert out is not None
@@ -84,9 +84,9 @@ class TestNoteheadPathShift:
 
     def test_note_inside_8vb_decodes_one_octave_lower(self, monkeypatch):
         monkeypatch.setattr(geom_omr, "detect_ottavas",
-                            lambda gray, staves: [[(100.0, 200.0, -1)]])
+                            lambda gray, staves, normalize_illum=True: [[(100.0, 200.0, -1)]])
         monkeypatch.setattr(geom_omr, "detect_barlines",
-                            lambda gray, staves: [[] for _ in staves])
+                            lambda gray, staves, normalize_illum=True: [[] for _ in staves])
         out = geom_omr._decode_staves_to_musicxml(
             [self.TREBLE], [[(150.0, 40.0)]], gray=object())  # written G4 -> sounding G3
         assert out is not None
@@ -95,9 +95,9 @@ class TestNoteheadPathShift:
     def test_note_outside_span_is_unchanged(self, monkeypatch):
         # the head's x (150) is OUTSIDE the span (300..400): written octave kept (never-worse).
         monkeypatch.setattr(geom_omr, "detect_ottavas",
-                            lambda gray, staves: [[(300.0, 400.0, 1)]])
+                            lambda gray, staves, normalize_illum=True: [[(300.0, 400.0, 1)]])
         monkeypatch.setattr(geom_omr, "detect_barlines",
-                            lambda gray, staves: [[] for _ in staves])
+                            lambda gray, staves, normalize_illum=True: [[] for _ in staves])
         out = geom_omr._decode_staves_to_musicxml(
             [self.TREBLE], [[(150.0, 40.0)]], gray=object())
         assert out is not None
