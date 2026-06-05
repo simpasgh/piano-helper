@@ -408,6 +408,11 @@ export interface SetKeyRecord {
   // MID-PIECE (v2): the SCORE measure number the edit targeted, or null for a START edit (v1). Carried
   // for the region-aware announce + as context; the invert itself is fully described by `measures`.
   targetMeasure: number | null;
+  // MID-PIECE (v2): true when this edit REMOVED the target measure's own <key> (the user re-picked the
+  // value the region inherits from before, so the redundant mid-piece declaration is dropped). The
+  // announce then reads as a removal ("Removed the key change ...; back to {prior}") rather than a set
+  // (MID-4). false for a START edit or an add/edit. `newFifths` is the value the region reverts to.
+  removed: boolean;
 }
 
 // What a SET-TIME captured, so it can be inverted EXACTLY (the OLD <beats> + <beat-type> text). A time
@@ -435,6 +440,11 @@ export interface SetTimeRecord {
   // in-place numeral restore). For a mid-piece add/edit this is just the target measure; for a remove it
   // is also just the target measure (the next change downstream is never touched).
   measures: Array<{ el: Element; childrenBefore: Node[] }>;
+  // MID-PIECE (v2): true when this edit REMOVED the target measure's own <time> (the user re-picked the
+  // meter the region inherits from before, dropping the redundant mid-piece declaration). The announce
+  // then reads as a removal ("Removed the time change ...; back to {prior}") rather than a set (MID-4).
+  // false for a START edit or an add/edit. `newBeats`/`newBeatType` is the meter the region reverts to.
+  removed: boolean;
 }
 
 // The editable score model. Holds the parsed DOM and the ordered pitched-note handles. Edits
@@ -1036,7 +1046,8 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
     const baseEntry = NOTE_VALUE_QUARTERS.find((v) => v.type === baseType);
     const baseDivs = baseEntry ? baseEntry.quarters * divisions : oldDivs;
     // Snapshot the bar BEFORE mutating, for an exact invert (mirrors the shorten/lengthen snapshot).
-    const snapshot = (): Node[] => Array.from(measureEl.children).map((c) => c.cloneNode(true));
+    // childNodes (not element-only children) keeps the inter-element whitespace so undo is byte-exact.
+    const snapshot = (): Node[] => cloneChildNodes(measureEl);
 
     if (dots === 0) {
       // ADD a dot. An off-ladder PLAIN arrival (a tuplet/odd duration noteTypeForDuration approximated
@@ -1210,8 +1221,8 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
     const contDivs = Math.min(remainder, contRoom); // TIE-B: cap the continuation to one barline
 
     // Snapshot BOTH bars BEFORE mutating, for an exact two-bar invert (TIE-D / the widened record).
-    const childrenBefore = Array.from(measureEl.children).map((c) => c.cloneNode(true));
-    const nextBefore = Array.from(nextMeasure.children).map((c) => c.cloneNode(true));
+    const childrenBefore = cloneChildNodes(measureEl);
+    const nextBefore = cloneChildNodes(nextMeasure);
 
     // Fill the current bar: consume every following rest (the note reaches the barline), then set each
     // chord member to barFillDivs + a tie START. keepDots so a dotted fill value (e.g. dotted half)
@@ -1294,8 +1305,8 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
     const soundingDivs = oldDivs + contDivs; // the held value BEFORE removing the tie (for the announce)
 
     // Snapshot BOTH bars before mutating (two-bar undo).
-    const childrenBefore = Array.from(measureEl.children).map((c) => c.cloneNode(true));
-    const nextBefore = Array.from(nextMeasure.children).map((c) => c.cloneNode(true));
+    const childrenBefore = cloneChildNodes(measureEl);
+    const nextBefore = cloneChildNodes(nextMeasure);
 
     // Strip the tie markup from the start chord (it is now standalone at its bar-fill value).
     for (const m of chordGroup) stripTies(m);
@@ -1586,7 +1597,8 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
       const targetDivs = DURATION_LADDER[curIndex].quarters * divisions;
 
       // Snapshot the bar BEFORE mutating, for an exact invert (covers every surgical change below).
-      const snapshot = (): Node[] => Array.from(measureEl.children).map((c) => c.cloneNode(true));
+      // childNodes (not element-only children) keeps the inter-element whitespace so undo is byte-exact.
+      const snapshot = (): Node[] => cloneChildNodes(measureEl);
 
       if (direction === "longer" && targetDivs > oldDivs) {
         // LENGTHEN: grow the note, ripple the following same-voice events later, and absorb trailing
@@ -1781,7 +1793,7 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
         fifthsEl.textContent = String(clamped);
         const changedCount = applyKeyToNotes(handles, actualAlterByEl, clamped);
         reindexHandles();
-        return { oldFifths, newFifths: clamped, measures, changedCount, targetMeasure: null };
+        return { oldFifths, newFifths: clamped, measures, changedCount, targetMeasure: null, removed: false };
       }
 
       // MID-PIECE edit (v2): set the key at the SCORE measure `atMeasure`, applying the MID-2 single
@@ -1826,8 +1838,10 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
       const actualAlterByEl = captureActualAlters(regionHandles, here);
 
       // MID-2 (b): V == prior AND the target has its own declaration -> REMOVE it (the region reverts to
-      // inheriting the prior key). Independent of TIME (only <key> is dropped).
-      if (clamped === prior && ownHere !== null) {
+      // inheriting the prior key). Independent of TIME (only <key> is dropped). The flag drives the
+      // removal-worded announce (MID-4); the value reverted to is `clamped` (== prior here).
+      const removed = clamped === prior && ownHere !== null;
+      if (removed) {
         for (const t of targets) {
           const keyEl = ownKeyEl(t.measureEl);
           if (keyEl) {
@@ -1854,7 +1868,7 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
       // alter (the region's governing key is now `clamped`). Notes OUTSIDE the region are byte-untouched.
       const changedCount = applyKeyToNotes(regionHandles, actualAlterByEl, clamped);
       reindexHandles();
-      return { oldFifths: here, newFifths: clamped, measures, changedCount, targetMeasure: atMeasure };
+      return { oldFifths: here, newFifths: clamped, measures, changedCount, targetMeasure: atMeasure, removed };
     },
     restoreKey(record: SetKeyRecord): void {
       // Restore the snapshotted measures' children exactly (the prior <fifths> + accidentals). Each
@@ -1897,6 +1911,7 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
           mismatchedBars,
           targetMeasure: null,
           measures: [],
+          removed: false,
         };
       }
 
@@ -1928,9 +1943,12 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
       // add/edit/remove (parallel to the key edit's region snapshot, but just the target measures).
       const measures = snapshotMeasures(targets.map((t) => t.measureEl));
 
-      if (sameAsPrior && ownHere !== null) {
-        // MID-2 (b): V == prior AND the target declares its own <time> -> REMOVE it (the region reverts to
-        // inheriting the prior meter). Independent of KEY (only <time> is dropped).
+      // MID-2 (b): V == prior AND the target declares its own <time> -> REMOVE it (the region reverts to
+      // inheriting the prior meter). The flag drives the removal-worded announce (MID-4); the meter the
+      // region reverts to is `beats`/`beatType` (== prior here).
+      const removed = sameAsPrior && ownHere !== null;
+      if (removed) {
+        // REMOVE the target's own <time> (Independent of KEY: only <time> is dropped).
         for (const t of targets) {
           const tEl = ownTimeEl(t.measureEl);
           if (tEl) {
@@ -1975,6 +1993,7 @@ export function parseScoreModel(xml: string, bpmOverride?: number): ScoreModel {
         mismatchedBars,
         targetMeasure: atMeasure,
         measures,
+        removed,
       };
     },
     restoreTime(record: SetTimeRecord): void {
@@ -2048,13 +2067,21 @@ function allMeasures(doc: Document): Element[] {
   return out;
 }
 
+// Deep-clone an element's child NODES (incl. whitespace text), for a byte-exact undo snapshot. Using
+// childNodes (not the element-only `children`) preserves the inter-element pretty-print whitespace, so
+// an edit + undo round-trips byte-identical (a duration edit snapshot used `children` and silently
+// collapsed that whitespace on undo; this is the one reading the key + time + duration undos share).
+function cloneChildNodes(el: Element): Node[] {
+  return Array.from(el.childNodes).map((c) => c.cloneNode(true));
+}
+
 // Deep-clone each measure's child NODES (incl. whitespace text) for a byte-exact undo snapshot, keyed
 // by the live (stable) <measure> element. Shared by the key + mid-piece time edits. restore is
 // restoreMeasureChildren.
 function snapshotMeasures(measures: Element[]): Array<{ el: Element; childrenBefore: Node[] }> {
   return measures.map((m) => ({
     el: m,
-    childrenBefore: Array.from(m.childNodes).map((c) => c.cloneNode(true)),
+    childrenBefore: cloneChildNodes(m),
   }));
 }
 
@@ -2585,6 +2612,14 @@ function leadingTieStopNotes(nextMeasure: Element, voice: number): Element[] {
 // divisions is divisions * (4 / beat-type); times `beats` gives the full bar. The <time> may sit in
 // THIS measure's <attributes> or be inherited; we read the most recent one at/ before this measure.
 function measureCapacityDivs(measureEl: Element, divisions: number): number {
+  // PICKUP BAR (anacrusis): a <measure implicit="yes"> is intentionally SHORT of the meter (the upbeat
+  // before bar 1). Its effective fixed-bar capacity is its own ACTUAL content length, NOT the full meter
+  // capacity, so a lengthen/dot in a pickup clamps/leaves-rest against the pickup's true length instead
+  // of growing into time-signature slack the pickup does not have. Same never-overflow rule as the
+  // no-time fallback below; an implicit bar that already fills the meter (rare) just reads the meter.
+  if (measureEl.getAttribute("implicit") === "yes") {
+    return voiceFilledDivsMax(measureEl);
+  }
   const time = timeSignatureFor(measureEl);
   if (!time) {
     // No time signature found: fall back to the bar's own filled length so a lengthen finds no slack

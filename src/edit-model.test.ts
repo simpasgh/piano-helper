@@ -1368,6 +1368,91 @@ describe("ScoreModel.changeDuration dotted-arrival snap to the nearest plain run
   });
 });
 
+describe("ScoreModel.changeDuration in a PICKUP (anacrusis) bar clamps at the pickup's real length", () => {
+  // POLISH item 3: a <measure implicit="yes"> is intentionally SHORT of the meter (the upbeat before
+  // bar 1). A lengthen/dot there must clamp/leave-rest against the pickup's ACTUAL content, NOT grow into
+  // the full time-signature "slack" the pickup does not have (measureCapacityDivs special-cases implicit).
+  it("a lengthen in a 4/4 pickup that holds ONE quarter is a no-op (no slack to the meter)", () => {
+    // The pickup declares 4/4 (capacity 16) but holds a single quarter (4) with NO trailing rest. Without
+    // the implicit special-case the half-step would grow into the 12 divs of phantom meter slack; with it
+    // the bar's capacity IS its 4-div content, so there is no room and the lengthen is a noRoom no-op.
+    const PICKUP = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="0" implicit="yes">
+      <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+    </measure>
+    <measure number="1">
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>16</duration><voice>1</voice><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const model = parseScoreModel(PICKUP);
+    const before = model.serialize();
+    const rec = model.changeDuration(0, "longer"); // the pickup's G4 quarter
+    expect(rec?.outcome).toBe("noRoom"); // clamped at the pickup's true length: nothing to grow into
+    expect(model.serialize()).toBe(before); // DOM untouched
+  });
+
+  it("a lengthen in a pickup with a trailing rest clamps at the PICKUP length, not the meter", () => {
+    // The pickup declares 4/4 (meter capacity 16) but is really 8 divs long: a quarter (4) + a quarter
+    // rest (4). Lengthening the quarter consumes ONLY the in-pickup rest (grows to a half = 8) and stops
+    // at the pickup barline; it does NOT keep growing to the 16-div meter. The pickup stays 8 divs.
+    const PICKUP = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="0" implicit="yes">
+      <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><rest/><duration>4</duration><voice>1</voice><type>quarter</type></note>
+    </measure>
+    <measure number="1">
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>16</duration><voice>1</voice><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const model = parseScoreModel(PICKUP);
+    const rec = model.changeDuration(0, "longer"); // G4 quarter -> half, consuming the in-pickup rest
+    expect(rec?.outcome).toBe("stepped");
+    const xml = model.serialize();
+    expect(noteInfo(xml, "G", "4")).toEqual({ dur: 8, type: "half", dots: 0 }); // grew to a half only
+    // The pickup is now a single half note (8 divs); it did NOT grow into the meter's phantom 8 more.
+    expect(measureEvents(xml)).toEqual([{ rest: false, dur: 8 }]);
+    expect(measureFilledDivs(xml)).toBe(8); // still the pickup's real length, not 16
+    // A SECOND lengthen now has no room (the pickup is full at its 8-div length): the half does NOT grow
+    // to a whole. WITHOUT the implicit special-case the meter's 16-div capacity would let it grow to 16.
+    const rec2 = model.changeDuration(0, "longer");
+    expect(rec2?.outcome).toBe("noRoom");
+    expect(measureFilledDivs(model.serialize())).toBe(8);
+  });
+
+  it("a NORMAL (non-implicit) bar is UNCHANGED: it still uses the full meter capacity", () => {
+    // The identical content in a NON-implicit 4/4 bar: a quarter (4) + a quarter rest (4) + room to the
+    // 16-div barline. Lengthening the quarter steps to a half (consuming the rest) exactly as before the
+    // implicit special-case; the implicit branch must not regress the ordinary bar.
+    const NORMAL = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><rest/><duration>12</duration><voice>1</voice><type>half</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const model = parseScoreModel(NORMAL);
+    const rec = model.changeDuration(0, "longer"); // G4 quarter -> half (meter capacity gives the room)
+    expect(rec?.outcome).toBe("stepped");
+    const xml = model.serialize();
+    expect(noteInfo(xml, "G", "4")).toEqual({ dur: 8, type: "half", dots: 0 });
+    expect(measureFilledDivs(xml)).toBe(16); // the normal bar still sums to the full meter capacity
+  });
+});
+
 describe("ScoreModel.changeDuration undo via restoreDuration restores the bar exactly", () => {
   it("a SHORTEN + restore round-trips to the exact prior bar (durations, types, onsets)", () => {
     const model = parseScoreModel(FOUR_QUARTERS);
@@ -1419,6 +1504,55 @@ describe("ScoreModel.changeDuration undo via restoreDuration restores the bar ex
     const before = model.serialize();
     const rec = model.changeDuration(0, "longer"); // atEnd no-op
     expect(() => model.restoreDuration(rec!)).not.toThrow();
+    expect(model.serialize()).toBe(before);
+  });
+
+  // POLISH item 4: the duration-edit undo must round-trip BYTE-IDENTICAL (it used to snapshot the
+  // measure's element-only `children`, collapsing the pretty-print whitespace between elements on undo;
+  // it now snapshots `childNodes` like restoreKey, preserving the inter-element whitespace text nodes).
+  it("a duration edit + undo is byte-identical serialize() (whitespace preserved like restoreKey)", () => {
+    // The fixture has real pretty-print whitespace (newlines + indentation) BETWEEN the <note> elements,
+    // so an element-only snapshot/restore would visibly collapse it; assert the exact bytes round-trip.
+    const PRETTY = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><rest/><duration>4</duration><voice>1</voice><type>quarter</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const model = parseScoreModel(PRETTY);
+    const before = model.serialize();
+    const rec = model.changeDuration(1, "shorter"); // D5 quarter -> 16th, freeing a rest
+    expect(rec).not.toBeNull();
+    expect(model.serialize()).not.toBe(before); // the edit really changed the bytes
+    model.restoreDuration(rec!);
+    expect(model.serialize()).toBe(before); // ... and the undo restores them EXACTLY, whitespace and all
+  });
+
+  it("a LENGTHEN edit + undo is also byte-identical (the ripple/consume-rest path)", () => {
+    const PRETTY = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type></note>
+      <note><rest/><duration>8</duration><voice>1</voice><type>half</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const model = parseScoreModel(PRETTY);
+    const before = model.serialize();
+    const rec = model.changeDuration(0, "longer"); // C5 quarter -> half, consuming part of the rest
+    expect(rec?.outcome).toBe("stepped");
+    model.restoreDuration(rec!);
     expect(model.serialize()).toBe(before);
   });
 });

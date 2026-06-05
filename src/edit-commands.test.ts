@@ -147,7 +147,7 @@ function stubModel(): ScoreModel & {
       keyChanges.push(newFifths);
       const old = self.currentFifths;
       self.currentFifths = newFifths;
-      return { oldFifths: old, newFifths, measures: [], changedCount: 0, targetMeasure: atMeasure ?? null };
+      return { oldFifths: old, newFifths, measures: [], changedCount: 0, targetMeasure: atMeasure ?? null, removed: false };
     },
     restoreKey: (record: SetKeyRecord) => {
       keyRestores.push(record);
@@ -170,6 +170,7 @@ function stubModel(): ScoreModel & {
         mismatchedBars: 0,
         targetMeasure: atMeasure ?? null,
         measures: [],
+        removed: false,
       };
     },
     restoreTime: (record: SetTimeRecord) => {
