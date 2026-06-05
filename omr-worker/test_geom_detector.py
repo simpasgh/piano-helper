@@ -3,8 +3,18 @@
 the detector stack is absent): the image-size-aware imgsz policy and the head->staff assignment.
 
 The YOLO inference itself (NoteheadDetector.detect / transcribe_with_detector) needs the torch
-venv + weights and is exercised by the real-score eval on the box, not in CI."""
+venv + weights and is exercised by the real-score eval on the box, not in CI. The DEWARP GATE in
+transcribe_with_detector is tested here with a STUB detector (no torch), since it is the
+never-worse-on-clean mechanism and is pure control flow given the detector output."""
+import pytest
+
 import geom_detector
+import geom_omr
+
+requires_geom = pytest.mark.skipif(
+    not geom_omr.GEOM_AVAILABLE,
+    reason="numpy/scipy/PIL not available (GEOM_AVAILABLE False)",
+)
 
 
 class TestAutoImgsz:
@@ -58,3 +68,90 @@ class TestAssignToStaves:
     def test_empty_inputs(self):
         assert geom_detector._assign_to_staves([], []) == []
         assert geom_detector._assign_to_staves([(1.0, 2.0, 0.5)], []) == []
+
+
+def _page(slope=0.0, h=1200, w=900, il=12):
+    """A multi-staff page (separated 5-line staves, side margins) with an optional linear tilt
+    (slope = px drift per px from centre). slope 0 -> a clean, already-horizontal page."""
+    import numpy as np
+    g = np.ones((h, w), np.float32)
+    xc = w / 2.0
+    for x in range(120, w - 120):
+        dy = slope * (x - xc)
+        for t in np.linspace(120, h - 120, 6):
+            for k in range(5):
+                y = int(round(t + k * il + dy))
+                if 1 <= y < h - 1:
+                    g[y - 1:y + 1, x] = 0.0
+    return g
+
+
+class _StubDetector:
+    """Records the image it was asked to detect on (to assert which one the gate chose) and returns
+    no centers, so transcribe_with_detector stops right after the detect() call. The dewarp gate runs
+    before that, so the recorded image reveals the gate's decision without needing real YOLO."""
+
+    def __init__(self):
+        self.calls = []
+
+    def detect(self, image, imgsz=None):
+        self.calls.append(image)
+        return []
+
+
+@requires_geom
+class TestDewarpGate:
+    """The never-worse-on-clean gate: transcribe_with_detector keeps the dewarp ONLY when it
+    increases the detected staff count (a warped photo), and otherwise feeds the ORIGINAL raster to
+    the detector (a clean page), so clean stays byte-identical."""
+
+    def test_clean_page_feeds_raw_image_to_detector(self, monkeypatch):
+        monkeypatch.setattr(geom_detector, "DETECTOR_AVAILABLE", True)
+        clean = _page(slope=0.0)  # already horizontal -> dewarp cannot add staves -> rejected
+        det = _StubDetector()
+        geom_detector.transcribe_with_detector(clean, det)
+        assert det.calls, "staves should be detected on the clean page, so detect() is called"
+        assert det.calls[0] is clean  # the ORIGINAL array (no dewarp) -> byte-identical clean path
+
+    def test_warped_page_feeds_dewarped_image_to_detector(self, monkeypatch):
+        import numpy as np
+        monkeypatch.setattr(geom_detector, "DETECTOR_AVAILABLE", True)
+        warped = _page(slope=0.05)  # tilted -> raw detection collapses, dewarp recovers more staves
+        det = _StubDetector()
+        geom_detector.transcribe_with_detector(warped, det)
+        assert det.calls
+        src = det.calls[0]
+        assert src is not warped  # the dewarp WAS applied
+        # the dewarped raster is handed to the detector as an HxWx3 uint8 image (via _gray_to_uint8_rgb)
+        assert isinstance(src, np.ndarray) and src.ndim == 3 and src.dtype == np.uint8
+
+    def test_detector_unavailable_returns_none(self, monkeypatch):
+        monkeypatch.setattr(geom_detector, "DETECTOR_AVAILABLE", False)
+        assert geom_detector.transcribe_with_detector(_page(), _StubDetector()) is None
+
+
+class _FixedDetector:
+    """Returns a preset list of (x, y, conf) centres regardless of the image, so the full
+    assign -> decode tail of transcribe_with_detector runs under test without real YOLO."""
+
+    def __init__(self, centers):
+        self.centers = centers
+
+    def detect(self, image, imgsz=None):
+        return list(self.centers)
+
+
+@requires_geom
+def test_transcribe_kept_dewarp_runs_decode_tail(monkeypatch):
+    # End-to-end through the KEPT-dewarp path: the detector's centres are placed on the DEWARPED
+    # staves (the same space transcribe_with_detector computes internally), so assign + decode must
+    # produce valid MusicXML. If the wiring fed the centres against the wrong (raw) staff space, the
+    # heads would be dropped by _assign_to_staves and the decode would yield None -> this would fail.
+    monkeypatch.setattr(geom_detector, "DETECTOR_AVAILABLE", True)
+    warped = _page(slope=0.05)
+    gray_dw = geom_omr.dewarp_staff_lines(warped)
+    staves = geom_omr.detect_systems(gray_dw)
+    assert len(staves) > len(geom_omr.detect_systems(warped))  # the gate will keep this dewarp
+    centers = [(warped.shape[1] / 2.0, sorted(s)[2], 0.9) for s in staves]  # one head per staff
+    out = geom_detector.transcribe_with_detector(warped, _FixedDetector(centers))
+    assert out is not None and b"score-partwise" in out

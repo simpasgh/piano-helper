@@ -298,6 +298,111 @@ def test_segment_to_measures_falls_back_without_barlines():
         geom_omr._chords_to_measures([[("C", 0, 5)]] * 8, [])
 
 
+# --- Per-line staff DEWARP (camera OMR) ---------------------------------------------------
+# dewarp_staff_lines straightens tilted / perspective-curved staff lines so the row-projection
+# staff detector survives a phone photo. The contract under test: it is a byte-identical IDENTITY
+# on a flat (clean) page, it RECOVERS staff detection on a warped one, and it never raises.
+
+
+def _draw_page(width=900, height=1200, n_staves=6, interline=12, slope=0.0, curve=0.0):
+    """Draw a synthetic multi-staff page (n_staves evenly spaced 5-line staves) with an optional
+    linear tilt (slope = px of vertical drift per px of x from the page centre) and parabolic
+    curvature (curve = px of bow at the page edges). Returns a float32 grayscale ndarray in [0,1]
+    (0=ink, 1=white). No anti-aliasing (integer-rounded 2px lines) so the result is deterministic."""
+    import numpy as np
+    g = np.ones((height, width), np.float32)
+    xc = width / 2.0
+    margin = int(1.6 * interline * 5)
+    tops = np.linspace(margin, height - margin, n_staves)
+    base_ys = [[t + k * interline for k in range(5)] for t in tops]
+    for x in range(width):
+        dy = slope * (x - xc) + curve * ((x - xc) / xc) ** 2
+        for staff in base_ys:
+            for by in staff:
+                y = int(round(by + dy))
+                if 1 <= y < height - 1:
+                    g[y - 1:y + 1, x] = 0.0
+    return g
+
+
+def _max_rowink(g):
+    """Peak per-row dark fraction. A straight full-width line gives ~1.0; a tilted line smears
+    across rows and drops it, so this rises as the dewarp straightens the lines."""
+    import numpy as np
+    return float((g < 0.5).mean(axis=1).max())
+
+
+@requires_geom
+class TestDewarpStaffLines:
+    def test_flat_page_is_identity_object(self):
+        # A flat (already-horizontal) page yields a ~0 displacement field, so the dewarp returns the
+        # SAME object. The detector path keys off that identity to stay byte-identical on clean.
+        flat = _draw_page()
+        assert geom_omr.dewarp_staff_lines(flat) is flat
+        assert len(geom_omr.detect_systems(flat)) == 6  # detection already works flat
+
+    def test_recovers_tilted_staves(self):
+        tilt = _draw_page(slope=0.05)
+        raw = len(geom_omr.detect_systems(tilt))
+        out = geom_omr.dewarp_staff_lines(tilt)
+        assert out is not tilt                                  # a warped page IS remapped
+        rec = len(geom_omr.detect_systems(out))
+        assert rec > raw                                        # more staves recovered than raw
+        assert rec >= 5                                         # nearly all 6 drawn staves back
+        assert _max_rowink(out) > _max_rowink(tilt) + 0.2       # lines are straighter
+
+    def test_recovers_curved_staves(self):
+        curved = _draw_page(slope=0.0, curve=22.0)
+        raw = len(geom_omr.detect_systems(curved))
+        out = geom_omr.dewarp_staff_lines(curved)
+        assert out is not curved
+        assert len(geom_omr.detect_systems(out)) > raw
+        assert _max_rowink(out) > _max_rowink(curved) + 0.2
+
+    def test_blank_and_small_return_input_object(self):
+        import numpy as np
+        blank = np.ones((300, 400), np.float32)
+        assert geom_omr.dewarp_staff_lines(blank) is blank     # no staff structure -> identity
+        small = np.zeros((8, 8), np.float32)
+        assert geom_omr.dewarp_staff_lines(small) is small     # below the size floor -> identity
+
+    def test_never_raises_on_junk(self):
+        import numpy as np
+        assert geom_omr.dewarp_staff_lines(None) is None
+        rng = np.random.default_rng(0)
+        for bad in [np.random.RandomState(0).rand(120, 160).astype(np.float32),
+                    np.zeros((50, 50, 3), np.float32),         # 3-D -> returned unchanged
+                    rng.random((200, 200)).astype(np.float32)]:
+            assert geom_omr.dewarp_staff_lines(bad) is not None
+
+
+@requires_geom
+class TestGrayToUint8Rgb:
+    def test_converts_2d_float_to_hwc_uint8(self):
+        import numpy as np
+        g = np.linspace(0.0, 1.0, 20 * 30).reshape(20, 30).astype(np.float32)
+        rgb = geom_omr._gray_to_uint8_rgb(g)
+        assert rgb is not None
+        assert rgb.shape == (20, 30, 3) and rgb.dtype == np.uint8
+        # the three channels are identical (a grayscale image replicated)
+        assert (rgb[..., 0] == rgb[..., 1]).all() and (rgb[..., 1] == rgb[..., 2]).all()
+
+    def test_returns_none_on_bad_input(self):
+        import numpy as np
+        assert geom_omr._gray_to_uint8_rgb(None) is None
+        assert geom_omr._gray_to_uint8_rgb(np.zeros((5, 5, 3), np.float32)) is None  # not 2-D
+
+
+@requires_geom
+def test_estimate_interline_from_profile():
+    # the per-row darkness profile of evenly spaced staff lines recovers the interline (approx).
+    import numpy as np
+    g = _draw_page(interline=12)
+    prof = (g < 0.5).astype(np.float32).mean(axis=1)
+    il = geom_omr._estimate_interline_from_profile(prof)
+    assert il is not None and abs(il - 12) <= 2
+
+
 def _draw_grand_staff_with_barlines(barline_xs, width=400, interline=16, top=40, gap=64):
     """Two 5-line staves (a grand staff) with vertical barlines spanning the treble top line to
     the bass bottom line. Returns (gray, treble_lines, bass_lines)."""
