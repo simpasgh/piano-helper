@@ -283,6 +283,10 @@ def transcribe_with_symbols(image, detector: NoteheadDetector,
         symbols = detector.detect_symbols(image, imgsz=_auto_imgsz(gray.shape))
         if not symbols:
             return None
+        # photo defaults False: this path does NOT yet dewarp (no use_dw here), so there is no
+        # real-photo raster to flag. When it gains a dewarp it should mirror transcribe_with_detector
+        # and pass photo=use_dw; decode_symbols_to_musicxml already threads the flag to detect_barlines
+        # and pairs grand staves by gap (_pair_staves), so reviving the dewarp is the only step left.
         return geom_omr.decode_symbols_to_musicxml(staves, symbols, key_fifths=key_fifths, gray=gray)
     except Exception:
         return None

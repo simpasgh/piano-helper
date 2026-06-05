@@ -2008,7 +2008,7 @@ def _segment_events_to_measures(treble, bass, barlines, t_changes, b_changes):
         return []
 
 
-def decode_symbols_to_musicxml(staves, symbols, key_fifths=None, gray=None):
+def decode_symbols_to_musicxml(staves, symbols, key_fifths=None, gray=None, photo=False):
     """Decode the FULL multi-class symbol set into grand-staff MusicXML, reading durations, key,
     per-note accidentals, clefs, and rests from the glyphs (not just notehead centers). This is the
     trained full-symbol engine's decode tail (geom_detector.transcribe_with_symbols feeds it).
@@ -2018,6 +2018,9 @@ def decode_symbols_to_musicxml(staves, symbols, key_fifths=None, gray=None):
     key_fifths   : None -> DETECT the key from the engraved key signature (the deployed behavior);
                    an int pins it (oracle, for the eval ceiling).
     gray         : the grayscale image, for barline detection (real measures). None -> even binning.
+    photo        : True on the dewarp (real-photo) path -> detect_barlines lowers its coverage bar to
+                   _BAR_COV_PHOTO to recover a photo's faint / skewed barlines. Default False keeps
+                   clean uploads byte-identical. Mirrors _decode_staves_to_musicxml's photo flag.
 
     Returns MusicXML bytes or None. NEVER raises."""
     try:
@@ -2038,25 +2041,31 @@ def decode_symbols_to_musicxml(staves, symbols, key_fifths=None, gray=None):
             if fifths is None:
                 fifths = 0
 
-        barlines = detect_barlines(gray, staves) if gray is not None else [[] for _ in staves]
+        barlines = (detect_barlines(gray, staves, photo=photo)
+                    if gray is not None else [[] for _ in staves])
 
         measures: List[dict] = []
         any_event = False
         first_signs = None
-        for pi in range((len(staves) + 1) // 2):
-            ti, bi = 2 * pi, 2 * pi + 1
-            # default_sign matches the by-index opening clef printed below (treble upper, bass
-            # lower), so a staff with NO detected clef glyph decodes pitch under the SAME clef it
-            # is labeled with (no treble/bass desync if the detector misses a clef).
+        # Pair grand staves by VERTICAL GAP (_pair_staves), not index parity. Parity (treble=2i,
+        # bass=2i+1) silently mispairs the moment detection drops a staff mid-page: every staff below
+        # the gap flips clef, so a whole bass staff reads in treble (an octave off AND wrong-hand).
+        # _pair_staves is immune and stays byte-identical on a cleanly detected page; bi is None for a
+        # lone staff whose partner went undetected (decoded as the page-top treble role). Mirrors the
+        # notehead-only _decode_staves_to_musicxml so the two paths cannot drift.
+        for (ti, bi) in _pair_staves(staves):
+            # default_sign matches the opening clef printed below (treble upper, bass lower of each
+            # pair), so a staff with NO detected clef glyph decodes pitch under the SAME clef it is
+            # labeled with (no treble/bass desync if the detector misses a clef).
             t_ev, t_open, t_chg = (_decode_staff(staves[ti], per_staff[ti], fifths, default_sign="G", gray=gray)
-                                   if ti < len(staves) else ([], None, []))
+                                   if ti is not None and ti < len(staves) else ([], None, []))
             b_ev, b_open, b_chg = (_decode_staff(staves[bi], per_staff[bi], fifths, default_sign="F", gray=gray)
-                                   if bi < len(staves) else ([], None, []))
+                                   if bi is not None and bi < len(staves) else ([], None, []))
             if t_ev or b_ev:
                 any_event = True
             if first_signs is None and (t_ev or b_ev):
                 first_signs = (t_open or "G", b_open or "F")
-            blx = barlines[ti] if ti < len(barlines) else []
+            blx = barlines[ti] if (ti is not None and ti < len(barlines)) else []
             measures.extend(_segment_events_to_measures(t_ev, b_ev, blx, t_chg, b_chg))
 
         if not any_event or not measures:
