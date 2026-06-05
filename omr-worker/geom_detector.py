@@ -247,8 +247,13 @@ def transcribe_with_detector(image, detector: NoteheadDetector,
         # Trained notehead source: detect globally, then assign each head to its staff so the
         # per-staff lists are index-aligned with staves for the shared decode tail.
         per_staff = _assign_to_staves(centers, staves)
+        # normalize_illum: the adaptive flat-field decision from the dewarp block above (so barlines
+        # and ottavas share the staves' illumination space). photo=use_dw: the dewarp was kept only
+        # for a warped page (a real photo), so the photo-tolerant (lower) barline-coverage threshold
+        # engages there and NOT on clean uploads.
         return geom_omr._decode_staves_to_musicxml(
-            staves, per_staff, key_fifths=key_fifths, gray=work, normalize_illum=normalize_illum)
+            staves, per_staff, key_fifths=key_fifths, gray=work,
+            normalize_illum=normalize_illum, photo=use_dw)
     except Exception:
         return None
 

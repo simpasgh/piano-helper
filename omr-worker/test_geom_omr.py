@@ -771,7 +771,7 @@ def test_decode_forwards_normalize_illum(monkeypatch):
     import numpy as np
     captured = {}
 
-    def fake_barlines(gray, staves, normalize_illum=True):
+    def fake_barlines(gray, staves, normalize_illum=True, photo=False):
         captured["barlines"] = normalize_illum
         return [[] for _ in staves]
 
@@ -880,3 +880,86 @@ def test_detect_barlines_drops_non_gap_crossing_stack():
     for bx in (50, 150, 250):
         assert any(abs(x - bx) <= 3 for x in bl[0]), f"real barline {bx} lost"
     assert not any(abs(x - 170) <= 6 for x in bl[0]), "non-gap-crossing stack not filtered"
+
+
+# --- Grand-staff pairing by gap (robust to a missing staff): the photo decode hardening ---
+
+class TestPairStaves:
+    """_pair_staves groups detected staves into (treble, bass) pairs by VERTICAL gap, not index
+    parity, so a staff lost mid-page no longer flips the clef of every staff below it."""
+
+    @staticmethod
+    def _staff(center, il=10.0):
+        return [center - 2 * il + i * il for i in range(5)]  # 5 lines centred on `center`, interline il
+
+    def test_clean_even_reduces_to_consecutive(self):
+        # 3 fully-detected systems (intra gap 10 il, inter gap 26 il) MUST give the legacy
+        # consecutive pairing, so the clean path is byte-identical to before.
+        cs = [100, 200, 460, 560, 820, 920]
+        staves = [self._staff(c) for c in cs]
+        assert geom_omr._pair_staves(staves) == [(0, 1), (2, 3), (4, 5)]
+
+    def test_missing_middle_staff_does_not_cascade(self):
+        # T1 B1 | T2 (B2 lost) | T3 B3. Index parity (2i, 2i+1) would pair T2 with T3 -- both treble,
+        # an octave + wrong-hand cascade for the rest of the page. Gap pairing keeps T2 lone and
+        # re-pairs T3+B3 correctly.
+        cs = [100, 200, 460, 720, 820]  # gaps: 100(intra), 260(inter), 260(inter), 100(intra)
+        staves = [self._staff(c) for c in cs]
+        assert geom_omr._pair_staves(staves) == [(0, 1), (2, None), (3, 4)]
+
+    def test_lone_staff_at_end(self):
+        cs = [100, 200, 460]  # T1 B1 | T2 (lone, its bass undetected)
+        staves = [self._staff(c) for c in cs]
+        assert geom_omr._pair_staves(staves) == [(0, 1), (2, None)]
+
+    def test_never_raises_on_degenerate(self):
+        assert geom_omr._pair_staves([]) == []
+        assert isinstance(geom_omr._pair_staves([[1.0]]), list)  # one short staff -> no crash
+
+
+@pytest.mark.skipif(not geom_omr.GEOM_AVAILABLE, reason="needs numpy/PIL")
+def test_detect_barlines_skips_lone_staff():
+    # A LONE staff (grand-staff partner undetected) has no inter-staff gap, so a per-column dark scan
+    # reads every STEM as a barline. detect_barlines must return NO barlines for it (-> even binning)
+    # rather than over-segmenting on stems.
+    import numpy as np
+    from PIL import Image, ImageDraw
+    interline, top = 16, 40
+    lines = [top + i * interline for i in range(5)]
+    im = Image.new("L", (340, int(lines[-1] + 60)), 255)
+    d = ImageDraw.Draw(im)
+    for ly in lines:
+        d.line([(0, ly), (340, ly)], fill=0, width=2)
+    for sx in (60, 120, 180, 240):  # stems that would read as false barlines without the lone skip
+        d.line([(sx, lines[0]), (sx, lines[-1])], fill=0, width=2)
+    gray = np.asarray(im, dtype=np.float32) / 255.0
+    staves = geom_omr.detect_systems(gray)
+    assert len(staves) == 1
+    assert geom_omr.detect_barlines(gray, staves) == [[]]
+
+
+@pytest.mark.skipif(not geom_omr.GEOM_AVAILABLE, reason="needs numpy/PIL")
+def test_detect_barlines_photo_recovers_faint_barline():
+    # A FAINT / partial barline covering ~55% of the pair height is below the clean 0.70 coverage bar
+    # but above the photo 0.45 bar: photo=False misses it (clean byte-identical), photo=True recovers
+    # it (the camera under-segmentation fix). The two full barlines at 50/250 set the measure scale.
+    import numpy as np
+    from PIL import Image, ImageDraw
+    interline, top, gap = 16, 40, 64
+    treble = [top + i * interline for i in range(5)]
+    bass = [treble[-1] + gap + i * interline for i in range(5)]
+    y0, y1 = treble[0], bass[-1]
+    im = Image.new("L", (340, int(y1 + 60)), 255)
+    d = ImageDraw.Draw(im)
+    for ly in treble + bass:
+        d.line([(0, ly), (340, ly)], fill=0, width=2)
+    for bx in (50, 250):
+        d.line([(bx, y0), (bx, y1)], fill=0, width=2)        # full barlines
+    d.line([(150, y0), (150, int(y0 + 0.55 * (y1 - y0)))], fill=0, width=2)  # ~55% coverage -> faint
+    gray = np.asarray(im, dtype=np.float32) / 255.0
+    staves = geom_omr.detect_systems(gray)
+    assert len(staves) == 2
+    clean = geom_omr.detect_barlines(gray, staves, photo=False)[0]
+    photo = geom_omr.detect_barlines(gray, staves, photo=True)[0]
+    assert not any(abs(x - 150) <= 4 for x in clean), "faint barline must be missed on the clean path"
+    assert any(abs(x - 150) <= 4 for x in photo), "faint barline must be recovered on the photo path"
