@@ -589,3 +589,94 @@ def test_detect_barlines_recovers_under_shadow():
     staves = geom_omr.detect_systems(shadowed)
     bl = geom_omr.detect_barlines(shadowed, staves)
     assert any(abs(x - 50) <= 3 for row in bl for x in row)      # the barline survives the shadow
+
+
+# --- Conditional extra-barline removal (dense-score over-segmentation) ---------------------
+#
+# A dense chord/stem stack clears the >70%-pair-height test WITHOUT crossing the inter-staff gap, so
+# it reads as a false barline and over-segments the measure. _drop_extra_barlines removes such a
+# candidate ONLY when it is an EXTRA one (carves a measure narrower than half the system's median
+# measure width), so a uniformly-segmented system is provably untouched (the strict never-worse the
+# simple gap-only guard could not give -- tctab's one near-blank-gap real barline). PURE; no image.
+
+
+def test_drop_extra_barlines_keeps_uniform_even_when_all_weak():
+    # the core never-worse case: UNIFORM spacing is untouched regardless of gap score -- even if every
+    # candidate reads as non-gap-crossing, none is anomalously close, so nothing is dropped.
+    xs = [0.0, 100.0, 200.0, 300.0, 400.0]
+    assert geom_omr._drop_extra_barlines(xs, [0.1] * len(xs)) == xs
+    assert geom_omr._drop_extra_barlines(xs, [1.0] * len(xs)) == xs
+
+
+def test_drop_extra_barlines_keeps_well_spaced_weak():
+    # the tctab analog: a uniform strong grid with ONE weak (near-blank-gap) but WELL-SPACED real
+    # barline. It is not in a narrow measure, so it survives (the -0.003 the gap-only guard cost).
+    xs = [0.0, 100.0, 200.0, 300.0, 400.0]
+    scores = [1.0, 1.0, 0.05, 1.0, 1.0]   # the x=200 barline does not cross the gap, but is spaced
+    assert geom_omr._drop_extra_barlines(xs, scores) == xs
+
+
+def test_drop_extra_barlines_drops_close_weak():
+    # a false weak barline (x=120) anomalously close to a real one (x=100) is dropped; the rest stay.
+    xs = [0.0, 100.0, 120.0, 200.0, 300.0]
+    scores = [1.0, 1.0, 0.0, 1.0, 1.0]
+    assert geom_omr._drop_extra_barlines(xs, scores) == [0.0, 100.0, 200.0, 300.0]
+
+
+def test_drop_extra_barlines_keeps_close_strong():
+    # two GAP-CROSSING barlines genuinely close (a real short measure, e.g. a pickup) are BOTH kept --
+    # closeness alone never drops; the candidate must also fail the gap-crossing test.
+    xs = [0.0, 100.0, 120.0, 200.0, 300.0]
+    scores = [1.0, 1.0, 1.0, 1.0, 1.0]
+    assert geom_omr._drop_extra_barlines(xs, scores) == xs
+
+
+def test_drop_extra_barlines_discriminates_by_gap_score():
+    # when two close candidates are both weak, the WEAKER (lower gap darkness) is the false one
+    # dropped: a real-but-cluttered barline (x=100, score 0.30) beats a stack column (x=118, 0.05).
+    xs = [0.0, 100.0, 118.0, 200.0, 300.0, 400.0]
+    scores = [1.0, 0.30, 0.05, 1.0, 1.0, 1.0]
+    assert geom_omr._drop_extra_barlines(xs, scores) == [0.0, 100.0, 200.0, 300.0, 400.0]
+
+
+def test_drop_extra_barlines_drops_cluster_of_false():
+    # several false barlines bunched inside one real measure are all removed (iterates to convergence).
+    xs = [0.0, 100.0, 115.0, 130.0, 200.0, 300.0]
+    scores = [1.0, 1.0, 0.0, 0.0, 1.0, 1.0]
+    assert geom_omr._drop_extra_barlines(xs, scores) == [0.0, 100.0, 200.0, 300.0]
+
+
+def test_drop_extra_barlines_never_raises_on_degenerate():
+    # robustness contract: too-few candidates, length mismatch, and empties all return the input.
+    assert geom_omr._drop_extra_barlines([], []) == []
+    assert geom_omr._drop_extra_barlines([1.0, 2.0], [0.0, 0.0]) == [1.0, 2.0]      # n < 3
+    assert geom_omr._drop_extra_barlines([1.0, 2.0, 3.0], [0.0]) == [1.0, 2.0, 3.0]  # mismatch
+
+
+@requires_geom
+def test_detect_barlines_drops_non_gap_crossing_stack():
+    # INTEGRATION: a dense chord/stem STACK that clears >70% of the pair height but is BLANK across
+    # the inter-staff gap, sitting close to a real barline, must be filtered out while the real
+    # uniformly-spaced barlines survive. This is the dense over-segmentation the fix targets.
+    import numpy as np
+    from PIL import Image, ImageDraw
+    interline, top, gap = 16, 40, 64
+    treble = [top + i * interline for i in range(5)]
+    bass = [treble[-1] + gap + i * interline for i in range(5)]
+    im = Image.new("L", (340, int(bass[-1] + 60)), 255)
+    d = ImageDraw.Draw(im)
+    for ly in treble + bass:
+        d.line([(0, ly), (340, ly)], fill=0, width=2)
+    for bx in (50, 150, 250):                                  # 3 real, uniform, gap-crossing barlines
+        d.line([(bx, treble[0]), (bx, bass[-1])], fill=0, width=2)
+    # a stack at x=170 (20px from the real barline at 150): dark over the treble and bass note rows
+    # but BLANK across the inter-staff gap centre (it does not cross it, unlike a real barline).
+    d.line([(170, treble[0]), (170, treble[-1] + 12)], fill=0, width=2)  # treble half of the stack
+    d.line([(170, bass[0] - 12), (170, bass[-1])], fill=0, width=2)      # bass half of the stack
+    gray = np.asarray(im, dtype=np.float32) / 255.0
+    staves = geom_omr.detect_systems(gray)
+    assert len(staves) == 2
+    bl = geom_omr.detect_barlines(gray, staves)
+    for bx in (50, 150, 250):
+        assert any(abs(x - bx) <= 3 for x in bl[0]), f"real barline {bx} lost"
+    assert not any(abs(x - 170) <= 6 for x in bl[0]), "non-gap-crossing stack not filtered"
