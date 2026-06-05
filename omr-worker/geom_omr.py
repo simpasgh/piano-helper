@@ -938,6 +938,17 @@ _BAR_COV_PHOTO = 0.45   # photo (dewarped) path: a real phone photo's faint / sl
 #                         at 0.70 but ~9 at 0.45, lifting icarus note_f1 0.471 -> 0.901 (near its
 #                         segmentation-free ceiling 0.939) with the other pieces flat or up; below 0.45
 #                         the gain plateaus while false candidates start to appear.
+# WIDE-MEASURE SPLIT (photo only, the inverse of _drop_extra_barlines). Even at _BAR_COV_PHOTO some
+# real photo barlines fade below the coverage bar entirely, so a system UNDER-segments: one measure
+# spans the width of two and every later measure NUMBER shifts, which the (measure,staff,midi) metric
+# punishes (reverie photo: optimal order-preserving re-alignment recovers note recall 0.616->0.703,
+# liminality 0.444->0.663, i.e. dropped barlines, not pitch, are the residual). _insert_missing_barlines
+# recovers a faded bar that still CROSSES the inter-staff gap (high gcov) inside an anomalously WIDE
+# measure, self-calibrated to the kept bars so clutter cannot fabricate one. Clean never dewarps so it
+# never runs there (byte-identical).
+_BAR_WIDE_FRAC = 1.7    # a measure wider than this fraction of the system median holds a missed bar.
+_BAR_INSERT_FRAC = 0.8  # a recovered bar must cross the gap >= this fraction as strongly as the
+#                         system's median KEPT bar (floored at _BAR_GAP_CROSS) -- the precision gate.
 
 
 def _drop_extra_barlines(xs: List[float], scores: List[float]) -> List[float]:
@@ -983,6 +994,82 @@ def _drop_extra_barlines(xs: List[float], scores: List[float]) -> List[float]:
             if not dropped:
                 break
         return [xs[i] for i in range(n) if keep[i]]
+    except Exception:
+        return xs
+
+
+def _best_thin_barcol(seg, thr: float, maxw: int) -> Optional[int]:
+    """Index (within `seg`) of the strongest THIN gap-crossing column, or None if none qualifies. A
+    candidate is a contiguous run of gcov >= _BAR_GAP_CROSS whose width is <= maxw (a real barline is a
+    thin vertical line); the run's peak must reach `thr`. The width gate rejects a SUSTAINED dark band
+    (a slur / tie / hairpin / smudge sagging into the inter-staff gap), which would otherwise clear a
+    bare darkness threshold and split a measure at a false bar. Returns the peak of the strongest
+    qualifying run. PURE; NEVER raises (caller already guards, but stay defensive)."""
+    try:
+        m = len(seg)
+        best_c, best_v = None, 0.0
+        c = 0
+        while c < m:
+            if float(seg[c]) >= _BAR_GAP_CROSS:
+                s = c
+                while c < m and float(seg[c]) >= _BAR_GAP_CROSS:
+                    c += 1
+                if (c - s) <= maxw:  # thin run -> a line, not a band
+                    pk = s + int(seg[s:c].argmax())
+                    if float(seg[pk]) >= thr and float(seg[pk]) > best_v:
+                        best_v, best_c = float(seg[pk]), pk
+            else:
+                c += 1
+        return best_c
+    except Exception:
+        return None
+
+
+def _insert_missing_barlines(xs: List[float], gcov, sp: float) -> List[float]:
+    """PHOTO-ONLY. Recover a barline that faded BELOW the coverage bar (so its column never became a
+    candidate) yet still clearly crosses the inter-staff gap. Symmetric to _drop_extra_barlines: that
+    drops an anomalously NARROW measure's extra bar; this SPLITS an anomalously WIDE measure (a gap
+    wider than _BAR_WIDE_FRAC x the system's median measure width) at its strongest interior gap-
+    crossing column. The split fires ONLY when that column crosses the gap at least _BAR_INSERT_FRAC as
+    strongly as the system's MEDIAN kept bar (floored at _BAR_GAP_CROSS), self-calibrating to this
+    system so a dense-stack or photo smudge cannot fabricate a bar. A uniformly-segmented system has no
+    over-wide measure, so `xs` is returned unchanged (strict never-worse). `gcov` is the per-column
+    central-gap dark fraction (None when there is no inter-staff gap -> no-op). PURE; NEVER raises."""
+    try:
+        if gcov is None or len(xs) < 2 or sp <= 0:
+            return xs
+        n = len(gcov)
+        kept = [float(gcov[int(round(x))]) for x in xs if 0 <= int(round(x)) < n]
+        if not kept:
+            return xs
+        ks = sorted(kept)
+        thr = max(_BAR_GAP_CROSS, ks[len(ks) // 2] * _BAR_INSERT_FRAC)
+        gaps = sorted(xs[i + 1] - xs[i] for i in range(len(xs) - 1))
+        med = gaps[len(gaps) // 2]
+        if med <= 0:
+            return xs
+        wide = _BAR_WIDE_FRAC * med
+        margin = max(1, int(round(0.75 * sp)))
+        maxw = max(2, int(round(0.6 * sp)))  # a real bar is THIN; a wider dark band is a slur/smudge
+        cur = [float(x) for x in xs]
+        for _ in range(2 * len(xs) + 8):  # bounded: each pass inserts at most one bar (the bound is
+            cur.sort()                    # also the backstop should a dark plateau ever slip the gates)
+            inserted = False
+            for i in range(len(cur) - 1):
+                if cur[i + 1] - cur[i] <= wide:
+                    continue
+                lo = max(0, int(round(cur[i])) + margin)
+                hi = min(n, int(round(cur[i + 1])) - margin)
+                if hi - lo < 1:
+                    continue
+                col = _best_thin_barcol(gcov[lo:hi], thr, maxw)
+                if col is not None:
+                    cur.append(float(lo + col))
+                    inserted = True
+                    break
+            if not inserted:
+                break
+        return sorted(cur)
     except Exception:
         return xs
 
@@ -1073,6 +1160,8 @@ def detect_barlines(gray, staves: List[List[float]], normalize_illum: bool = Tru
                 else:
                     x += 1
             xs = _drop_extra_barlines(xs, scores)  # drop EXTRA non-gap-crossing (false) barlines only
+            if photo:
+                xs = _insert_missing_barlines(xs, gcov, sp)  # recover faded bars in over-wide measures
             for idx in (ti, bi):
                 if idx is not None and idx < len(staves):
                     out[idx] = xs
