@@ -1122,6 +1122,23 @@ _OTT_MIN_SHORT_RUNS = 15   # a dashed rule has many dashes; fewer is stray ink.
 _OTT_MIN_SPAN_IL = 40.0    # the bracket spans most of a system; a few interlines is local clutter.
 _OTT_MIN_FILL = 0.12       # dashes fill >= this fraction of their span; sparse stem/ledger fringe
 #                            below a staff fills only ~0.05 (a key 8vb precision guard, see below).
+# PHOTO MODE (photo=True, set only when the warped-photo dewarp was kept; clean stays byte-identical).
+# A printed 8va rule survives a phone photo as a FAINT, BROKEN, locally-smudged dashed line, so the
+# clean gates silently drop it and every bracketed note comes out an octave off (the reverie photo
+# bug: detect_ottavas found 4 brackets on the clean render but 1 on the photo). The relaxations below
+# were each measured on the 4 real photos (C:\Users\pascu\omr-train\ottava_*.py): they lift reverie
+# 0.471->0.663 and liminality 0.364->0.446 while leaving the ottava-free icarus/tctab unchanged (no
+# fabricated shift). The strict isolation + min-runs + fill gates are KEPT, which is what keeps photo
+# clutter from inventing a bracket; only ink/span/long-run are loosened.
+_OTT_INK_PHOTO = 0.62      # scan dashes at this darker threshold (vs <0.5): faint photo ink sits at
+#                            ~0.55-0.7 gray and is invisible to the clean <0.5 test (fill ~doubles).
+_OTT_MIN_SPAN_IL_PHOTO = 24.0  # a genuine short 8va (2-3 measures) spans ~24-38 il; reverie's system-2
+#                            8va measures 38.6 il and is killed by the clean 40-il floor.
+_OTT_MAX_LONG_PHOTO = 6    # tolerate up to this many over-length runs in a candidate row (a beam or
+#                            smudge bleeding into the band) by DROPPING them, instead of the clean
+#                            rule's "any long run disqualifies the whole row" -- one smudge otherwise
+#                            voids an entire 36-dash rule. More than this many long runs is a real beam
+#                            region, not a dashed rule, so the row is still rejected.
 _OTT_BELOW_CLEAR_IL = 10.0  # only scan the 8vb band below a staff when the next staff is at least
 #                             this far down (open margin). A treble's "below" is the ~6.5-interline
 #                             inter-staff gap, where an 8vb is ambiguous with the BASS staff's 8va
@@ -1214,7 +1231,8 @@ def _band_ink(gray, ra: int, rb: int, s: int, e: int) -> float:
         return 1.0
 
 
-def _scan_dashed_rule(gray, y0: int, y1: int, xcut: int, sp: float) -> Optional[Tuple[float, float]]:
+def _scan_dashed_rule(gray, y0: int, y1: int, xcut: int, sp: float,
+                      photo: bool = False) -> Optional[Tuple[float, float]]:
     """Scan rows [y0, y1) of `gray` for the densest dashed-rule row (an ottava bracket). Returns the
     bracket x-extent (x0, x1) of the best qualifying row, or None if none qualifies. A row qualifies
     when its dark runs are all SHORT (<= _OTT_MAX_RUN_IL interlines, i.e. not a beam), there are
@@ -1223,7 +1241,12 @@ def _scan_dashed_rule(gray, y0: int, y1: int, xcut: int, sp: float) -> Optional[
     >= _OTT_MIN_SPAN_IL interlines, AND the dashes FILL >= _OTT_MIN_FILL of that span. The fill gate
     separates a real dashed rule (dash + gap, fill ~0.2-0.5) from the sparse fringe of stem/ledger
     BOTTOMS just outside a staff (~0.05). The far-left margin (clef/key/the "8" glyph) is excluded by
-    xcut, and only ISOLATED runs set the span, so the span measures the true dashes. NEVER raises."""
+    xcut, and only ISOLATED runs set the span, so the span measures the true dashes.
+
+    photo=True loosens three gates for a warped-photo raster (see the _OTT_*_PHOTO constants): a darker
+    ink threshold (faint photo dashes), a shorter span floor (a short 8va survives), and tolerance for
+    a few over-length runs (a smudge no longer voids the whole row). The strict isolation/min-runs/fill
+    gates are unchanged, so photo clutter still cannot fabricate a bracket. NEVER raises."""
     if not GEOM_AVAILABLE or gray is None:
         return None
     try:
@@ -1232,20 +1255,24 @@ def _scan_dashed_rule(gray, y0: int, y1: int, xcut: int, sp: float) -> Optional[
         y1 = max(0, min(int(y1), h))
         if y1 - y0 < 1 or sp <= 0:
             return None
+        ink_thr = _OTT_INK_PHOTO if photo else 0.5
         max_run = _OTT_MAX_RUN_IL * sp
-        min_span = _OTT_MIN_SPAN_IL * sp
+        min_span = (_OTT_MIN_SPAN_IL_PHOTO if photo else _OTT_MIN_SPAN_IL) * sp
         lo = max(1, int(round(_OTT_ISO_LO_IL * sp)))
         hi = max(lo + 1, int(round(_OTT_ISO_HI_IL * sp)))
         best: Optional[Tuple[int, float, float]] = None  # (n_iso, x0, x1)
         for r in range(y0, y1):
-            row = (gray[r, :] < 0.5).copy()
+            row = (gray[r, :] < ink_thr).copy()
             if xcut > 0:
                 row[:xcut] = False
             runs = _dash_runs(row)
             if len(runs) < _OTT_MIN_SHORT_RUNS:
                 continue
-            # a single long run (a beam / thick rule) disqualifies the whole row.
-            if max((e - s + 1) for (s, e) in runs) > max_run:
+            # A long run (a beam / thick rule) disqualifies the row. On clean a single one is fatal; on
+            # a photo we tolerate up to _OTT_MAX_LONG_PHOTO of them (a smudge or beam bleeding into the
+            # band) by dropping them below, since one stray smudge otherwise voids an entire dash rule.
+            long_runs = sum(1 for (s, e) in runs if (e - s + 1) > max_run)
+            if long_runs > (_OTT_MAX_LONG_PHOTO if photo else 0):
                 continue
             short = [(s, e) for (s, e) in runs if (e - s + 1) <= max_run]
             if len(short) < _OTT_MIN_SHORT_RUNS:
@@ -1282,7 +1309,8 @@ def _scan_dashed_rule(gray, y0: int, y1: int, xcut: int, sp: float) -> Optional[
 
 
 def detect_ottavas(gray, staves: List[List[float]],
-                   normalize_illum: bool = True) -> List[List[Tuple[float, float, int]]]:
+                   normalize_illum: bool = True,
+                   photo: bool = False) -> List[List[Tuple[float, float, int]]]:
     """Detect ottava (8va / 8vb) brackets per staff. Returns a list index-aligned with `staves`:
     out[i] is a list of spans (x0, x1, delta) on staff i, where delta = +1 for an 8va (a dashed rule
     ABOVE the staff top: the notes SOUND an octave higher, so sounding = written + 1 octave) and
@@ -1295,7 +1323,9 @@ def detect_ottavas(gray, staves: List[List[float]],
     is always 1 octave (size 8) -- reading the "8 vs 15" digit is out of scope for the notehead-only
     path. normalize_illum (default True) flat-fields first (no-op on clean); the warped-photo decode
     threads through detect_systems' choice so the bracket scan shares the staves' illumination space.
-    NEVER raises; returns [[] for _ in staves] on any failure so the decode is unchanged."""
+    photo (default False) loosens the dash gates for a warped-photo raster so the faint, broken,
+    smudged printed rule still registers (see _scan_dashed_rule); clean keeps photo=False and is
+    byte-identical. NEVER raises; returns [[] for _ in staves] on any failure so the decode unchanged."""
     out: List[List[Tuple[float, float, int]]] = [[] for _ in staves]
     if not GEOM_AVAILABLE or gray is None or not staves:
         return out
@@ -1318,7 +1348,7 @@ def detect_ottavas(gray, staves: List[List[float]],
             # The above-band is always safe to scan: it is either the open margin above the system or
             # the wide inter-system gap, neither of which holds another staff's content at this y.
             above = _scan_dashed_rule(gray, int(round(top - 4.0 * sp)),
-                                      int(round(top - 0.4 * sp)), xcut, sp)
+                                      int(round(top - 0.4 * sp)), xcut, sp, photo=photo)
             if above is not None:
                 spans.append((above[0], above[1], 1))
             # 8vb: a dashed rule in a tight band BELOW the bottom staff line. ONLY scanned when the
@@ -1332,7 +1362,7 @@ def detect_ottavas(gray, staves: List[List[float]],
             below_is_open = next_top is None or (next_top - bottom) >= _OTT_BELOW_CLEAR_IL * sp
             if below_is_open:
                 below = _scan_dashed_rule(gray, int(round(bottom + 0.4 * sp)),
-                                          int(round(bottom + 4.0 * sp)), xcut, sp)
+                                          int(round(bottom + 4.0 * sp)), xcut, sp, photo=photo)
                 if below is not None:
                     spans.append((below[0], below[1], -1))
             out[i] = spans
@@ -1412,7 +1442,7 @@ def _decode_staves_to_musicxml(
         # double-applying a bracket. The tradeoff is the sheet shows the real high notes with ledger
         # lines instead of a low position + an 8va bracket (acceptable, arguably clearer). When no
         # bracket is detected the shift is +0, so non-ottava output is byte-identical to before.
-        ottava_spans = (detect_ottavas(gray, staves, normalize_illum=normalize_illum)
+        ottava_spans = (detect_ottavas(gray, staves, normalize_illum=normalize_illum, photo=photo)
                         if gray is not None else [[] for _ in staves])
 
         def staff_chords(idx, clef):
