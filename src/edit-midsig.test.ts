@@ -273,6 +273,7 @@ describe("MID-2 REMOVE: choosing the prior region's value collapses a redundant 
     const rec = model.setKeyFifths(0, 3); // 0 == the prior region (C major) -> REMOVE
     expect(rec).not.toBeNull();
     expect(rec?.targetMeasure).toBe(3);
+    expect(rec?.removed).toBe(true); // the record flags a REMOVE (drives the removal-worded announce, MID-4)
     // m.3's own <key> is gone; the region reverts to inheriting C major.
     expect(ownFifthsOf(model.serialize(), 3)).toBeNull();
     // But m.3 still declares its own <time> (independent axis: removing key keeps time).
@@ -289,8 +290,25 @@ describe("MID-2 REMOVE: choosing the prior region's value collapses a redundant 
     const model = parseScoreModel(MULTI_REGION);
     const rec = model.setTimeSignature(4, 4, 3); // 4/4 == the prior region -> REMOVE the time
     expect(rec).not.toBeNull();
+    expect(rec?.removed).toBe(true); // the record flags a REMOVE (drives the removal-worded announce, MID-4)
     expect(ownMeterOf(model.serialize(), 3)).toBeNull(); // time removed
     expect(ownFifthsOf(model.serialize(), 3)).toBe(2); // key kept (independent axis)
+  });
+
+  it("a mid-piece ADD/EDIT (not a remove) leaves record.removed FALSE", () => {
+    const model = parseScoreModel(MULTI_REGION);
+    // EDIT the m.3 D-major change to A major (2 -> 3): a value != the prior region, so NOT a remove.
+    const keyRec = model.setKeyFifths(3, 3);
+    expect(keyRec?.removed).toBe(false);
+    // ADD a 6/8 change at m.2 (which inherits 4/4 and declares no time): an add, not a remove.
+    const timeRec = model.setTimeSignature(6, 8, 2);
+    expect(timeRec?.removed).toBe(false);
+  });
+
+  it("a START (initial-declaration) edit leaves record.removed FALSE (v1 path)", () => {
+    const model = parseScoreModel(MULTI_REGION);
+    expect(model.setKeyFifths(3)?.removed).toBe(false); // no atMeasure: the v1 initial edit
+    expect(model.setTimeSignature(2, 4)?.removed).toBe(false);
   });
 
   it("dropping the LAST declaration in an <attributes> drops the empty <attributes>", () => {
@@ -541,6 +559,25 @@ describe("MID undo/redo: add / edit / remove invert byte-for-byte", () => {
     // Re-apply (what applyCommand does on redo): same target + value -> same bytes.
     model.setKeyFifths(3, 3);
     expect(model.serialize()).toBe(after);
+  });
+
+  // POLISH item 6: the REMOVE redo path. applyCommand re-runs setKeyFifths on redo, re-deriving the
+  // record; after undo (the <key> is back), re-applying must AGAIN report removed=true so the redo
+  // announce stays the removal wording (not a set). Same for time.
+  it("re-running a REMOVE after undo re-derives removed=true (key + time redo announce stays a removal)", () => {
+    const km = parseScoreModel(MULTI_REGION);
+    const kRec = km.setKeyFifths(0, 3)!; // REMOVE the m.3 key
+    expect(kRec.removed).toBe(true);
+    km.restoreKey(kRec); // undo (re-adds the <key>)
+    const kRedo = km.setKeyFifths(0, 3)!; // redo re-runs the same edit
+    expect(kRedo.removed).toBe(true); // still a remove -> removal-worded announce on redo
+
+    const tm = parseScoreModel(MULTI_REGION);
+    const tRec = tm.setTimeSignature(4, 4, 3)!; // REMOVE the m.3 time
+    expect(tRec.removed).toBe(true);
+    tm.restoreTime(tRec); // undo (re-adds the <time>)
+    const tRedo = tm.setTimeSignature(4, 4, 3)!; // redo
+    expect(tRedo.removed).toBe(true);
   });
 });
 

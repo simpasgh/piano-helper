@@ -8,8 +8,10 @@
 //
 // The detach only REMOVES the host node from #sheet; the host div and its SVG content survive (a live
 // reference keeps it alive), so re-appending the SAME node restores the staff instantly with no
-// re-render. Reflowing the Verovio engraving to a new width on resize is a separate concern (the
-// staff keeps its entered width until the next edit); this guard only ensures it is never blank.
+// re-render. This guard's job is only that the staff is never BLANK during a resize. Re-engraving the
+// Verovio staff to the new WIDTH is a separate, edit-mode-scoped debounced resize listener in main.ts
+// (enterEditMode/exitEditMode): this observer de-blanks instantly within that debounce window, then the
+// reflow re-renders at the settled width on top.
 
 /**
  * Re-append `host` to `sheet` when edit mode is on and OSMD has detached it. Returns true if it acted.

@@ -49,6 +49,11 @@ import {
   timePillLabel,
   timePillAria,
 } from "./time-names";
+import {
+  durationEditAnnounce,
+  keySetAnnounce as buildKeySetAnnounce,
+  timeSetAnnounce as buildTimeSetAnnounce,
+} from "./edit-announce";
 import { shouldStartPitchDrag } from "./edit-pointer";
 import {
   staffNavOrder,
@@ -103,6 +108,7 @@ import {
 import { buildSalamanderSampleMap, SALAMANDER_BASE_URL } from "./sampler";
 import { renderSheetLabels } from "./sheet-overlay";
 import { observeHostReattach } from "./host-reattach";
+import { debounce, type Debounced } from "./debounce";
 import {
   tempoPercentToRate,
   rateToBpm,
@@ -279,6 +285,14 @@ let verovioHost: HTMLDivElement | null = null;
 // Watches #sheet during edit mode and re-attaches verovioHost the instant OSMD's autoResize render
 // detaches it, so the edit staff is never left blank by a mid-edit resize (see ./host-reattach).
 let hostReattachObserver: MutationObserver | null = null;
+// The edit-mode window-resize REFLOW listener + its debounced handler. While editing, a settled resize
+// re-runs renderVerovio so the staff RE-ENGRAVES to the new sheet width (the host-reattach observer only
+// keeps it from going blank during the debounce window; this re-engraves the width on top). Added in
+// enterEditMode, removed in exitEditMode, so it exists only while editing. Debounced (EDIT_RESIZE_DEBOUNCE_MS)
+// so a drag-resize does not thrash the Verovio re-render; cancel() drops a late timer on exit.
+const EDIT_RESIZE_DEBOUNCE_MS = 200;
+let editResizeReflow: Debounced<[]> | null = null;
+let editResizeListener: (() => void) | null = null;
 // Guard against overlapping enter-edit-mode loads (the lazy import is async).
 let editModeLoading = false;
 
@@ -644,6 +658,16 @@ async function enterEditMode(): Promise<void> {
       () => verovioHost,
       () => editMode,
     );
+    // REFLOW on resize (completes the #225 fix): a settled window resize re-engraves the staff to the new
+    // width. Debounced so a drag-resize re-renders once after it settles; guarded on editMode so a queued
+    // timer that fires post-exit is a no-op. The host-reattach observer above de-blanks instantly during
+    // the debounce window; this adds the width reflow. Removed + cancelled in exitEditMode.
+    editResizeReflow?.cancel();
+    editResizeReflow = debounce(() => {
+      if (editMode) renderVerovio();
+    }, EDIT_RESIZE_DEBOUNCE_MS);
+    editResizeListener = () => editResizeReflow?.();
+    window.addEventListener("resize", editResizeListener);
     // Both surfaces become focusable application regions, each enumerating ITS keys.
     canvas.setAttribute("tabindex", "0");
     canvas.setAttribute("role", "application");
@@ -677,6 +701,12 @@ function exitEditMode(): void {
   // Stop guarding the host now that there is no edit staff to keep attached.
   hostReattachObserver?.disconnect();
   hostReattachObserver = null;
+  // Detach the resize REFLOW listener + drop any pending debounced re-render, so a late timer cannot
+  // renderVerovio after teardown (and we do not leak a listener across edit sessions).
+  if (editResizeListener) window.removeEventListener("resize", editResizeListener);
+  editResizeListener = null;
+  editResizeReflow?.cancel();
+  editResizeReflow = null;
   editBtn.setAttribute("aria-pressed", "false");
   editBtn.title =
     "Edit mode off. Click to fix wrong notes on the staff or the falling notes.";
@@ -1358,10 +1388,10 @@ function doRedo(): void {
   }
   if (cmd.kind === "setKey") {
     // Redo of a key edit: applyCommand re-ran model.setKeyFifths(after, atMeasure) (deterministic), so
-    // the same change (start or mid-piece) is applied again. Pitch-preserving, so the falling notes hold;
-    // finishEdit re-engraves the staff + re-seats the pill from the in-effect key at the selection.
-    // Announce like the forward edit (region-aware, naming the target measure for a mid-piece change).
-    finishEdit(keySetAnnounce(cmd.after, cmd.atMeasure), score ? score.notes.slice() : undefined);
+    // the same change (start or mid-piece) is applied again + re-derived cmd.record (so its `removed`
+    // flag is fresh). Pitch-preserving, so the falling notes hold; finishEdit re-engraves the staff +
+    // re-seats the pill. Announce like the forward edit (region-aware, removal-worded on a remove).
+    finishEdit(keySetAnnounce(cmd.after, cmd.atMeasure, cmd.record), score ? score.notes.slice() : undefined);
     return;
   }
   if (cmd.kind === "setTime") {
@@ -1629,16 +1659,9 @@ function durationAnnounce(
   rec: { outcome: string; fromName: string; toName: string; dottedSnap: boolean },
   fromValue: string,
 ): string {
-  const pitch = selectedNoteLabel();
-  // A lengthen/dot that grew the note PAST the barline with a tie: name the resulting SOUNDING value.
-  if (rec.outcome === "tied") return `${pitch} lengthened across the bar to ${rec.toName}`;
-  // A shorten that REMOVED a cross-barline tie: from the sounding value down, plus that the tie went.
-  if (rec.outcome === "untied") return `${pitch} ${rec.fromName} to ${rec.toName}, tie removed`;
-  if (rec.outcome === "clamped") return `${pitch} lengthened to fill the bar`;
-  // A dotted/odd arrival snapped to plain: phrase it from the arrival value ("Dotted quarter to
-  // quarter"), capitalized as it leads the sentence.
-  if (rec.dottedSnap) return `${capitalize(fromValue)} to ${rec.toName || noteValueName("", 0)}`;
-  return `${pitch} ${rec.fromName} to ${rec.toName}`;
+  // Resolve the pitch token (current Names mode) + the fill fallback word here; the pure builder owns
+  // the wording (incl. the off-ladder SNAP branch now naming the pitch, consistent with a plain step).
+  return durationEditAnnounce(rec, fromValue, selectedNoteLabel(), noteValueName("", 0));
 }
 
 // Whether the user prefers reduced motion (Designer P3-4: NO flash under it). Read fresh per call so
@@ -2871,15 +2894,23 @@ keySigMenu.addEventListener("keydown", (e) => {
   }
 });
 
-// The forward (and redo) announce for a KEY edit (MID-4): when the edit targeted a mid-piece measure N
-// (> 1) it NAMES the measure; for a start edit (no selection / the initial region) it keeps the v1
-// string. `atMeasure` is the command's target (undefined = start).
-function keySetAnnounce(fifths: number, atMeasure: number | undefined): string {
+// The forward (and redo) announce for a KEY edit (MID-4): a mid-piece REMOVE (the record's `removed`
+// flag) reads as a removal naming the measure + the reverted-to key; a mid-piece set names the measure;
+// a start edit keeps the v1 string. Resolves the key names (current is `fifths`; on a remove the region
+// reverts to that same `fifths`, the prior value) and delegates the wording to the pure builder. The
+// record is re-derived on redo (applyCommand), so the flag is correct on the redo announce too.
+function keySetAnnounce(
+  fifths: number,
+  atMeasure: number | undefined,
+  record: { removed: boolean } | null,
+): string {
   const name = keyMajorName(fifths);
-  if (atMeasure !== undefined && atMeasure > 1) {
-    return `Key signature set to ${name} from measure ${atMeasure}.`;
-  }
-  return `Key signature set to ${name}.`;
+  return buildKeySetAnnounce({
+    name,
+    atMeasure,
+    removed: record?.removed ?? false,
+    priorName: name, // a REMOVE sets the value to the prior, so the reverted-to key IS `fifths`
+  });
 }
 
 // Apply a key-signature edit (SIG-4 / MID-1), PITCH-PRESERVING, as ONE undoable command. The TARGET is
@@ -2913,8 +2944,9 @@ function setKeyEdit(fifths: number): void {
   reseatSignaturePills();
   // Pitch-preserving: pass the CURRENT falling notes so they do not move/recolor/re-time; finishEdit
   // re-renders the staff (Verovio re-engraves the new signature + accidentals) and refreshes the maps.
-  // The announce names the target measure for a mid-piece change (MID-4), else the v1 string.
-  finishEdit(keySetAnnounce(fifths, atMeasure), score ? score.notes.slice() : undefined);
+  // The announce names the target measure for a mid-piece change (MID-4), or reads as a removal when the
+  // edit dropped a redundant mid-piece <key> (cmd.record.removed), else the v1 string.
+  finishEdit(keySetAnnounce(fifths, atMeasure, cmd.record), score ? score.notes.slice() : undefined);
 }
 
 // ===== Time-signature picker (Smart Edit Mode SIGNATURE EDITING, SIG-2 / SIG-3) =====
@@ -2937,23 +2969,24 @@ const timeSigItems: HTMLButtonElement[] = PRESET_METERS.map((m) => {
 });
 timeSigMenu.append(...timeSigItems);
 
-// The forward (and redo) announce for a time edit (SIG-5 / MID-4): the all-bars-fit string, else the
-// guardrail string with the count of bars that no longer fill the new meter. When the edit targeted a
-// mid-piece measure N (> 1) it NAMES the measure ("from measure N"); a start edit keeps the v1 phrasing.
-// The mismatched count is already scoped to the affected region by the model. Shared by setTimeEdit + the
-// redo path so the two stay identical. `record` carries the mismatched-bar count + the target measure.
+// The forward (and redo) announce for a time edit (SIG-5 / MID-4): a mid-piece REMOVE (record.removed)
+// reads as a removal naming the measure + the reverted-to meter; otherwise the all-bars-fit string, else
+// the guardrail string with the count of bars that no longer fill the new meter, naming a mid-piece
+// measure N (> 1). The mismatched count is already scoped to the affected region by the model. Shared by
+// setTimeEdit + the redo path so the two stay identical (record is re-derived on redo, so `removed` is fresh).
 function timeSetAnnounce(
   beats: number,
   beatType: number,
-  record: { mismatchedBars: number; targetMeasure?: number | null } | null,
+  record: { mismatchedBars: number; targetMeasure?: number | null; removed?: boolean } | null,
 ): string {
   const meter = meterSlashLabel(beats, beatType);
-  const atMeasure = record?.targetMeasure ?? null;
-  const from = atMeasure !== null && atMeasure > 1 ? ` from measure ${atMeasure}` : "";
-  const n = record?.mismatchedBars ?? 0;
-  if (n <= 0) return `Time signature set to ${meter}${from}.`;
-  const bars = n === 1 ? "1 bar no longer fills" : `${n} bars no longer fill`;
-  return `Time signature set to ${meter}${from}. ${bars} the bar; adjust their note lengths.`;
+  return buildTimeSetAnnounce({
+    meter,
+    atMeasure: record?.targetMeasure ?? null,
+    mismatchedBars: record?.mismatchedBars ?? 0,
+    removed: record?.removed ?? false,
+    priorMeter: meter, // a REMOVE sets the meter to the prior, so the reverted-to meter IS (beats,beatType)
+  });
 }
 
 // Mark the cell matching (beats, beatType) as selected (and clear the rest), so the grid shows the
@@ -3736,18 +3769,13 @@ function frame(): void {
   requestAnimationFrame(frame);
 }
 
-// Recompute overlay label positions after a resize settles. OSMD autoResize
-// re-renders the SVG (moving noteheads), so the overlay must be rebuilt off the
-// new geometry. Debounced so a drag-resize does not rebuild every pixel.
-let resizeTimer: ReturnType<typeof setTimeout> | undefined;
-window.addEventListener("resize", () => {
-  if (resizeTimer !== undefined) clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => {
-    renderSheetLabels(osmd, sheetContainer, labelMode);
-    // Re-engrave the Verovio staff at the new width so it is not clipped (it preserves the
-    // current selection by id). Cheap re-render; only runs while edit mode is active.
-    if (editMode) renderVerovio();
-  }, 150);
-});
+// Recompute overlay label positions after a resize settles. OSMD autoResize re-renders the SVG (moving
+// noteheads), so the overlay must be rebuilt off the new geometry. Debounced so a drag-resize does not
+// rebuild every pixel. The Verovio edit-staff reflow is a SEPARATE, edit-mode-scoped listener (added in
+// enterEditMode / removed in exitEditMode, see EDIT_RESIZE_DEBOUNCE_MS) so it only exists while editing.
+window.addEventListener(
+  "resize",
+  debounce(() => renderSheetLabels(osmd, sheetContainer, labelMode), 150),
+);
 
 requestAnimationFrame(frame);
