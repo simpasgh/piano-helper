@@ -24,6 +24,12 @@ def _midis(xml):
                   if e.pitch is not None)
 
 
+def _ties(xml):
+    """The sorted <tie type=...> set of each pitched note in document order (rests dropped). [] for a
+    note with no tie. Reads via reconcile so it sees the sounding <tie> the worker pairs on."""
+    return [sorted(e.tie) for e in reconcile.to_events(xml, "x") if e.pitch is not None]
+
+
 def _time(xml):
     """The (beats, beat-type) text of the fused document's first <time>, or None if it has none.
     Read straight from the XML (independent of fusion._read_time) so the assertion proves what the
@@ -200,6 +206,39 @@ def test_fuse_preserves_chords():
     fused = fusion.fuse(geom, clarity)
     assert _midis(fused) == [48, 52]      # C3, E3
     assert _durs(fused) == [8, 8]         # the chord's two notes share the borrowed half-note
+
+
+def test_fuse_carries_clarity_ties_for_held_notes():
+    # geom is notehead-only: it reads the two C5 noteheads but NO connecting arc. Clarity reads the
+    # tie (start -> stop). The fusion must carry Clarity's tie onto geom's kept pitches; otherwise the
+    # held note's arc vanishes -- the bug, where _build rebuilt notes from pitch+duration only.
+    geom = _xml([
+        {"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []},
+        {"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []},
+    ])
+    assert _ties(geom) == [[], []]                       # precondition: geom emits no ties at all
+    clarity = _xml([
+        {"staff1": [{"duration": 4, "tie": "start", "pitches": [{"step": "C", "octave": 5}]}],
+         "staff2": []},
+        {"staff1": [{"duration": 4, "tie": "stop", "pitches": [{"step": "C", "octave": 5}]}],
+         "staff2": []},
+    ])
+    fused = fusion.fuse(geom, clarity)
+    assert _midis(fused) == [72, 72]                     # geom's two C5 noteheads kept
+    assert _ties(fused) == [["start"], ["stop"]]         # Clarity's tie now survives the fusion
+    assert b"<tied" in fused                             # and the engraved arc (verovio draws g.tie)
+
+
+def test_fuse_does_not_invent_ties_on_untied_notes():
+    # Two plain (untied) Clarity chords must not gain a tie in the fusion: a borrowed None tie is
+    # dropped, so a non-held note stays non-held (no fabricated arc / wrong sustain).
+    geom = _xml([{"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]},
+                             {"duration": 1, "pitches": [{"step": "D", "octave": 5}]}], "staff2": []}])
+    clarity = _xml([{"staff1": [{"duration": 4, "pitches": [{"step": "C", "octave": 5}]},
+                                {"duration": 4, "pitches": [{"step": "D", "octave": 5}]}], "staff2": []}])
+    fused = fusion.fuse(geom, clarity)
+    assert _ties(fused) == [[], []]                      # no tie fabricated
+    assert b"<tied" not in fused
 
 
 def test_fuse_borrows_clarity_time_signature():

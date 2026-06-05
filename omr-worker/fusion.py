@@ -18,7 +18,12 @@ A geom chord with no Clarity match is sized to the bar's meter (a lone onset fil
 a held note; with several onsets the unmatched ones split the leftover room, capped at a quarter each).
 
 geom's pitches pass through unchanged, so the fused pitch is exactly geom's (never worse than geom
-on pitch). Beyond per-note durations, fusion also adopts Clarity's declared TIME SIGNATURE (geom
+on pitch). Each borrowed chord also carries Clarity's TIE ('start'/'stop'/'both') so a held note's
+connecting arc survives the geom rebuild (geom is notehead-only and reads no ties); the arc is
+metric-neutral -- reconcile.to_events emits each note with its own duration regardless of tie, so
+omr_eval's (midi,dur16) multiset is unchanged -- so it only restores the rendered hold/legato that
+the pre-geom Clarity-primary path already produced (worker.normalize_ties then pitch-pairs them).
+Beyond per-note durations, fusion also adopts Clarity's declared TIME SIGNATURE (geom
 fakes 4/4), so a non-4/4 piece declares its real meter: this renders it at true width and lets the
 rhythm-repair post-transform corroborate the bar capacity instead of bailing on a wrong meter. The
 time sig does not affect the rhythm/pitch metric (omr_eval keys on meter-agnostic per-(measure,staff)
@@ -65,23 +70,43 @@ def _read_time(xml_bytes) -> Optional[Tuple[int, int]]:
     return None
 
 
-def _chords_by_cell(xml_bytes) -> Dict:
-    """{(measure, staff): [(onset, [(step, alter, octave), ...], dur16), ...] sorted by onset}.
+def _tie_str(tieset) -> Optional[str]:
+    """Map a chord's accumulated <tie type=...> SET to the single 'tie' field
+    llm_omr.score_json_to_musicxml expects: 'both' (held on both sides) when start AND stop are
+    present, else 'start' / 'stop', else None. PURE."""
+    has_start = "start" in tieset
+    has_stop = "stop" in tieset
+    if has_start and has_stop:
+        return "both"
+    if has_start:
+        return "start"
+    if has_stop:
+        return "stop"
+    return None
 
-    One entry per ONSET SLOT (a chord) in each measure+hand, carrying its pitches and its
-    divisions-invariant duration (omr_eval._dur16). Robust: reconcile.to_events never raises and
-    returns [] on a parse failure, so a malformed engine output yields {}."""
+
+def _chords_by_cell(xml_bytes) -> Dict:
+    """{(measure, staff): [(onset, [(step, alter, octave), ...], dur16, tie), ...] sorted by onset}.
+
+    One entry per ONSET SLOT (a chord) in each measure+hand, carrying its pitches, its
+    divisions-invariant duration (omr_eval._dur16), and its TIE state ('start' / 'stop' / 'both' /
+    None -- the union of the slot's <tie> markers). Clarity reads ties; geom does not, so a geom
+    slot's tie is always None and the fused tie is borrowed from Clarity (see _borrow_from_clarity).
+    Robust: reconcile.to_events never raises and returns [] on a parse failure, so a malformed engine
+    output yields {}."""
     slots: Dict = {}
     for e in reconcile.to_events(xml_bytes, "x"):
         if e.pitch is None:
             continue
         cell = slots.setdefault((e.measure, e.staff), {})
-        d = cell.setdefault(e.onset, {"pitches": [], "dur": e.duration, "base": e.base})
+        d = cell.setdefault(e.onset, {"pitches": [], "dur": e.duration, "base": e.base, "tie": set()})
         d["pitches"].append(e.pitch)
         d["dur"] = max(d["dur"], e.duration)  # chord notes share a duration; guard with max
+        d["tie"] |= e.tie  # union the slot's tie markers (a held chord ties on its primary note)
     out: Dict = {}
     for cell, ons in slots.items():
-        out[cell] = [(o, ons[o]["pitches"], omr_eval._dur16(ons[o]["dur"], ons[o]["base"]))
+        out[cell] = [(o, ons[o]["pitches"], omr_eval._dur16(ons[o]["dur"], ons[o]["base"]),
+                      _tie_str(ons[o]["tie"]))
                      for o in sorted(ons)]
     return out
 
@@ -128,24 +153,28 @@ def _nw(gpc: List[FrozenSet], cpc: List[FrozenSet], gap: int = -1) -> List[Tuple
     return pairs
 
 
-def _borrow_durations(g_cells: Dict, c_cells: Dict) -> Dict:
-    """{(measure, staff, chord_index): dur16} borrowing each geom chord a Clarity duration. Aligns
-    each staff's full chord stream (concatenated across measures, so a measure-boundary drift between
-    the two engines does not break the match) by pitch-class Needleman-Wunsch. PURE."""
+def _borrow_from_clarity(g_cells: Dict, c_cells: Dict) -> Dict:
+    """{(measure, staff, chord_index): (dur16, tie)} borrowing each geom chord a Clarity duration AND
+    its tie ('start' / 'stop' / 'both' / None). geom reads pitch but neither rhythm nor ties, so BOTH
+    are taken from the temporally-corresponding Clarity chord found by the SAME pitch-class
+    Needleman-Wunsch alignment -- so a borrowed tie always comes from the very chord whose duration was
+    borrowed. Aligns each staff's full chord stream (concatenated across measures, so a
+    measure-boundary drift between the two engines does not break the match). PURE."""
     out: Dict = {}
     for staff in (1, 2):
         gpc: List[FrozenSet] = []
         gloc: List[Tuple[int, int]] = []
         for (mm, s) in sorted(k for k in g_cells if k[1] == staff):
-            for idx, (_o, pitches, _gd) in enumerate(g_cells[(mm, s)]):
+            for idx, (_o, pitches, _gd, _gt) in enumerate(g_cells[(mm, s)]):
                 gpc.append(_pc(pitches)); gloc.append((mm, idx))
         cpc: List[FrozenSet] = []
         cdur: List[int] = []
+        ctie: List[Optional[str]] = []
         for (cm, s) in sorted(k for k in c_cells if k[1] == staff):
-            for (_o, pitches, cd) in c_cells[(cm, s)]:
-                cpc.append(_pc(pitches)); cdur.append(cd)
+            for (_o, pitches, cd, ct) in c_cells[(cm, s)]:
+                cpc.append(_pc(pitches)); cdur.append(cd); ctie.append(ct)
         for gi, ci in _nw(gpc, cpc):
-            out[(gloc[gi][0], staff, gloc[gi][1])] = cdur[ci]
+            out[(gloc[gi][0], staff, gloc[gi][1])] = (cdur[ci], ctie[ci])
     return out
 
 
@@ -243,14 +272,19 @@ def _build(g_cells: Dict, borrowed: Dict, fifths: int, beats: int = 4, beat_type
         per_staff = {}
         for s in (1, 2):
             cell = g_cells.get((mm, s), [])
-            durs = [borrowed.get((mm, s, idx)) for idx in range(len(cell))]
+            borrows = [borrowed.get((mm, s, idx)) for idx in range(len(cell))]
+            durs = [b[0] if b is not None else None for b in borrows]   # unmatched -> None (sized below)
+            ties = [b[1] if b is not None else None for b in borrows]   # only a MATCHED chord can tie
             sized = _bar_fallback_durs(durs, capacity16, fallback)
             evs = []
-            for (_o, pitches, _gd), dur in zip(cell, sized):
-                evs.append({
+            for (_o, pitches, _gd, _gt), dur, tie in zip(cell, sized, ties):
+                ev = {
                     "duration": dur,
                     "pitches": [{"step": st, "alter": al, "octave": oc} for (st, al, oc) in pitches],
-                })
+                }
+                if tie:  # carry Clarity's tie so the engraved arc + held playback survive the fusion
+                    ev["tie"] = tie
+                evs.append(ev)
             per_staff[s] = evs
         measures.append({"staff1": per_staff.get(1, []), "staff2": per_staff.get(2, [])})
     if not measures:
@@ -295,7 +329,7 @@ def fuse_prefix(geom_xml, clarity_prefix_xml) -> Optional[bytes]:
         g_trunc = {k: v for k, v in g_cells.items() if k[0] in kept_measures}
         if not g_trunc:
             return fuse(geom_xml, clarity_prefix_xml)
-        borrowed = _borrow_durations(g_trunc, c_cells)
+        borrowed = _borrow_from_clarity(g_trunc, c_cells)
         beats, beat_type = _read_time(clarity_prefix_xml) or (4, 4)
         if beats == beat_type:
             beats, beat_type = 4, 4
@@ -331,7 +365,7 @@ def fuse(geom_xml, clarity_xml) -> Optional[bytes]:
         c_cells = _chords_by_cell(clarity_xml)
         if not c_cells:
             return geom_xml
-        borrowed = _borrow_durations(g_cells, c_cells)
+        borrowed = _borrow_from_clarity(g_cells, c_cells)
         beats, beat_type = _read_time(clarity_xml) or (4, 4)
         if beats == beat_type:
             # A meter metrically EQUIVALENT to 4/4 (beats == beat_type: the 2/2, 4/4, 8/8 family,
