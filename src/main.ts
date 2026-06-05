@@ -2196,6 +2196,9 @@ async function togglePlay(): Promise<void> {
     }
     transport.start();
     setPlaying(true);
+    // The streaming loader hides the cursor while paused (see scanSheet.onPartial); pressing Play
+    // means the user wants to follow along, so bring it back. A no-op when it is already showing.
+    if (hasSheet) osmd.cursor.show();
   }
 }
 
@@ -2425,6 +2428,13 @@ async function scanSheet(file: File): Promise<void> {
         if (shouldShowSystemLoader(frontier)) {
           const f = frontier as SystemFrontier;
           renderStreamOverlay(osmd, sheetContainer, f.done, f.total);
+          // The recognition loader owns the sheet now, so park the playback cursor out of sight:
+          // loadScoreXml/resyncCursor re-show it (at beat 1) on every partial, and that static
+          // green box parked over the finished systems just competes with the scan animation. Keep
+          // it hidden while paused; if the user is playing the partial, the moving cursor stays so
+          // they can follow along. togglePlay re-shows it when playback starts. (No flicker: the
+          // show + this hide run in the same synchronous turn, so the browser never paints between.)
+          if (!playing) osmd.cursor.hide();
           // The active system is the one after the finished ones (1-based for the reader); once all
           // are finalized the next complete write lands momentarily.
           const active = Math.min(f.done + 1, f.total);
@@ -2457,6 +2467,8 @@ async function scanSheet(file: File): Promise<void> {
       // The refine is over (it failed), so no more systems are coming; drop the per-system loader so
       // the last partial's skeleton rows do not linger forever over the kept result.
       clearStreamOverlay(sheetContainer);
+      // The loader had parked the cursor; with it gone, the kept result should show its cursor again.
+      if (hasSheet) osmd.cursor.show();
       showStatus("Showing notes (could not refine the rest).");
       return;
     }

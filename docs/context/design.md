@@ -1597,6 +1597,19 @@ relevant section, dated.
     pending) is fully delivered; only this finishing flourish is absent. Revisit if the sheet ever moves
     to an incremental renderer that can animate a single just-landed system.
 
+  ### POLISH (2026-06-05) - HIDE the playback cursor while the streaming loader is up. The OSMD
+  playback cursor (its default green vertical box) was being re-shown on EVERY partial (each partial
+  calls `loadScoreXml` -> `osmd.cursor.show()`, and later partials go through `upgradeNotes` ->
+  `resyncCursor` which also shows it). Parked at beat 1 over the already-engraved finished systems, it
+  read as a stray green block overlapping the recognition animation ("the loading animation overlaps a
+  bit weirdly on the already generated systems"). FIX (`scanSheet.onPartial`, main.ts): after
+  `renderStreamOverlay`, `osmd.cursor.hide()` UNLESS the user is actually playing the partial (a moving
+  cursor they chose to follow stays). `togglePlay` re-shows it on Play; the final complete result and the
+  refine-failure degrade both re-show it when the loader clears. No flicker: the show + hide run in the
+  same synchronous turn, so the browser never paints between them. Rationale: during recognition the
+  cursor is not a meaningful affordance (nothing is playing), so it should defer to the scan animation;
+  it returns the moment the score is complete or the user presses Play.
+
 ## Smart Edit Mode ADD-A-NOTE v1: fill a rest (turn a REST into a NOTE of the same duration) (interaction + visual spec)
 
 - **2026-06-04 - The inverse of P2 delete. P2 (model-level DELETE) shipped: a selected note
