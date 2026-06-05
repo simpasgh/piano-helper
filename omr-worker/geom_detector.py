@@ -184,19 +184,43 @@ def transcribe_with_detector(image, detector: NoteheadDetector,
         gray = geom_omr._to_gray(image)
         if gray is None:
             return None
-        staves = geom_omr.detect_systems(gray)
+        # DEWARP tilted / perspective-curved staff lines (real phone photos), the camera-OMR lever:
+        # detect_systems keys on near-full-width dark rows, which a tilted/curved photographed page
+        # smears across rows, so the staff is lost. Straightening the lines recovers detection and the
+        # geometry the pitch decode needs.
+        #
+        # NEVER-WORSE-ON-CLEAN GUARD: keep the dewarp ONLY when it strictly INCREASES the number of
+        # detected staves. A clean page's lines are already horizontal, so its staves are fully detected
+        # raw and dewarping cannot add any -> we fall back to the ORIGINAL raster and the clean path is
+        # byte-identical (detector + staves + barlines all on the untouched image). A warped page's
+        # staff count jumps, so the dewarp is kept and the detector, staff geometry, and barlines ALL
+        # run on the dewarped image (notehead centres and staff lines share one straightened space).
+        staves_raw = geom_omr.detect_systems(gray)
+        gray_dw = geom_omr.dewarp_staff_lines(gray)
+        use_dw = False
+        staves = staves_raw
+        if gray_dw is not gray:
+            staves_dw = geom_omr.detect_systems(gray_dw)
+            if len(staves_dw) > len(staves_raw):
+                use_dw, staves = True, staves_dw
         if not staves:
             return None
+        work = gray_dw if use_dw else gray
 
         # Size the detector to the image: a tall multi-page stitch needs a larger imgsz so its
         # noteheads are not downscaled below the detector's reach (see _auto_imgsz).
-        centers = detector.detect(image, imgsz=_auto_imgsz(gray.shape))
+        det_source = image
+        if use_dw:
+            rgb = geom_omr._gray_to_uint8_rgb(gray_dw)
+            if rgb is not None:
+                det_source = rgb  # feed the straightened raster to the detector (in-memory, no temp)
+        centers = detector.detect(det_source, imgsz=_auto_imgsz(work.shape))
         if not centers:
             return None
         # Trained notehead source: detect globally, then assign each head to its staff so the
         # per-staff lists are index-aligned with staves for the shared decode tail.
         per_staff = _assign_to_staves(centers, staves)
-        return geom_omr._decode_staves_to_musicxml(staves, per_staff, key_fifths=key_fifths, gray=gray)
+        return geom_omr._decode_staves_to_musicxml(staves, per_staff, key_fifths=key_fifths, gray=work)
     except Exception:
         return None
 

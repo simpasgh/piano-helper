@@ -197,6 +197,24 @@ def _to_gray(image_path_or_gray):
         return None
 
 
+def _gray_to_uint8_rgb(gray):
+    """Convert a float [0,1] grayscale array (0=ink, 1=white) to an HxWx3 uint8 RGB array so a
+    DEWARPED image can be handed straight to the YOLO detector in-memory (no temp PNG round-trip).
+    The detector replicates a single channel internally, so an R=G=B image is equivalent to the
+    original raster. Returns None on any failure so the caller falls back to the original image
+    path. NEVER raises."""
+    if not GEOM_AVAILABLE or gray is None:
+        return None
+    try:
+        arr = np.asarray(gray, np.float32)
+        if arr.ndim != 2:
+            return None
+        u8 = (np.clip(arr, 0.0, 1.0) * 255.0).astype(np.uint8)
+        return np.repeat(u8[:, :, None], 3, axis=2)
+    except Exception:
+        return None
+
+
 def _row_ink(gray) -> "np.ndarray":
     """Per-row ink fraction (fraction of dark pixels in each row)."""
     return (gray < 0.5).mean(axis=1)
@@ -253,6 +271,218 @@ def normalize_illumination(gray, grid: int = 48, floor: float = 0.25, even_thres
                 (w, h), Image.BILINEAR), dtype=np.float32) / 255.0
         bg = np.maximum(bg, floor)  # floor avoids a divide blow-up in an all-ink / deep-shadow block
         return np.clip(gray / bg, 0.0, 1.0).astype(np.float32)
+    except Exception:
+        return gray
+
+
+def _estimate_interline_from_profile(prof1d) -> Optional[float]:
+    """Estimate the staff interline (pixels per line-to-line gap) from a 1-D row-darkness profile by
+    autocorrelation: the smallest PROMINENT period in roughly [4, len/8] pixels. Staff lines repeat
+    at the interline, so the profile's autocorrelation has its first strong peak at that lag. Returns
+    a float interline, or None when the profile carries no periodic line structure (blank page /
+    failure). Used only to SCALE the dewarp's window and search sizes, so an approximate value is
+    fine. NEVER raises."""
+    try:
+        p = np.asarray(prof1d, np.float32).ravel()
+        n = int(p.shape[0])
+        if n < 32:
+            return None
+        p = p - float(p.mean())
+        denom = float(np.dot(p, p))
+        if denom <= 1e-6:
+            return None
+        lo = 4
+        hi = max(lo + 3, min(n // 8, 80))
+        ac = np.empty(hi - lo, np.float32)
+        for i, lag in enumerate(range(lo, hi)):
+            ac[i] = float(np.dot(p[:n - lag], p[lag:])) / denom
+        gmax = float(ac.max())
+        if gmax <= 0.05:
+            return None
+        # The first prominent local maximum is the interline (a later, taller peak is a multiple of
+        # it or the inter-staff period; we want the fundamental line spacing).
+        for i in range(1, ac.shape[0] - 1):
+            if ac[i] >= ac[i - 1] and ac[i] > ac[i + 1] and ac[i] >= 0.5 * gmax:
+                return float(lo + i)
+        return float(lo + int(np.argmax(ac)))
+    except Exception:
+        return None
+
+
+def dewarp_staff_lines(gray, nstrips: int = 64, min_shift_px: float = 2.0):
+    """Straighten tilted / perspective-curved staff lines on a PHONE PHOTO of a page so the
+    row-projection staff detector (detect_systems), the barline detector, and the line/space pitch
+    decode all get clean, horizontal geometry. This is THE camera-OMR lever: the trained notehead
+    detector already finds the heads on a photo, but detect_systems keys on near-full-width dark ROWS
+    and a photographed page's staff lines are tilted AND curved by perspective, so each line smears
+    across many rows and the staff is lost (measured: tctab 2 of 22 staves, icarus 4 of 6).
+    Straightening the lines recovers detection AND the geometry the pitch decode needs.
+
+    COARSE-TO-FINE 2D DISPLACEMENT FIELD. The page is cut into `nstrips` vertical strips and each
+    strip's row-darkness profile is built.
+
+      COARSE (robust global, the validated column-uniform dewarp): cross-correlate each strip's WHOLE
+      profile against the centre strip's to find the single best vertical shift that aligns ALL of its
+      staves at once. Using the whole profile (every staff + the title/margins) makes the match unique
+      and immune to the staff's line-to-line periodicity, so it absorbs the large rotation/perspective
+      tilt cheaply and reliably. This alone recovers a rotated page (e.g. icarus).
+
+      FINE (per-band residual, the per-line upgrade): a single per-column shift cannot straighten a
+      page where the top staff and the bottom staff slope DIFFERENTLY (perspective gives each line its
+      own slope), which leaves residual error that stalls the pitch decode. So, on top of the coarse
+      alignment, re-correlate each strip against the centre in horizontal BANDS (~one staff tall),
+      searching only a SMALL range around the coarse shift. The small bounded search keeps the match
+      unambiguous (no locking onto the wrong staff) while letting each band drift independently, which
+      gives every staff its own correction. A band with no staff-line ink gets ~0 residual (it falls
+      back to the coarse shift), and the residual is confidence-weighted and smoothed.
+
+    The coarse shift plus the smoothed per-band residual is densified to a full (h, w) vertical
+    displacement field and the image is remapped so every staff line becomes horizontal.
+
+    NEVER-WORSE-ON-CLEAN. Two layers. (1) A SPARSE flat page produces a ~0 field, so when the field's
+    peak magnitude is below `min_shift_px` the INPUT OBJECT is returned UNCHANGED (identity). (2) A
+    DENSE flat page is trickier: its per-column content (noteheads, stems, beams) can nudge the
+    correlation off 0 and yield a spurious field even though the lines are already horizontal, so a
+    field-magnitude no-op alone is not enough. The AUTHORITATIVE clean guard therefore lives in the
+    CALLER (geom_detector.transcribe_with_detector): it keeps the dewarp ONLY when it strictly
+    INCREASES the number of detected staves. A clean page's staves are already fully detected, so
+    dewarping cannot increase them and the caller falls back to the original raster (byte-identical);
+    a warped page's staff count jumps, so the dewarp is kept. This needs no content/line tuning and
+    works on faint photo lines because both the raw and dewarped images go through the same detector.
+
+    gray is float [0,1] (0=ink, 1=white). Returns the same shape/dtype dewarped, or the input object
+    unchanged on a no-op / any failure (so a degenerate image can never break the engine). NEVER
+    raises."""
+    if not GEOM_AVAILABLE or gray is None:
+        return gray
+    try:
+        g = np.asarray(gray, np.float32)
+        if g.ndim != 2:
+            return gray
+        h, w = g.shape
+        if h < 64 or w < 64 or nstrips < 5:
+            return gray
+        try:
+            swv = np.lib.stride_tricks.sliding_window_view
+        except AttributeError:  # pragma: no cover - very old numpy
+            return gray
+        eps = 1e-6
+
+        dark = (g < 0.5).astype(np.float32)
+        edges = np.linspace(0, w, nstrips + 1).astype(int)
+        prof = np.zeros((nstrips, h), np.float32)
+        for s in range(nstrips):
+            x0, x1 = int(edges[s]), int(edges[s + 1])
+            if x1 > x0:
+                prof[s] = dark[:, x0:x1].mean(axis=1)
+        prof = ndimage.gaussian_filter1d(prof, 1.0, axis=1)
+        prof -= prof.mean(axis=1, keepdims=True)  # de-mean each strip for correlation
+
+        il = _estimate_interline_from_profile((dark.mean(axis=1)))
+        if il is None or il < 3.0 or il > h / 4.0:
+            return gray
+
+        # Per-strip energy (norm of the de-meaned profile). A margin strip with no staff lines has
+        # ~0 energy and carries NO alignment signal, so it must NOT be searched: its argmax would be
+        # garbage. A skipped strip keeps a 0 shift, and on a CLEAN page every inked strip aligns at
+        # shift 0 too, so the field is 0 everywhere and the page is a byte-identical no-op (a real page
+        # has side margins, so this blank-strip skip is what makes the clean no-op hold there).
+        strip_e = np.sqrt((prof * prof).sum(axis=1))
+        emax = float(strip_e.max()) if strip_e.size else 0.0
+        if emax <= eps:
+            return gray
+        strip_thresh = 0.1 * emax
+        c = nstrips // 2
+        if strip_e[c] < strip_thresh:           # centre strip is blank (rare) -> use the inkiest strip
+            c = int(np.argmax(strip_e))
+        ref = prof[c]
+
+        # COARSE: per-strip whole-profile shift to the centre strip (the validated column-uniform base).
+        # The whole profile (all staves + margins) makes the peak unique despite line periodicity.
+        maxshift = int(min(max(90, round(10.0 * il)), 0.15 * h))
+        offs = np.zeros(nstrips, np.float32)
+        for s in range(nstrips):
+            if strip_e[s] < strip_thresh:
+                continue  # blank margin strip -> 0 shift
+            ps = prof[s]
+            best, bd = -1e18, 0
+            for d in range(-maxshift, maxshift + 1, 2):
+                cval = float(np.dot(np.roll(ps, d), ref))
+                if cval > best:
+                    best, bd = cval, d
+            offs[s] = bd
+        offs = ndimage.gaussian_filter1d(offs, 2.0)
+
+        # FINE: residual per (strip, band), searched in a SMALL range around the coarse shift. Pre-roll
+        # each strip by its (integer) coarse shift so the residual search is centred on 0 for all strips.
+        offs_r = np.round(offs).astype(int)
+        prof_base = np.stack([np.roll(prof[s], int(offs_r[s])) for s in range(nstrips)])
+        bh = max(4, int(round(4.0 * il)))      # band half-height ~ one staff
+        rng = max(2, int(round(2.5 * il)))     # residual search range (well under one inter-staff gap)
+        bstep = max(2, int(round(3.0 * il)))   # band-centre spacing
+        b_lo, b_hi = bh + rng, h - bh - rng
+        if b_hi - b_lo >= 2 * bstep:
+            bands = np.arange(b_lo, b_hi, bstep)
+            nb = int(bands.shape[0])
+            resid = np.zeros((nstrips, nb), np.float32)
+            wt = np.zeros((nstrips, nb), np.float32)
+            bw = 2 * bh
+            # A band with no staff-line ink in the centre strip carries no alignment signal; its NCC is
+            # flat and argmax would return a biased garbage residual. Skip such GAP bands (leave their
+            # residual + weight 0) so they fall back to the robust coarse shift. The threshold is
+            # relative to the inkiest band, so a blank inter-staff gap is excluded but every real staff
+            # band is kept. This is also what keeps a CLEAN page (pure lines + wide gaps) a no-op.
+            band_norms = np.array([float(np.sqrt(np.dot(ref[int(yb) - bh:int(yb) + bh],
+                                                        ref[int(yb) - bh:int(yb) + bh]))) for yb in bands])
+            gap_thresh = 0.3 * float(band_norms.max()) if band_norms.size else 0.0
+            for bi in range(nb):
+                yb = int(bands[bi])
+                rb_norm = band_norms[bi] + eps
+                if band_norms[bi] < gap_thresh:
+                    continue  # blank gap band -> no residual (use the coarse shift here)
+                ref_band = ref[yb - bh:yb + bh]
+                seg = prof_base[:, yb - bh - rng:yb + bh + rng]     # (nstrips, bw + 2*rng)
+                if seg.shape[1] < bw:
+                    continue
+                sw = swv(seg, bw, axis=1)                           # (nstrips, 2*rng+1, bw)
+                num = np.einsum("srw,w->sr", sw, ref_band)
+                sw_norm = np.sqrt(np.einsum("srw,srw->sr", sw, sw)) + eps
+                ncc = num / (sw_norm * rb_norm)
+                t_best = np.argmax(ncc, axis=1)
+                # window index t maps to residual roll r = rng - t (t = rng is the no-shift centre).
+                resid[:, bi] = (rng - t_best).astype(np.float32)
+                wt[:, bi] = np.clip(ncc[np.arange(nstrips), t_best], 0.0, 1.0) * rb_norm
+            # Confidence-weighted smoothing: an evidence-free band gets ~0 residual (-> falls back to
+            # the robust coarse shift); a noisy band is relaxed toward its neighbours.
+            r_s = ndimage.gaussian_filter(resid * wt, (1.5, 1.0)) / (
+                ndimage.gaussian_filter(wt, (1.5, 1.0)) + eps)
+        else:
+            bands = np.array([h // 2], np.float32)
+            r_s = np.zeros((nstrips, 1), np.float32)
+
+        field_grid = offs[:, None] + r_s                            # (nstrips, nbands), roll amounts
+        if float(np.max(np.abs(field_grid))) < float(min_shift_px):
+            return gray  # already-flat page -> identity (the clean path stays byte-identical)
+
+        # Densify the (nstrips, nbands) field to (h, w) using the TRUE strip/band positions: np.interp
+        # maps each output row to a fractional BAND index and each output column to a fractional STRIP
+        # index, then one bilinear sample of field_grid (whose axes are [strip, band]).
+        strip_cx = ((edges[:-1] + edges[1:]) / 2.0).astype(np.float32)
+        band_idx = np.interp(np.arange(h), bands.astype(np.float32),
+                             np.arange(field_grid.shape[1], dtype=np.float32)).astype(np.float32)
+        strip_idx = np.interp(np.arange(w), strip_cx,
+                              np.arange(nstrips, dtype=np.float32)).astype(np.float32)
+        bi_grid, si_grid = np.meshgrid(band_idx, strip_idx, indexing="ij")  # both (h, w)
+        field_dense = ndimage.map_coordinates(field_grid, [si_grid, bi_grid], order=1, mode="nearest")
+
+        # Remap (roll convention, matching the coarse correlation): output row y samples input row
+        # y - field, so each line lands at its centre-column height. Rolled-in margin is white (paper).
+        yy = np.arange(h, dtype=np.float32)
+        xx = np.arange(w, dtype=np.float32)
+        out_y, out_x = np.meshgrid(yy, xx, indexing="ij")
+        in_y = (out_y - field_dense).astype(np.float32)
+        out = ndimage.map_coordinates(g, [in_y, out_x], order=1, mode="constant", cval=1.0)
+        return np.clip(out, 0.0, 1.0).astype(np.float32)
     except Exception:
         return gray
 
