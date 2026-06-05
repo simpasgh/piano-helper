@@ -846,6 +846,78 @@ def test_drop_extra_barlines_drops_cluster_of_false():
     assert geom_omr._drop_extra_barlines(xs, scores) == [0.0, 100.0, 200.0, 300.0]
 
 
+# --- Wide-measure split: recover a faded barline (photo under-segmentation) ----------------
+# _insert_missing_barlines splits a measure wider than _BAR_WIDE_FRAC x the system median at its
+# strongest interior gap-crossing column, but only when that column crosses the gap about as strongly
+# as the kept bars (self-calibrated) -- the inverse of _drop_extra_barlines. gcov is per-column gap
+# darkness. These are pure (no image); they lock the geometry that lifted the liminality photo +0.179.
+
+def _gcov(n, peaks, val=0.9):
+    import numpy as np
+    g = np.zeros(n, dtype=np.float32)
+    for p in peaks:
+        g[p] = val
+    return g
+
+
+def test_insert_missing_barlines_splits_wide_measure_at_strong_column():
+    # bars at 0/100/200/400: the 200->400 gap is 2x the 100 median, and a strong gap-crossing column
+    # sits at 300 (a faded real bar) -> it is recovered, restoring an even grid.
+    xs = [0.0, 100.0, 200.0, 400.0]
+    g = _gcov(450, [0, 100, 200, 300, 400])
+    assert geom_omr._insert_missing_barlines(xs, g, sp=16.0) == [0.0, 100.0, 200.0, 300.0, 400.0]
+
+
+def test_insert_missing_barlines_uniform_grid_unchanged():
+    # no over-wide measure -> nothing inserted even with strong ink everywhere (strict never-worse).
+    xs = [0.0, 100.0, 200.0, 300.0, 400.0]
+    g = _gcov(450, list(range(0, 450, 5)))
+    assert geom_omr._insert_missing_barlines(xs, g, sp=16.0) == xs
+
+
+def test_insert_missing_barlines_no_strong_column_unchanged():
+    # an over-wide measure whose interior has only WEAK gap darkness (0.3 < calibrated thr) is NOT
+    # split -- the precision gate that stops photo clutter from fabricating a bar.
+    xs = [0.0, 100.0, 200.0, 400.0]
+    g = _gcov(450, [0, 100, 200, 400])
+    g[300] = 0.3
+    assert geom_omr._insert_missing_barlines(xs, g, sp=16.0) == xs
+
+
+def test_insert_missing_barlines_splits_triple_wide_measure_twice():
+    # a 3x-wide measure (200->500) with two faded bars at 300/400 is split at BOTH (iterates).
+    xs = [0.0, 100.0, 200.0, 500.0]
+    g = _gcov(560, [0, 100, 200, 300, 400, 500])
+    assert geom_omr._insert_missing_barlines(xs, g, sp=16.0) == [0.0, 100.0, 200.0, 300.0, 400.0, 500.0]
+
+
+def test_insert_missing_barlines_rejects_sustained_dark_band():
+    # a slur / tie / hairpin / smudge sagging into the gap reads as a WIDE dark band (not a thin line).
+    # It clears the gap-darkness threshold but the thinness gate rejects it -> NO false split.
+    import numpy as np
+    xs = [0.0, 100.0, 200.0, 400.0]
+    g = _gcov(450, [0, 100, 200, 400])
+    g[280:340] = 0.9  # a 60px continuous dark band inside the over-wide 200..400 measure
+    assert geom_omr._insert_missing_barlines(xs, g, sp=16.0) == xs
+
+
+def test_best_thin_barcol_picks_thin_over_band():
+    import numpy as np
+    seg = np.zeros(200, dtype=np.float32)
+    seg[20:90] = 0.9   # a wide band (rejected)
+    seg[150] = 0.8     # a thin bar (accepted)
+    assert geom_omr._best_thin_barcol(seg, thr=0.5, maxw=10) == 150
+    # band only -> nothing qualifies
+    seg2 = np.zeros(200, dtype=np.float32); seg2[20:90] = 0.9
+    assert geom_omr._best_thin_barcol(seg2, thr=0.5, maxw=10) is None
+
+
+def test_insert_missing_barlines_none_gcov_and_degenerate_are_noops():
+    assert geom_omr._insert_missing_barlines([0.0, 100.0, 400.0], None, sp=16.0) == [0.0, 100.0, 400.0]
+    assert geom_omr._insert_missing_barlines([0.0], _gcov(10, [0]), sp=16.0) == [0.0]
+    assert geom_omr._insert_missing_barlines([], None, sp=16.0) == []
+
+
 def test_drop_extra_barlines_never_raises_on_degenerate():
     # robustness contract: too-few candidates, length mismatch, and empties all return the input.
     assert geom_omr._drop_extra_barlines([], []) == []
