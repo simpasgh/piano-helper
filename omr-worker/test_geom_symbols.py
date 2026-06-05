@@ -242,6 +242,23 @@ class TestDecodeSymbolsToMusicxml:
         assert b"<chord" in out
         assert b"<step>E</step>" in out and b"<step>G</step>" in out
 
+    def test_pairs_grand_staves_by_gap_not_index(self):
+        # A dropped MIDDLE staff (the real-photo case _pair_staves fixes): the page is
+        # treble1 / [bass1 missing] / treble2 / bass2, detected as 3 staves. Index parity would pair
+        # (0,1) = (treble1, treble2) and read treble2 (and everything below) under the WRONG clef.
+        # _pair_staves groups by vertical gap: staff 0 is a lone treble (a big system gap sits below
+        # it) and staves 1+2 are the surviving pair, so the bottom staff decodes under the F clef
+        # (G2 on its bottom line), not treble (E4 by index).
+        s0 = [100.0, 120.0, 140.0, 160.0, 180.0]   # lone treble; ~20-interline gap to the next system
+        s1 = [500.0, 520.0, 540.0, 560.0, 580.0]   # treble of the surviving pair
+        s2 = [620.0, 640.0, 660.0, 680.0, 700.0]   # bass of the pair (only ~6 interlines below s1)
+        symbols = [box("notehead_filled", 200, 700)]   # on s2's bottom line, NO clef glyph
+        out = geom_omr.decode_symbols_to_musicxml([s0, s1, s2], symbols, key_fifths=0)
+        assert out is not None
+        assert b"<step>G</step>" in out and b"<octave>2</octave>" in out  # bass-decoded (paired by gap)
+        assert b"<sign>F</sign>" in out                                   # and labeled bass
+        assert b"<step>E</step>" not in out                              # NOT the treble-by-index misread
+
 
 class TestSegmentEventsToMeasuresClefChange:
     def test_mid_score_clef_change_sets_measure_clef(self):
@@ -255,6 +272,30 @@ class TestSegmentEventsToMeasuresClefChange:
         assert len(measures) == 3
         assert "clefs" not in measures[0]
         assert measures[1]["clefs"] == [{"number": 1, "sign": "F", "line": 4}]
+
+
+# --- photo flag threading ----------------------------------------------------------------
+
+def test_decode_symbols_forwards_photo_to_detect_barlines(monkeypatch):
+    # decode_symbols_to_musicxml threads its photo flag into detect_barlines so the full-symbol path
+    # picks up the photo-tolerant barline-coverage threshold on the dewarp path, exactly like the
+    # notehead-only _decode_staves_to_musicxml. gray is a non-None sentinel (the stub ignores it) and
+    # the head is FILLED so the only gray consumer (_has_stem_cv, the open-head probe) is never
+    # reached, keeping the test pure (no numpy).
+    captured = {}
+
+    def fake_barlines(gray, staves, normalize_illum=True, photo=False):
+        captured["photo"] = photo
+        return [[] for _ in staves]
+
+    monkeypatch.setattr(geom_omr, "detect_barlines", fake_barlines)
+    symbols = [box("clef_g", 15, 140, 20, 60), box("notehead_filled", 200, 160)]
+
+    geom_omr.decode_symbols_to_musicxml([TREBLE], symbols, key_fifths=0, gray="sentinel", photo=True)
+    assert captured == {"photo": True}
+    captured.clear()
+    geom_omr.decode_symbols_to_musicxml([TREBLE], symbols, key_fifths=0, gray="sentinel")  # default
+    assert captured == {"photo": False}
 
 
 # --- never-raise (robustness contract) ---------------------------------------------------
