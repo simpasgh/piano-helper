@@ -169,7 +169,7 @@ class TestAdaptiveIllumination:
         # capture the normalize_illum the decode tail is called with, the observable decision.
         captured = {}
 
-        def fake_decode(staves, per_staff, key_fifths=0, gray=None, normalize_illum=True):
+        def fake_decode(staves, per_staff, key_fifths=0, gray=None, normalize_illum=True, photo=False):
             captured["normalize_illum"] = normalize_illum
             return b"<score-partwise/>"
 

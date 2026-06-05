@@ -76,7 +76,7 @@ class TestNoteheadPathShift:
         monkeypatch.setattr(geom_omr, "detect_ottavas",
                             lambda gray, staves, normalize_illum=True: [[(100.0, 200.0, 1)]])
         monkeypatch.setattr(geom_omr, "detect_barlines",
-                            lambda gray, staves, normalize_illum=True: [[] for _ in staves])
+                            lambda gray, staves, normalize_illum=True, photo=False: [[] for _ in staves])
         out = geom_omr._decode_staves_to_musicxml(
             [self.TREBLE], [[(150.0, 40.0)]], gray=object())
         assert out is not None
@@ -86,7 +86,7 @@ class TestNoteheadPathShift:
         monkeypatch.setattr(geom_omr, "detect_ottavas",
                             lambda gray, staves, normalize_illum=True: [[(100.0, 200.0, -1)]])
         monkeypatch.setattr(geom_omr, "detect_barlines",
-                            lambda gray, staves, normalize_illum=True: [[] for _ in staves])
+                            lambda gray, staves, normalize_illum=True, photo=False: [[] for _ in staves])
         out = geom_omr._decode_staves_to_musicxml(
             [self.TREBLE], [[(150.0, 40.0)]], gray=object())  # written G4 -> sounding G3
         assert out is not None
@@ -97,7 +97,7 @@ class TestNoteheadPathShift:
         monkeypatch.setattr(geom_omr, "detect_ottavas",
                             lambda gray, staves, normalize_illum=True: [[(300.0, 400.0, 1)]])
         monkeypatch.setattr(geom_omr, "detect_barlines",
-                            lambda gray, staves, normalize_illum=True: [[] for _ in staves])
+                            lambda gray, staves, normalize_illum=True, photo=False: [[] for _ in staves])
         out = geom_omr._decode_staves_to_musicxml(
             [self.TREBLE], [[(150.0, 40.0)]], gray=object())
         assert out is not None

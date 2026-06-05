@@ -696,6 +696,49 @@ def _interline(staff_lines: List[float]) -> Optional[float]:
         return None
 
 
+_PAIR_MAX_IL = 16.0  # max treble->bass CENTER spacing, in interlines, inside one grand staff.
+
+
+def _pair_staves(staves: List[List[float]]) -> List[Tuple[Optional[int], Optional[int]]]:
+    """Group detected staves into grand-staff (treble_idx, bass_idx) pairs by VERTICAL GAP rather
+    than index parity. Returns pairs top-to-bottom; bass_idx is None for a LONE staff whose partner
+    went undetected (it is decoded as treble, the page-top role).
+
+    WHY. The old rule (treble = 2i, bass = 2i+1) silently MISPAIRS as soon as detection drops one
+    staff in the middle of the page: every staff below the gap flips clef, so a whole bass staff is
+    read in treble (an octave off AND in the wrong hand) and note_f1 collapses for the rest of the
+    piece. On a real photo a staff is often lost (perspective / low contrast), so this is the
+    dominant photo-decode error once the dewarp has recovered most staves. Pairing by the actual
+    inter-staff gap is immune: a treble and its bass sit ~10 interlines apart centre-to-centre,
+    while the gap to the NEXT system is ~2-4x larger (measured on the eval pieces: intra 9.8-11.6
+    il, inter 25.8 il and up), so a small gap joins a pair and a large gap starts a new system.
+
+    On a CLEANLY detected page every staff is present and the gaps alternate small / large, so this
+    returns exactly [(0,1),(2,3),...] -- identical to the old parity pairing, leaving the clean path
+    byte-identical; it only diverges when a staff is missing (the photo case). NEVER raises; falls
+    back to the legacy consecutive pairing on any failure."""
+    n = len(staves)
+    try:
+        if n == 0:
+            return []
+        centers = [sum(float(v) for v in s) / len(s) for s in staves]
+        ils = sorted(v for v in (_interline(s) or 0.0 for s in staves) if v > 0)
+        il = ils[len(ils) // 2] if ils else 1.0   # median interline (a robust gap scale)
+        thr = _PAIR_MAX_IL * il
+        pairs: List[Tuple[Optional[int], Optional[int]]] = []
+        i = 0
+        while i < n:
+            if i + 1 < n and (centers[i + 1] - centers[i]) <= thr:
+                pairs.append((i, i + 1))   # small gap -> treble (top) + its bass (bottom)
+                i += 2
+            else:
+                pairs.append((i, None))    # large gap on both sides -> lone staff (treble role)
+                i += 1
+        return pairs
+    except Exception:
+        return [(2 * p, 2 * p + 1 if 2 * p + 1 < n else None) for p in range((n + 1) // 2)]
+
+
 # --- Classical notehead detection (numpy + scipy) ----------------------------------------
 
 def detect_noteheads(gray, staff_lines: List[float]) -> List[Tuple[float, float]]:
@@ -883,6 +926,18 @@ _BAR_GAP_CROSS = 0.5    # central-gap dark fraction at/above which a candidate c
 #                         stack. From the prototyped guard (gcov_centralhalf > 0.5).
 _BAR_NARROW_FRAC = 0.5  # a measure narrower than this fraction of the system's median measure width
 #                         is anomalous -> the bounding non-gap-crossing candidate is an EXTRA barline.
+_BAR_COV = 0.7          # clean: a barline column is dark over >70% of the grand-staff-pair height.
+_BAR_COV_PHOTO = 0.45   # photo (dewarped) path: a real phone photo's faint / slightly-skewed barlines
+#                         often only reach ~0.45-0.6 pair-height coverage, so they fall under 0.7 and
+#                         are MISSED -> the system under-segments, notes scatter across the wrong
+#                         measure NUMBERS, and note_f1 craters. Lowering the threshold only on the
+#                         dewarp (photo) path recovers them; the inter-staff-gap-crossing score and
+#                         _drop_extra_barlines still prune the extra candidates the lower bar admits.
+#                         Clean pages never dewarp, so they keep _BAR_COV and stay byte-identical.
+#                         0.45 was swept on the real photos: icarus systems 2-3 detect 5 of ~9 barlines
+#                         at 0.70 but ~9 at 0.45, lifting icarus note_f1 0.471 -> 0.901 (near its
+#                         segmentation-free ceiling 0.939) with the other pieces flat or up; below 0.45
+#                         the gain plateaus while false candidates start to appear.
 
 
 def _drop_extra_barlines(xs: List[float], scores: List[float]) -> List[float]:
@@ -932,11 +987,14 @@ def _drop_extra_barlines(xs: List[float], scores: List[float]) -> List[float]:
         return xs
 
 
-def detect_barlines(gray, staves: List[List[float]], normalize_illum: bool = True) -> List[List[float]]:
+def detect_barlines(gray, staves: List[List[float]], normalize_illum: bool = True,
+                    photo: bool = False) -> List[List[float]]:
     """Detect barline x-positions per grand-staff pair. Returns a list aligned with `staves`:
     out[i] is the sorted barline x-centers for the grand staff staff i belongs to (the treble and
     bass of a pair share one list). NEVER raises; returns empty lists on failure so the decode
-    falls back to even binning.
+    falls back to even binning. `photo=True` (the dewarp path) lowers the coverage bar to
+    _BAR_COV_PHOTO to recover a real photo's faint barlines; clean uploads never dewarp so they keep
+    _BAR_COV and are byte-identical.
 
     normalize_illum (default True) applies the flat-field first (a no-op on a clean page); the
     warped-photo decode threads through whatever detect_systems used so barlines share the same
@@ -945,9 +1003,10 @@ def detect_barlines(gray, staves: List[List[float]], normalize_illum: bool = Tru
     A barline is a near-vertical dark run spanning the FULL grand-staff height (treble top to bass
     bottom). The discriminator vs a stem is the INTER-STAFF GAP: a stem lives inside one staff, but
     a barline crosses the blank gap between the treble and bass staves, so requiring high dark
-    coverage over the whole pair height rejects stems, beams, and noteheads. Pairs staves as
-    (treble=2i, bass=2i+1), matching _clef_for_staff_index. A column is a barline if it is dark
-    over >70% of the pair height AND narrow (a few px); a wide dark run is a beam/blob, not a line.
+    coverage over the whole pair height rejects stems, beams, and noteheads. Pairs staves via
+    _pair_staves (by vertical gap, so a missing staff does not mispair the rest). A column is a
+    barline if it is dark over >70% of the pair height AND narrow (a few px); a wide dark run is a
+    beam/blob, not a line.
 
     A DENSE chord/stem stack also clears 70% of the pair height (treble notes + bass notes) WITHOUT
     crossing the blank gap, so it reads as a false barline and OVER-SEGMENTS the measure. Each
@@ -963,11 +1022,22 @@ def detect_barlines(gray, staves: List[List[float]], normalize_illum: bool = Tru
             gray = normalize_illumination(gray)  # flat-field photo shadows (no-op on clean)
         h, w = gray.shape
         mask = gray < 0.5
-        npairs = (len(staves) + 1) // 2
-        for pi in range(npairs):
-            ti, bi = 2 * pi, 2 * pi + 1
+        for (ti, bi) in _pair_staves(staves):
+            if ti is None:
+                continue
             top = sorted(float(v) for v in staves[ti])
-            bot = sorted(float(v) for v in staves[bi]) if bi < len(staves) else top
+            if bi is not None:
+                bot = sorted(float(v) for v in staves[bi])
+            elif photo:
+                # PHOTO lone staff (its grand-staff partner went undetected): no inter-staff gap, so
+                # the gap-crossing discriminator is gone and a per-column dark scan over a single
+                # staff height reads every STEM as a barline -> garbage over-segmentation that
+                # scatters the staff's notes across spurious measures. Skip it (-> even binning). A
+                # missing partner only arises on a real photo; a clean ODD / single-staff page keeps
+                # the legacy single-staff scan below, so the clean path stays byte-identical.
+                continue
+            else:
+                bot = top  # clean / classical lone staff: legacy single-staff scan (byte-identical)
             y0 = max(0, int(round(top[0])))
             y1 = min(h - 1, int(round(bot[-1])))
             if y1 - y0 < 4:
@@ -975,7 +1045,7 @@ def detect_barlines(gray, staves: List[List[float]], normalize_illum: bool = Tru
             sp = _interline(top) or 1.0
             band = mask[y0:y1 + 1, :]
             cov = band.sum(axis=0) / float(band.shape[0])  # per-column dark fraction over the pair
-            barcol = cov > 0.7
+            barcol = cov > (_BAR_COV_PHOTO if photo else _BAR_COV)
             # Per-column darkness across the CENTRAL HALF of the inter-staff gap (treble bottom line
             # to bass top line). A real barline is dark here; a chord/stem stack is blank. gcov stays
             # None when there is no gap (odd staff count -> bot == top), so nothing is discriminated.
@@ -1004,7 +1074,7 @@ def detect_barlines(gray, staves: List[List[float]], normalize_illum: bool = Tru
                     x += 1
             xs = _drop_extra_barlines(xs, scores)  # drop EXTRA non-gap-crossing (false) barlines only
             for idx in (ti, bi):
-                if idx < len(staves):
+                if idx is not None and idx < len(staves):
                     out[idx] = xs
         return out
     except Exception:
@@ -1294,11 +1364,6 @@ def ottava_delta_at(rep_x: float, spans: List[Tuple[float, float, int]]) -> int:
 
 # --- Full pipeline -----------------------------------------------------------------------
 
-def _clef_for_staff_index(idx_in_system: int) -> str:
-    """Within a grand staff, the upper staff is treble (G), the lower is bass (F). We pair
-    consecutive detected staves; even index -> treble, odd -> bass."""
-    return "G" if idx_in_system % 2 == 0 else "F"
-
 
 def _decode_staves_to_musicxml(
     staves: List[List[float]],
@@ -1306,6 +1371,7 @@ def _decode_staves_to_musicxml(
     key_fifths: int = 0,
     gray=None,
     normalize_illum: bool = True,
+    photo: bool = False,
 ) -> Optional[bytes]:
     """Shared decode tail for BOTH notehead sources: the classical detect_noteheads and the
     trained YOLO detector in geom_detector. Takes the detected staff-line groups and the
@@ -1336,7 +1402,7 @@ def _decode_staves_to_musicxml(
     Returns MusicXML bytes, or None if nothing usable was found. NEVER raises.
     """
     try:
-        barlines = (detect_barlines(gray, staves, normalize_illum=normalize_illum)
+        barlines = (detect_barlines(gray, staves, normalize_illum=normalize_illum, photo=photo)
                     if gray is not None else [[] for _ in staves])
         # Ottava (8va / 8vb) brackets per staff: a note under one SOUNDS an octave higher (8va) or
         # lower (8vb) than its written staff position. geom decodes the WRITTEN position, so without
@@ -1380,13 +1446,12 @@ def _decode_staves_to_musicxml(
         # into measures by that system's detected barlines; concatenate measures across systems.
         measures: List[dict] = []
         any_chord = False
-        for pi in range((len(staves) + 1) // 2):
-            ti, bi = 2 * pi, 2 * pi + 1
-            treble = staff_chords(ti, "G")
-            bass = staff_chords(bi, "F")
+        for (ti, bi) in _pair_staves(staves):
+            treble = staff_chords(ti, "G") if ti is not None else []
+            bass = staff_chords(bi, "F") if bi is not None else []
             if treble or bass:
                 any_chord = True
-            blx = barlines[ti] if ti < len(barlines) else []
+            blx = barlines[ti] if (ti is not None and ti < len(barlines)) else []
             measures.extend(_segment_to_measures(treble, bass, blx))
 
         if not any_chord or not measures:
