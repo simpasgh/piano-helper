@@ -1152,6 +1152,66 @@ def normalize_ties(xml_bytes):
         return xml_bytes
 
 
+def drop_ties_across_rests(xml_bytes):
+    """Strip any tie whose two endpoints are separated by a REST in the same staff.
+
+    A tie holds ONE sounding note across its endpoints, so a rest between the tie-START note and its
+    tie-STOP partner is musically impossible -- you cannot hold a note through a silence. This is the
+    "arc connecting two notes with a pause in the middle" symptom. It arises AFTER rhythm_repair pads
+    a short rest-free bar with a TRAILING rest: a tie-start note that does not fill its bar gets a
+    rest appended after it, and the arc then visually spans that rest. So this MUST run as the LAST
+    tie post-transform, after rhythm_repair (which is what inserts the offending rest).
+
+    Pairing mirrors normalize_ties (the nearest later same-staff same-pitch follower is the stop; by
+    the time this runs that follower always carries the stop normalize_ties paired/added). When a
+    same-staff rest sits STRICTLY between a start and its paired stop, BOTH ends are removed, leaving
+    two independent notes around the rest -- exactly what is rendered, now without the invalid arc. A
+    legitimate tie (incl. across a barline) has no same-staff rest between its ends, so it is kept.
+    Pitch/duration are never touched (only <tie>/<tied> markup is removed), so no metric can move.
+    Returns the input BYTES UNCHANGED when no invalid tie is found (so a valid or tie-free document
+    -- e.g. oemer -- is byte-identical, never re-serialized) and on ANY failure."""
+    try:
+        root = ET.fromstring(xml_bytes)
+        changed = False
+        for part in root.findall("part"):
+            stream = [n for measure in part.findall("measure") for n in measure.findall("note")]
+            for i, start in enumerate(stream):
+                if "start" not in [t.get("type") for t in start.findall("tie")]:
+                    continue
+                pitch = _pitch_key(start)
+                if pitch is None:
+                    continue
+                staff = _note_staff(start)
+                # The paired stop: the nearest later same-staff same-pitch note (matches the
+                # normalize_ties pairing). The first same-pitch follower decides the pair.
+                stop_idx = None
+                for k in range(i + 1, len(stream)):
+                    later = stream[k]
+                    if _note_staff(later) != staff:
+                        continue
+                    if _pitch_key(later) == pitch:
+                        if "stop" in [t.get("type") for t in later.findall("tie")]:
+                            stop_idx = k
+                        break
+                if stop_idx is None:
+                    continue
+                # A same-staff rest strictly between the two ends makes the held note impossible.
+                crosses_rest = any(
+                    stream[m].find("rest") is not None and _note_staff(stream[m]) == staff
+                    for m in range(i + 1, stop_idx)
+                )
+                if crosses_rest:
+                    _remove_tie_markup(start, "start")
+                    _remove_tie_markup(stream[stop_idx], "stop")
+                    changed = True
+        if not changed:
+            return xml_bytes
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    except Exception as err:  # never raise into process_job
+        log("drop_ties_across_rests skipped (%r)" % err)
+        return xml_bytes
+
+
 def select_primary_result(run_clarity_fn, run_oemer_fn, is_pdf_input, timeout=None):
     """Slice 1 of the ensemble (docs/context/tech-lead.md, 2026-06-02): run the two PRIMARY
     engines CONCURRENTLY and apply the EXISTING fallback selection unchanged.
@@ -1641,8 +1701,10 @@ def process_job(client, bucket, job_id):
                 partial_version[0] += 1
                 # Same post-transform chain as the complete write (merge -> normalize -> rhythm
                 # repair) so a partial renders with the same grand staff, ties, and bar completion.
-                finalized = rhythm_repair.repair_measure_durations(
-                    normalize_ties(merge_to_grand_staff(raw_body))
+                finalized = drop_ties_across_rests(
+                    rhythm_repair.repair_measure_durations(
+                        normalize_ties(merge_to_grand_staff(raw_body))
+                    )
                 )
                 # The block-by-block path supplies the system FRONTIER (total + done) so the client
                 # draws the per-system loader; the other progressive paths pass neither (a whole-page
@@ -1816,6 +1878,9 @@ def process_job(client, bucket, job_id):
             body = merge_to_grand_staff(body)
             body = normalize_ties(body)
             body = rhythm_repair.repair_measure_durations(body)
+            # Last: drop any tie that rhythm_repair's trailing rest left spanning a silence (a held
+            # note cannot cross a rest); runs after rhythm_repair, which is what inserts that rest.
+            body = drop_ties_across_rests(body)
         else:
             body = FAILURE_SENTINEL
             log("all engines failed for %s; writing failure sentinel" % job_id)
