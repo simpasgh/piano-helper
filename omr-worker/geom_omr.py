@@ -578,6 +578,79 @@ def group_chords(
 
 
 # --- Barline detection (numpy) -----------------------------------------------------------
+#
+# OVER-SEGMENTATION on DENSE pieces (measured: dense-score-decode-measure-segmentation). The
+# full-pair-height coverage test (cov > 0.7) is fooled by a DENSE STACK of chords+stems: treble
+# notes + bass notes together clear 70% of the pair height WITHOUT crossing the blank INTER-STAFF
+# GAP that a real barline crosses, so the stack reads as a false barline and the engine splits the
+# measure there (furelise 118 measures vs truth 106, nocturne 88 vs 38). Every note then lands in
+# the wrong measure and note_f1 collapses though the pitch reading underneath is good.
+#
+# The discriminator is the CENTRE OF THE GAP: a real barline is dark across the blank band between
+# the treble bottom line and the bass top line; a chord/stem stack is blank there (stems live inside
+# one staff). But that signal alone is NOT strict-never-worse: one real tctab barline has a near-blank
+# gap centre (pedal/lyric clutter), so dropping every non-gap-crossing candidate costs tctab ~1 note
+# (0.995 -> 0.992). The fix (this code) makes the removal CONDITIONAL ON OVER-SEGMENTATION: a non-gap-
+# crossing candidate is dropped ONLY when it is an EXTRA barline -- anomalously close to a kept
+# neighbour, i.e. it would carve a measure narrower than _BAR_NARROW_FRAC x the system's median
+# measure width. A uniformly-segmented system (tctab, every simple piece) has no anomalously-narrow
+# measure, so NOTHING is dropped and the output is byte-identical (the strict never-worse guarantee is
+# structural, not tuned). The gap-darkness signal still decides WHICH of two too-close candidates is
+# the false one (the weaker is dropped). NEVER raises.
+
+_BAR_GAP_CROSS = 0.5    # central-gap dark fraction at/above which a candidate clearly crosses the
+#                         inter-staff gap (a real barline); below it the column may be a chord/stem
+#                         stack. From the prototyped guard (gcov_centralhalf > 0.5).
+_BAR_NARROW_FRAC = 0.5  # a measure narrower than this fraction of the system's median measure width
+#                         is anomalous -> the bounding non-gap-crossing candidate is an EXTRA barline.
+
+
+def _drop_extra_barlines(xs: List[float], scores: List[float]) -> List[float]:
+    """Remove EXTRA (over-segmenting) barline candidates from one system's sorted x-centers `xs`,
+    given each candidate's inter-staff-gap darkness `scores[i]` (0..1; high == clearly crosses the
+    gap == a real barline). A candidate is dropped ONLY when BOTH: (a) it sits anomalously close to a
+    kept neighbour -- the measure between them is narrower than _BAR_NARROW_FRAC x the system's median
+    measure width, AND (b) it does NOT cross the gap (score < _BAR_GAP_CROSS), so it is a false barline
+    from a dense chord/stem stack rather than a genuinely short real measure. Among two too-close
+    candidates the WEAKER (lower gap score) is the one dropped. The median measure width is taken from
+    the RELIABLE grid (the gap-crossing candidates, which are never dropped) so the scale is stable;
+    it falls back to all candidates when too few cross the gap. A uniformly-segmented system has no
+    anomalously-narrow measure, so NOTHING is dropped and `xs` is returned unchanged (strict
+    never-worse). PURE; returns `xs` unchanged on too-few candidates / no usable scale. NEVER raises."""
+    try:
+        n = len(xs)
+        if n < 3 or len(scores) != n:
+            return xs
+        # Measure-width scale from the candidates that clearly cross the gap (the real grid, never
+        # dropped) so it is not pulled down by the false barlines we are trying to remove. Fall back
+        # to all candidates when too few cross the gap (a smaller scale -> fewer drops -> still safe).
+        strong = [xs[i] for i in range(n) if scores[i] >= _BAR_GAP_CROSS]
+        ref = strong if len(strong) >= 3 else xs
+        gaps = sorted(ref[i + 1] - ref[i] for i in range(len(ref) - 1))
+        if not gaps:
+            return xs
+        med = gaps[len(gaps) // 2]
+        if med <= 0:
+            return xs
+        narrow = _BAR_NARROW_FRAC * med
+        keep = [True] * n
+        while True:
+            kept = [i for i in range(n) if keep[i]]
+            dropped = False
+            for j in range(len(kept) - 1):
+                a, b = kept[j], kept[j + 1]
+                if xs[b] - xs[a] < narrow:
+                    lo = a if scores[a] <= scores[b] else b  # the weaker of the too-close pair
+                    if scores[lo] < _BAR_GAP_CROSS:          # only drop a non-gap-crossing (false) bar
+                        keep[lo] = False
+                        dropped = True
+                        break
+            if not dropped:
+                break
+        return [xs[i] for i in range(n) if keep[i]]
+    except Exception:
+        return xs
+
 
 def detect_barlines(gray, staves: List[List[float]]) -> List[List[float]]:
     """Detect barline x-positions per grand-staff pair. Returns a list aligned with `staves`:
@@ -591,6 +664,12 @@ def detect_barlines(gray, staves: List[List[float]]) -> List[List[float]]:
     coverage over the whole pair height rejects stems, beams, and noteheads. Pairs staves as
     (treble=2i, bass=2i+1), matching _clef_for_staff_index. A column is a barline if it is dark
     over >70% of the pair height AND narrow (a few px); a wide dark run is a beam/blob, not a line.
+
+    A DENSE chord/stem stack also clears 70% of the pair height (treble notes + bass notes) WITHOUT
+    crossing the blank gap, so it reads as a false barline and OVER-SEGMENTS the measure. Each
+    candidate therefore also carries its CENTRE-OF-GAP darkness; `_drop_extra_barlines` removes a
+    non-gap-crossing candidate only when it is an EXTRA one (carves an anomalously narrow measure),
+    leaving uniformly-segmented systems byte-identical. See the module comment above.
     """
     out: List[List[float]] = [[] for _ in staves]
     if not GEOM_AVAILABLE or gray is None or not staves:
@@ -612,7 +691,19 @@ def detect_barlines(gray, staves: List[List[float]]) -> List[List[float]]:
             band = mask[y0:y1 + 1, :]
             cov = band.sum(axis=0) / float(band.shape[0])  # per-column dark fraction over the pair
             barcol = cov > 0.7
+            # Per-column darkness across the CENTRAL HALF of the inter-staff gap (treble bottom line
+            # to bass top line). A real barline is dark here; a chord/stem stack is blank. gcov stays
+            # None when there is no gap (odd staff count -> bot == top), so nothing is discriminated.
+            gtop, gbot = top[-1], bot[0]
+            gcov = None
+            if gbot - gtop >= 3:
+                g0 = max(0, int(round(gtop + 0.25 * (gbot - gtop))))
+                g1 = min(h, int(round(gtop + 0.75 * (gbot - gtop))))
+                if g1 > g0:
+                    gband = mask[g0:g1, :]
+                    gcov = gband.sum(axis=0) / float(gband.shape[0])
             xs: List[float] = []
+            scores: List[float] = []
             maxw = max(2, int(round(0.6 * sp)))
             x = 0
             while x < w:
@@ -621,10 +712,12 @@ def detect_barlines(gray, staves: List[List[float]]) -> List[List[float]]:
                     while x < w and barcol[x]:
                         x += 1
                     if (x - s) <= maxw:  # thin -> a line; wide -> a beam/blob, skip
-                        xs.append((s + x - 1) / 2.0)
+                        xs.append((s + x - 1) / 2.0)  # left-to-right scan keeps xs sorted
+                        # crossing strength = darkest central-gap column the run touches; no gap -> 1.0
+                        scores.append(float(gcov[s:x].max()) if gcov is not None else 1.0)
                 else:
                     x += 1
-            xs.sort()
+            xs = _drop_extra_barlines(xs, scores)  # drop EXTRA non-gap-crossing (false) barlines only
             for idx in (ti, bi):
                 if idx < len(staves):
                     out[idx] = xs
