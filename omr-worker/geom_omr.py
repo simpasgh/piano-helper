@@ -220,6 +220,31 @@ def _row_ink(gray) -> "np.ndarray":
     return (gray < 0.5).mean(axis=1)
 
 
+def _illum_paper_guard(gray, grid: int = 48):
+    """Shared paper-brightness estimate behind BOTH illumination decisions. BLOCK-MAX downsample on a
+    grid x grid lattice (paper is the bright majority in any block, so the per-cell max ignores the
+    darker ink), then a 5-cell MAX-dilate so an isolated fully-inked cell (dense beams / chords)
+    borrows its lit neighbours and is not mistaken for shadow. Returns (block, guard) -- both the
+    (gh, gw) downsampled fields -- or (None, None) on a degenerate shape so callers no-op. The guard's
+    5th-percentile is the EVEN-LIT no-op test (normalize_illumination); its MIN is the DEEP-BROAD-SHADOW
+    test (_illum_has_deep_shadow). NEVER raises."""
+    if not GEOM_AVAILABLE or gray is None:
+        return None, None
+    try:
+        h, w = gray.shape
+        gh = max(1, min(grid, h))
+        gw = max(1, min(grid, w))
+        bs_y, bs_x = h // gh, w // gw
+        if bs_y < 1 or bs_x < 1:
+            return None, None
+        H2, W2 = gh * bs_y, gw * bs_x
+        block = gray[:H2, :W2].reshape(gh, bs_y, gw, bs_x).max(axis=(1, 3))  # per-cell brightest pixel
+        guard = ndimage.maximum_filter(block, size=5, mode="nearest")
+        return block, guard
+    except Exception:
+        return None, None
+
+
 def normalize_illumination(gray, grid: int = 48, floor: float = 0.25, even_thresh: float = 0.7):
     """Flat-field uneven lighting on a PHONE PHOTO of a page so the geometry detectors survive it.
 
@@ -249,21 +274,16 @@ def normalize_illumination(gray, grid: int = 48, floor: float = 0.25, even_thres
     if not GEOM_AVAILABLE or gray is None:
         return gray
     try:
-        h, w = gray.shape
-        gh = max(1, min(grid, h))
-        gw = max(1, min(grid, w))
-        bs_y, bs_x = h // gh, w // gw
-        if bs_y < 1 or bs_x < 1:
+        # block = per-cell brightest pixel; guard = its 5-cell max-dilation. Even-lit GUARD (the no-op
+        # decision only): dilating means an isolated FULLY inked cell (dense beams/chords with no white)
+        # borrows its lit neighbours and is NOT read as shadow -- a CLEAN dense page therefore stays a
+        # no-op. A BROAD shadow's interior cells are dark even after dilation (their neighbours are
+        # shadowed too), so a real shadow still trips the guard. The CORRECTION below uses the UN-dilated
+        # per-cell `block` paper so the flat-field stays accurate (dilating the field under-corrects it).
+        block, guard = _illum_paper_guard(gray, grid)
+        if block is None:
             return gray
-        H2, W2 = gh * bs_y, gw * bs_x
-        block = gray[:H2, :W2].reshape(gh, bs_y, gw, bs_x).max(axis=(1, 3))  # per-cell brightest pixel
-        # Even-lit GUARD (the no-op decision only): max-dilate the per-cell brightness so an isolated
-        # FULLY inked cell (dense beams/chords with no white) borrows its lit neighbours and is NOT
-        # read as shadow -- a CLEAN dense page therefore stays a no-op. A BROAD shadow's interior
-        # cells are dark even after dilation (their neighbours are shadowed too), so a real shadow
-        # still trips the guard. The CORRECTION below uses the UN-dilated per-cell paper so the
-        # flat-field stays accurate (dilating the field itself under-corrects the shadow).
-        guard = ndimage.maximum_filter(block, size=5, mode="nearest")
+        h, w = gray.shape
         if float(np.percentile(guard, 5)) > even_thresh:
             return gray  # evenly lit -> no-op (clean is unchanged)
         bg = np.asarray(
@@ -273,6 +293,31 @@ def normalize_illumination(gray, grid: int = 48, floor: float = 0.25, even_thres
         return np.clip(gray / bg, 0.0, 1.0).astype(np.float32)
     except Exception:
         return gray
+
+
+def _illum_has_deep_shadow(gray, grid: int = 48, thresh: float = 0.25) -> bool:
+    """True when the page carries a DEEP, BROAD shadow: a region dark enough that even the 5-cell
+    max-dilated paper estimate (see _illum_paper_guard) dips below `thresh`. This is the cue, on the
+    DEWARP (warped-photo) path ONLY, to KEEP the flat-field (normalize_illumination): such a shadow
+    pushes the local background below the gray<0.5 ink threshold, so renormalising it rescues the
+    staff / barline / ottava geometry there.
+
+    The flip side is why the dewarp path needs this at all: a photo that is merely UNEVEN but has no
+    deep shadow (every dilated cell stays bright) is HURT by the flat-field -- it over-corrects the
+    mild gradient and amplifies noise in the dense row projection, splitting/merging staves. Measured
+    on the 4 real phone photos (dewarped): reverie's genuine deep shadow gives guard.min() ~= 0.18 (so
+    KEEP, it gains +0.06 note_f1), while every other piece is >= 0.30 (so DROP, lifting liminality
+    +0.20 and tctab +0.07); 0.25 sits in that gap with ~0.05-0.07 margin either side. The 5-cell
+    dilation makes this a region test, not a single-cell fluke (the dark patch must span a block
+    neighbourhood). NEVER raises; returns False (drop) on a degenerate image, where the geom path is
+    unreliable regardless and the caller re-checks the staff count before committing."""
+    _block, guard = _illum_paper_guard(gray, grid)
+    if guard is None:
+        return False
+    try:
+        return bool(float(guard.min()) < float(thresh))
+    except Exception:
+        return False
 
 
 def _estimate_interline_from_profile(prof1d) -> Optional[float]:
@@ -575,7 +620,7 @@ def _extract_staves(centers: List[float], inks: List[float], thick: List[float],
     return out
 
 
-def detect_systems(gray) -> List[List[float]]:
+def detect_systems(gray, normalize_illum: bool = True) -> List[List[float]]:
     """Detect EVERY 5-line staff group on the page. Returns a list of staves, each a list of
     5 staff-line y-centers (top-to-bottom). NEVER raises; returns [] on failure.
 
@@ -585,11 +630,16 @@ def detect_systems(gray) -> List[List[float]]:
     intruder rows like beams / dense note rows / text that also clear the width threshold). This
     extends referee._staff_lines (which returns only the first 5) to the whole page and is robust
     to real engravings where a staff is detected as 6-7 lines.
+
+    normalize_illum (default True) applies the flat-field first (a no-op on a clean page). The
+    dewarp/warped-photo path sets it False when the page has no deep shadow, where flat-fielding an
+    only-uneven page over-corrects and splits/merges staves (see _illum_has_deep_shadow).
     """
     if not GEOM_AVAILABLE or gray is None:
         return []
     try:
-        gray = normalize_illumination(gray)  # flat-field photo shadows (no-op on clean)
+        if normalize_illum:
+            gray = normalize_illumination(gray)  # flat-field photo shadows (no-op on clean)
         h, w = gray.shape
         roww = (gray < 0.5).sum(axis=1)
         # A staff line is a near-full-width dark row, but noteheads/stems sitting ON the line
@@ -882,11 +932,15 @@ def _drop_extra_barlines(xs: List[float], scores: List[float]) -> List[float]:
         return xs
 
 
-def detect_barlines(gray, staves: List[List[float]]) -> List[List[float]]:
+def detect_barlines(gray, staves: List[List[float]], normalize_illum: bool = True) -> List[List[float]]:
     """Detect barline x-positions per grand-staff pair. Returns a list aligned with `staves`:
     out[i] is the sorted barline x-centers for the grand staff staff i belongs to (the treble and
     bass of a pair share one list). NEVER raises; returns empty lists on failure so the decode
     falls back to even binning.
+
+    normalize_illum (default True) applies the flat-field first (a no-op on a clean page); the
+    warped-photo decode threads through whatever detect_systems used so barlines share the same
+    illumination space as the staves (see _illum_has_deep_shadow).
 
     A barline is a near-vertical dark run spanning the FULL grand-staff height (treble top to bass
     bottom). The discriminator vs a stem is the INTER-STAFF GAP: a stem lives inside one staff, but
@@ -905,7 +959,8 @@ def detect_barlines(gray, staves: List[List[float]]) -> List[List[float]]:
     if not GEOM_AVAILABLE or gray is None or not staves:
         return out
     try:
-        gray = normalize_illumination(gray)  # flat-field photo shadows (no-op on clean)
+        if normalize_illum:
+            gray = normalize_illumination(gray)  # flat-field photo shadows (no-op on clean)
         h, w = gray.shape
         mask = gray < 0.5
         npairs = (len(staves) + 1) // 2
@@ -1156,7 +1211,8 @@ def _scan_dashed_rule(gray, y0: int, y1: int, xcut: int, sp: float) -> Optional[
         return None
 
 
-def detect_ottavas(gray, staves: List[List[float]]) -> List[List[Tuple[float, float, int]]]:
+def detect_ottavas(gray, staves: List[List[float]],
+                   normalize_illum: bool = True) -> List[List[Tuple[float, float, int]]]:
     """Detect ottava (8va / 8vb) brackets per staff. Returns a list index-aligned with `staves`:
     out[i] is a list of spans (x0, x1, delta) on staff i, where delta = +1 for an 8va (a dashed rule
     ABOVE the staff top: the notes SOUND an octave higher, so sounding = written + 1 octave) and
@@ -1167,12 +1223,15 @@ def detect_ottavas(gray, staves: List[List[float]]) -> List[List[Tuple[float, fl
     covers (reverie draws it on both the treble and bass of every spanned system). At most one 8va
     and one 8vb span are returned per staff (a system rarely stacks two on one staff); the magnitude
     is always 1 octave (size 8) -- reading the "8 vs 15" digit is out of scope for the notehead-only
-    path. NEVER raises; returns [[] for _ in staves] on any failure so the decode is unchanged."""
+    path. normalize_illum (default True) flat-fields first (no-op on clean); the warped-photo decode
+    threads through detect_systems' choice so the bracket scan shares the staves' illumination space.
+    NEVER raises; returns [[] for _ in staves] on any failure so the decode is unchanged."""
     out: List[List[Tuple[float, float, int]]] = [[] for _ in staves]
     if not GEOM_AVAILABLE or gray is None or not staves:
         return out
     try:
-        gray = normalize_illumination(gray)  # flat-field photo shadows (no-op on clean)
+        if normalize_illum:
+            gray = normalize_illumination(gray)  # flat-field photo shadows (no-op on clean)
         h, w = gray.shape
         # Each staff's top line y, so we can tell how far the NEXT staff sits below (to gate 8vb).
         tops = [sorted(float(v) for v in lines)[0] for lines in staves]
@@ -1246,6 +1305,7 @@ def _decode_staves_to_musicxml(
     per_staff_heads: List[List[Tuple[float, float]]],
     key_fifths: int = 0,
     gray=None,
+    normalize_illum: bool = True,
 ) -> Optional[bytes]:
     """Shared decode tail for BOTH notehead sources: the classical detect_noteheads and the
     trained YOLO detector in geom_detector. Takes the detected staff-line groups and the
@@ -1268,10 +1328,16 @@ def _decode_staves_to_musicxml(
     _segment_to_measures / _chords_to_measures). Durations are still a placeholder (every event
     duration:1); reading note durations is a separate rung.
 
+    normalize_illum (default True) is forwarded to detect_barlines / detect_ottavas so they share the
+    illumination space of the staves passed in (the warped-photo path may turn the flat-field off; see
+    _illum_has_deep_shadow). The classical engine and the clean path keep the default, so both stay
+    byte-identical.
+
     Returns MusicXML bytes, or None if nothing usable was found. NEVER raises.
     """
     try:
-        barlines = detect_barlines(gray, staves) if gray is not None else [[] for _ in staves]
+        barlines = (detect_barlines(gray, staves, normalize_illum=normalize_illum)
+                    if gray is not None else [[] for _ in staves])
         # Ottava (8va / 8vb) brackets per staff: a note under one SOUNDS an octave higher (8va) or
         # lower (8vb) than its written staff position. geom decodes the WRITTEN position, so without
         # this shift a bracketed note is an octave off (the reverie bug). We emit the SOUNDING octave
@@ -1280,7 +1346,8 @@ def _decode_staves_to_musicxml(
         # double-applying a bracket. The tradeoff is the sheet shows the real high notes with ledger
         # lines instead of a low position + an 8va bracket (acceptable, arguably clearer). When no
         # bracket is detected the shift is +0, so non-ottava output is byte-identical to before.
-        ottava_spans = detect_ottavas(gray, staves) if gray is not None else [[] for _ in staves]
+        ottava_spans = (detect_ottavas(gray, staves, normalize_illum=normalize_illum)
+                        if gray is not None else [[] for _ in staves])
 
         def staff_chords(idx, clef):
             # [(rep_x, [pitch...]), ...] for one staff, x-ordered. Keeping each chord's center x

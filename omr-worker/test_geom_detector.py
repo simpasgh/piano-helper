@@ -155,3 +155,68 @@ def test_transcribe_kept_dewarp_runs_decode_tail(monkeypatch):
     centers = [(warped.shape[1] / 2.0, sorted(s)[2], 0.9) for s in staves]  # one head per staff
     out = geom_detector.transcribe_with_detector(warped, _FixedDetector(centers))
     assert out is not None and b"score-partwise" in out
+
+
+@requires_geom
+class TestAdaptiveIllumination:
+    """transcribe_with_detector flat-fields the warped-photo decode ADAPTIVELY: it keeps the
+    flat-field only when the dewarped page has a genuine deep broad shadow (reverie), and drops it
+    otherwise (liminality / tctab, which the flat-field over-corrects). The decision is scoped to the
+    KEPT-dewarp path, so the clean upload path stays byte-identical (always flat-fields)."""
+
+    @staticmethod
+    def _capture_decode(monkeypatch):
+        # capture the normalize_illum the decode tail is called with, the observable decision.
+        captured = {}
+
+        def fake_decode(staves, per_staff, key_fifths=0, gray=None, normalize_illum=True):
+            captured["normalize_illum"] = normalize_illum
+            return b"<score-partwise/>"
+
+        monkeypatch.setattr(geom_detector, "DETECTOR_AVAILABLE", True)
+        monkeypatch.setattr(geom_omr, "_decode_staves_to_musicxml", fake_decode)
+        return captured
+
+    def _run_warped(self, monkeypatch):
+        warped = _page(slope=0.05)
+        staves = geom_omr.detect_systems(geom_omr.dewarp_staff_lines(warped))
+        centers = [(warped.shape[1] / 2.0, sorted(s)[2], 0.9) for s in staves]
+        return geom_detector.transcribe_with_detector(warped, _FixedDetector(centers))
+
+    def test_deep_shadow_keeps_the_flatfield(self, monkeypatch):
+        captured = self._capture_decode(monkeypatch)
+        monkeypatch.setattr(geom_omr, "_illum_has_deep_shadow", lambda g, *a, **k: True)
+        assert self._run_warped(monkeypatch) == b"<score-partwise/>"
+        assert captured["normalize_illum"] is True
+
+    def test_no_deep_shadow_drops_the_flatfield(self, monkeypatch):
+        captured = self._capture_decode(monkeypatch)
+        monkeypatch.setattr(geom_omr, "_illum_has_deep_shadow", lambda g, *a, **k: False)
+        assert self._run_warped(monkeypatch) == b"<score-partwise/>"
+        assert captured["normalize_illum"] is False
+
+    def test_clean_page_never_flips(self, monkeypatch):
+        # a clean (already-horizontal) page never dewarps, so the decision is bypassed entirely and
+        # the flat-field stays ON even though _illum_has_deep_shadow would vote to drop it.
+        captured = self._capture_decode(monkeypatch)
+        monkeypatch.setattr(geom_omr, "_illum_has_deep_shadow", lambda g, *a, **k: False)
+        clean = _page(slope=0.0)
+        staves = geom_omr.detect_systems(clean)
+        centers = [(clean.shape[1] / 2.0, sorted(s)[2], 0.9) for s in staves]
+        assert geom_detector.transcribe_with_detector(clean, _FixedDetector(centers)) == b"<score-partwise/>"
+        assert captured["normalize_illum"] is True
+
+    def test_dropping_flatfield_loses_staves_reverts_never_worse(self, monkeypatch):
+        # never-worse guard: if dropping the flat-field detects FEWER staves than the flat-fielded
+        # detection that justified the dewarp, keep the flat-field rather than ship worse geometry.
+        # illum-off here returns a single staff -- NON-EMPTY but fewer than the dewarped count -- so
+        # the guard must still revert, proving it is count-based, not merely emptiness-based.
+        captured = self._capture_decode(monkeypatch)
+        monkeypatch.setattr(geom_omr, "_illum_has_deep_shadow", lambda g, *a, **k: False)
+        real_ds = geom_omr.detect_systems
+        one_staff = [[10.0, 20.0, 30.0, 40.0, 50.0]]
+        monkeypatch.setattr(geom_omr, "detect_systems",
+                            lambda g, normalize_illum=True: (one_staff if not normalize_illum
+                                                             else real_ds(g, normalize_illum=True)))
+        assert self._run_warped(monkeypatch) == b"<score-partwise/>"
+        assert captured["normalize_illum"] is True  # reverted: illum-off lost staves vs flat-fielded

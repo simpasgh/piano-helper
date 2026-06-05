@@ -199,24 +199,45 @@ def transcribe_with_detector(image, detector: NoteheadDetector,
         gray_dw = geom_omr.dewarp_staff_lines(gray)
         use_dw = False
         staves = staves_raw
+        # Whether the downstream geometry (these staves, plus barlines + ottavas in the decode tail) is
+        # flat-fielded. Default True = today's behavior; the CLEAN path never dewarps, so it keeps True
+        # and stays byte-identical. Only the KEPT-dewarp (warped photo) path below may flip it.
+        normalize_illum = True
         if gray_dw is not gray:
             staves_dw = geom_omr.detect_systems(gray_dw)
             if len(staves_dw) > len(staves_raw):
                 use_dw, staves = True, staves_dw
+                # ADAPTIVE ILLUMINATION (warped-photo path only). The flat-field rescues a genuine deep
+                # broad shadow but HURTS a photo that is merely uneven (it over-corrects the gradient and
+                # amplifies noise in the dense row projection, splitting/merging staves). Keep it only
+                # when such a shadow is present, else drop it and re-detect the staves flat-field-free so
+                # they share the decode's illumination space. Measured: lifts liminality + tctab, holds
+                # reverie (its deep shadow keeps the flat-field). Clean never reaches here.
+                normalize_illum = geom_omr._illum_has_deep_shadow(gray_dw)
+                if not normalize_illum:
+                    staves_ni = geom_omr.detect_systems(gray_dw, normalize_illum=False)
+                    # Drop the flat-field only if doing so does not LOSE staves vs the flat-fielded
+                    # detection that justified keeping the dewarp (len(staves) == the staves_dw count
+                    # here). If illum-off finds fewer (or none), the flat-field was actually helping
+                    # detection, so keep it -- the final staves then stay > the raw count (never-worse).
+                    if len(staves_ni) >= len(staves):
+                        staves = staves_ni
+                    else:
+                        normalize_illum = True
 
         # When the dewarp is kept, the detector MUST run on the dewarped raster so its notehead centres
         # share the dewarped staff/barline coordinate space. The dewarped image is handed over in-memory
         # as RGB (no temp PNG). If that conversion fails, ABANDON the dewarp entirely (fall back to the
-        # raw staves and the original image) rather than mixing a raw-coordinate detection with dewarped
-        # staves -- a mismatch would assign heads to the wrong staves. Size the detector to the image it
-        # actually runs on (a tall multi-page stitch needs a larger imgsz, see _auto_imgsz).
+        # raw staves, the original image, and the default flat-field) rather than mixing a raw-coordinate
+        # detection with dewarped staves -- a mismatch would assign heads to the wrong staves. Size the
+        # detector to the image it actually runs on (a tall multi-page stitch needs a larger imgsz).
         det_source = image
         if use_dw:
             rgb = geom_omr._gray_to_uint8_rgb(gray_dw)
             if rgb is not None:
                 det_source = rgb  # feed the straightened raster to the detector (in-memory, no temp)
             else:
-                use_dw, staves = False, staves_raw  # conversion failed -> stay entirely in raw space
+                use_dw, staves, normalize_illum = False, staves_raw, True  # failed -> raw space
         if not staves:
             return None
         work = gray_dw if use_dw else gray
@@ -226,7 +247,8 @@ def transcribe_with_detector(image, detector: NoteheadDetector,
         # Trained notehead source: detect globally, then assign each head to its staff so the
         # per-staff lists are index-aligned with staves for the shared decode tail.
         per_staff = _assign_to_staves(centers, staves)
-        return geom_omr._decode_staves_to_musicxml(staves, per_staff, key_fifths=key_fifths, gray=work)
+        return geom_omr._decode_staves_to_musicxml(
+            staves, per_staff, key_fifths=key_fifths, gray=work, normalize_illum=normalize_illum)
     except Exception:
         return None
 

@@ -696,6 +696,101 @@ def test_detect_barlines_recovers_under_shadow():
     assert any(abs(x - 50) <= 3 for row in bl for x in row)      # the barline survives the shadow
 
 
+# --- Adaptive illumination on the dewarp (warped-photo) path -------------------------------
+#
+# The flat-field rescues a deep broad shadow but HURTS a photo that is only mildly uneven (it
+# over-corrects the gradient and amplifies noise in the dense row projection). On the kept-dewarp
+# path geom_detector decides per photo via _illum_has_deep_shadow and threads a normalize_illum flag
+# through detect_systems / detect_barlines / detect_ottavas / _decode_staves_to_musicxml. The flag
+# defaults True, so the classical engine and the clean upload path are byte-identical.
+
+
+@requires_geom
+def test_illum_has_deep_shadow_true_only_for_a_deep_broad_shadow():
+    import numpy as np
+    # evenly lit (a few thin staff-like lines on white): every dilated paper cell stays bright -> False
+    even = np.ones((480, 480), np.float32)
+    even[100:300:8, 40:440] = 0.0
+    assert geom_omr._illum_has_deep_shadow(even) is False
+    # a DEEP, BROAD shadow over a corner: a whole block neighbourhood goes well below 0.25 -> True
+    deep = np.ones((480, 480), np.float32)
+    deep[:160, :160] = 0.15
+    assert geom_omr._illum_has_deep_shadow(deep) is True
+    # a MILD gradient whose darkest paper never dips below the threshold -> False (flat-field would hurt)
+    mild = np.linspace(1.0, 0.45, 480, dtype=np.float32)[:, None] * np.ones((1, 480), np.float32)
+    assert geom_omr._illum_has_deep_shadow(mild) is False
+    # the threshold is a parameter: the same mild page reads as a shadow under a high enough threshold
+    assert geom_omr._illum_has_deep_shadow(mild, thresh=0.6) is True
+    # a CLEAN but DENSE page (fully-inked isolated cells, no white in them) must NOT read as a deep
+    # shadow: the 5-cell dilation lets each inked cell borrow its lit neighbours. Without that dilation
+    # guard.min() would be 0 and the flat-field would wrongly be KEPT on a clean page on the dewarp path.
+    dense = np.ones((480, 480), np.float32)
+    for r in range(0, 48, 4):
+        for c in range(0, 48, 4):
+            dense[r * 10:(r + 1) * 10, c * 10:(c + 1) * 10] = 0.0
+    assert (dense < 0.5).mean() > 0.05                       # genuinely dense
+    assert geom_omr._illum_has_deep_shadow(dense) is False
+
+
+def test_illum_has_deep_shadow_safe_on_garbage():
+    # robustness contract: never raises, returns False (drop) on degenerate input
+    assert geom_omr._illum_has_deep_shadow(None) is False
+    if geom_omr.GEOM_AVAILABLE:
+        import numpy as np
+        assert geom_omr._illum_has_deep_shadow(np.ones((1, 1), np.float32)) is False
+
+
+@requires_geom
+def test_detectors_normalize_illum_flag_gates_the_flatfield(monkeypatch):
+    # the wiring: normalize_illum=True invokes normalize_illumination in each detector; False skips it.
+    real = geom_omr.normalize_illumination
+    calls = []
+
+    def spy(g, *a, **k):
+        calls.append(1)
+        return real(g, *a, **k)
+
+    monkeypatch.setattr(geom_omr, "normalize_illumination", spy)
+    gray, lines = _draw_staff([(200, 72)], width=400, interline=16, top=40)
+    staves = [lines]
+    for fn, args in ((geom_omr.detect_systems, (gray,)),
+                     (geom_omr.detect_barlines, (gray, staves)),
+                     (geom_omr.detect_ottavas, (gray, staves))):
+        calls.clear()
+        fn(*args, normalize_illum=True)
+        assert calls, fn.__name__ + " with True must flat-field"
+        calls.clear()
+        fn(*args, normalize_illum=False)
+        assert not calls, fn.__name__ + " with False must skip the flat-field"
+
+
+@requires_geom
+def test_decode_forwards_normalize_illum(monkeypatch):
+    # _decode_staves_to_musicxml threads its normalize_illum into detect_barlines / detect_ottavas so
+    # they share the staves' illumination space; the default keeps both flat-fielding (byte-identical).
+    import numpy as np
+    captured = {}
+
+    def fake_barlines(gray, staves, normalize_illum=True):
+        captured["barlines"] = normalize_illum
+        return [[] for _ in staves]
+
+    def fake_ottavas(gray, staves, normalize_illum=True):
+        captured["ottavas"] = normalize_illum
+        return [[] for _ in staves]
+
+    monkeypatch.setattr(geom_omr, "detect_barlines", fake_barlines)
+    monkeypatch.setattr(geom_omr, "detect_ottavas", fake_ottavas)
+    staves = [[40.0, 56.0, 72.0, 88.0, 104.0], [200.0, 216.0, 232.0, 248.0, 264.0]]
+    heads = [[(100.0, 72.0)], [(100.0, 232.0)]]
+    gray = np.ones((320, 400), np.float32)
+    geom_omr._decode_staves_to_musicxml(staves, heads, gray=gray, normalize_illum=False)
+    assert captured == {"barlines": False, "ottavas": False}
+    captured.clear()
+    geom_omr._decode_staves_to_musicxml(staves, heads, gray=gray)  # default -> flat-field
+    assert captured == {"barlines": True, "ottavas": True}
+
+
 # --- Conditional extra-barline removal (dense-score over-segmentation) ---------------------
 #
 # A dense chord/stem stack clears the >70%-pair-height test WITHOUT crossing the inter-staff gap, so
