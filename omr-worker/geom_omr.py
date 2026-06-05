@@ -1023,16 +1023,21 @@ def detect_barlines(gray, staves: List[List[float]], normalize_illum: bool = Tru
         h, w = gray.shape
         mask = gray < 0.5
         for (ti, bi) in _pair_staves(staves):
-            if ti is None or bi is None:
-                # A LONE staff (its grand-staff partner went undetected) has no inter-staff gap, so
-                # the gap-crossing discriminator is gone and a per-column dark scan over a single
-                # staff height reads every STEM as a barline -> garbage over-segmentation that
-                # scatters the staff's notes across spurious measures. Leave a lone staff to even
-                # binning (out[ti] stays []) instead. Clean pages have no lone staff, so this is a
-                # photo-only path and the clean output is unchanged.
+            if ti is None:
                 continue
             top = sorted(float(v) for v in staves[ti])
-            bot = sorted(float(v) for v in staves[bi])
+            if bi is not None:
+                bot = sorted(float(v) for v in staves[bi])
+            elif photo:
+                # PHOTO lone staff (its grand-staff partner went undetected): no inter-staff gap, so
+                # the gap-crossing discriminator is gone and a per-column dark scan over a single
+                # staff height reads every STEM as a barline -> garbage over-segmentation that
+                # scatters the staff's notes across spurious measures. Skip it (-> even binning). A
+                # missing partner only arises on a real photo; a clean ODD / single-staff page keeps
+                # the legacy single-staff scan below, so the clean path stays byte-identical.
+                continue
+            else:
+                bot = top  # clean / classical lone staff: legacy single-staff scan (byte-identical)
             y0 = max(0, int(round(top[0])))
             y1 = min(h - 1, int(round(bot[-1])))
             if y1 - y0 < 4:
@@ -1358,12 +1363,6 @@ def ottava_delta_at(rep_x: float, spans: List[Tuple[float, float, int]]) -> int:
 
 
 # --- Full pipeline -----------------------------------------------------------------------
-
-def _clef_for_staff_index(idx_in_system: int) -> str:
-    """Within a grand staff, the upper staff is treble (G), the lower is bass (F). DEPRECATED /
-    unused: the live decode pairs staves by vertical gap in _pair_staves (robust to a missing
-    staff), which assigns the clef per pair. Kept only for reference."""
-    return "G" if idx_in_system % 2 == 0 else "F"
 
 
 def _decode_staves_to_musicxml(

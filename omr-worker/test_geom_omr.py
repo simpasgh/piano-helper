@@ -918,10 +918,11 @@ class TestPairStaves:
 
 
 @pytest.mark.skipif(not geom_omr.GEOM_AVAILABLE, reason="needs numpy/PIL")
-def test_detect_barlines_skips_lone_staff():
+def test_detect_barlines_skips_lone_staff_on_photo():
     # A LONE staff (grand-staff partner undetected) has no inter-staff gap, so a per-column dark scan
-    # reads every STEM as a barline. detect_barlines must return NO barlines for it (-> even binning)
-    # rather than over-segmenting on stems.
+    # reads every STEM as a barline. On the PHOTO path detect_barlines must return NO barlines for it
+    # (-> even binning) rather than over-segmenting on stems. On the clean/classical path (photo=False)
+    # it keeps the legacy single-staff scan, so clean ODD-staff pages stay byte-identical.
     import numpy as np
     from PIL import Image, ImageDraw
     interline, top = 16, 40
@@ -935,7 +936,8 @@ def test_detect_barlines_skips_lone_staff():
     gray = np.asarray(im, dtype=np.float32) / 255.0
     staves = geom_omr.detect_systems(gray)
     assert len(staves) == 1
-    assert geom_omr.detect_barlines(gray, staves) == [[]]
+    assert geom_omr.detect_barlines(gray, staves, photo=True) == [[]]   # photo: skip the lone staff
+    assert geom_omr.detect_barlines(gray, staves, photo=False)[0]       # clean: legacy scan (non-empty)
 
 
 @pytest.mark.skipif(not geom_omr.GEOM_AVAILABLE, reason="needs numpy/PIL")
