@@ -2283,3 +2283,75 @@ def test_run_clarity_stream_nonzero_exit_returns_none(tmp_path, monkeypatch):
     assert worker.run_clarity_stream("in.pdf", str(tmp_path),
                                      lambda i, t, b: seen.append(i)) is None
     assert seen == []
+
+
+# --- drop_ties_across_rests (a held note cannot cross a rest) -----------------------------
+
+import xml.etree.ElementTree as _dt_ET  # noqa: E402
+
+
+def _dt_note(step, octave, dur, staff=1, tie=None):
+    t = ""
+    if tie:
+        t = "".join("<tie type='%s'/>" % x for x in tie)
+        t += "<notations>%s</notations>" % "".join("<tied type='%s'/>" % x for x in tie)
+    return ("<note><pitch><step>%s</step><octave>%d</octave></pitch>"
+            "<duration>%d</duration>%s<staff>%d</staff></note>" % (step, octave, dur, t, staff))
+
+
+def _dt_rest(dur, staff=1):
+    return "<note><rest/><duration>%d</duration><staff>%d</staff></note>" % (dur, staff)
+
+
+def _dt_doc(measures):
+    body = "".join("<measure number='%d'>%s</measure>" % (i + 1, "".join(ns))
+                   for i, ns in enumerate(measures))
+    return ("<?xml version='1.0'?><score-partwise><part id='P1'>%s</part></score-partwise>"
+            % body).encode("utf-8")
+
+
+def _dt_tie_types(xml_bytes):
+    return [t.get("type") for n in _dt_ET.fromstring(xml_bytes).iter("note")
+            for t in n.findall("tie")]
+
+
+def test_drop_ties_across_rests_strips_tie_spanning_a_rest():
+    # C5 tie-start, a REST, then C5 tie-stop in the SAME staff: the held note crosses a silence,
+    # which is impossible -> BOTH tie ends (and their engraved <tied> arcs) are removed.
+    doc = _dt_doc([[_dt_note("C", 5, 4, tie=["start"]), _dt_rest(12)],
+                   [_dt_note("C", 5, 4, tie=["stop"])]])
+    out = worker.drop_ties_across_rests(doc)
+    assert _dt_tie_types(out) == []          # no <tie> markup left
+    assert b"<tied" not in out               # no engraved arc left
+    # pitch/duration untouched: the two C5 notes and the rest all survive.
+    notes = list(_dt_ET.fromstring(out).iter("note"))
+    assert sum(1 for n in notes if n.find("rest") is not None) == 1
+    assert sum(1 for n in notes if n.find("pitch") is not None) == 2
+
+
+def test_drop_ties_across_rests_keeps_valid_cross_barline_tie():
+    # C5 filling its bar (whole note) tied to the next bar's C5, NO rest between -> tie preserved.
+    doc = _dt_doc([[_dt_note("C", 5, 16, tie=["start"])],
+                   [_dt_note("C", 5, 4, tie=["stop"])]])
+    assert _dt_tie_types(worker.drop_ties_across_rests(doc)) == ["start", "stop"]
+
+
+def test_drop_ties_across_rests_ignores_rest_in_other_staff():
+    # A rest in staff 2 between two staff-1 tied notes must NOT break the staff-1 tie.
+    doc = _dt_doc([[_dt_note("C", 5, 16, staff=1, tie=["start"]), _dt_rest(16, staff=2)],
+                   [_dt_note("C", 5, 4, staff=1, tie=["stop"])]])
+    assert _dt_tie_types(worker.drop_ties_across_rests(doc)) == ["start", "stop"]
+
+
+def test_drop_ties_across_rests_keeps_tie_when_rest_precedes_start():
+    # A rest BEFORE the tie-start (not strictly between the two ends) must not drop the tie.
+    doc = _dt_doc([[_dt_rest(8), _dt_note("C", 5, 8, tie=["start"])],
+                   [_dt_note("C", 5, 4, tie=["stop"])]])
+    assert _dt_tie_types(worker.drop_ties_across_rests(doc)) == ["start", "stop"]
+
+
+def test_drop_ties_across_rests_no_tie_doc_is_clean_noop():
+    # An oemer-style document with zero ties is returned with no tie markup (never fabricates one).
+    doc = _dt_doc([[_dt_note("C", 5, 4), _dt_rest(12)], [_dt_note("C", 5, 4)]])
+    out = worker.drop_ties_across_rests(doc)
+    assert b"<tie" not in out
