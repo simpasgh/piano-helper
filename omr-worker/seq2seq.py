@@ -95,7 +95,15 @@ def delinearize(lmx_lines, zeus_dir) -> Optional[bytes]:
         d = Delinearizer(errout=err)
         d.process_text(joined)
         score = part_to_score(d.part_element)
-        return ET.tostring(score.getroot(), encoding="utf-8", xml_declaration=True)
+        root = score.getroot()
+        # Zeus's delinearized MusicXML carries NO `number` attribute on <measure>, which the
+        # MusicXML schema requires and the browser sheet renderer keys on (the eval pipeline
+        # tolerates it via running indices, so only the LIVE app would have noticed). Stamp
+        # sequential 1-based numbers per part, matching what every other engine emits.
+        for part in root.findall("part"):
+            for i, measure in enumerate(part.findall("measure"), start=1):
+                measure.set("number", str(i))
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
     except Exception:
         return None
 
