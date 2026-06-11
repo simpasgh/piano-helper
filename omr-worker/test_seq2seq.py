@@ -379,3 +379,47 @@ def test_assemble_never_raises(fake_zeus_repo, monkeypatch):
 
     monkeypatch.setattr(seq2seq, "correct_octaves_gated", boom)
     assert seq2seq.assemble(["measure"], b"<geom/>", str(fake_zeus_repo)) is None
+
+
+def test_delinearize_stamps_sequential_measure_numbers(tmp_path):
+    # Zeus's delinearized MusicXML carries NO number attribute on <measure> (the eval pipeline
+    # tolerates it via running indices, but the schema requires it and the browser sheet renderer
+    # keys on it): delinearize must stamp sequential 1-based numbers per part.
+    app = tmp_path / "app"
+    (app / "linearization").mkdir(parents=True)
+    (app / "symbolic").mkdir(parents=True)
+    (app / "__init__.py").write_text("")
+    (app / "linearization" / "__init__.py").write_text("")
+    (app / "symbolic" / "__init__.py").write_text("")
+    (app / "linearization" / "Delinearizer.py").write_text(
+        "import xml.etree.ElementTree as ET\n\n\n"
+        "class Delinearizer:\n"
+        "    def __init__(self, errout=None):\n"
+        "        self.part_element = None\n\n"
+        "    def process_text(self, text):\n"
+        "        el = ET.Element('part')\n"
+        "        for _ in range(3):\n"
+        "            ET.SubElement(el, 'measure')  # NO number attr, the real zeus shape\n"
+        "        self.part_element = el\n"
+    )
+    (app / "symbolic" / "part_to_score.py").write_text(
+        "import xml.etree.ElementTree as ET\n\n\n"
+        "class _Tree:\n"
+        "    def __init__(self, root):\n"
+        "        self._root = root\n\n"
+        "    def getroot(self):\n"
+        "        return self._root\n\n\n"
+        "def part_to_score(part_element):\n"
+        "    root = ET.Element('score-partwise')\n"
+        "    root.append(part_element)\n"
+        "    return _Tree(root)\n"
+    )
+    try:
+        out = seq2seq.delinearize(["measure"], str(tmp_path))
+        assert out is not None
+        measures = ET.fromstring(out).find("part").findall("measure")
+        assert [m.get("number") for m in measures] == ["1", "2", "3"]
+    finally:
+        for name in list(sys.modules):
+            if name == "app" or name.startswith("app."):
+                sys.modules.pop(name, None)
