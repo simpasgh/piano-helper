@@ -4,6 +4,37 @@ Self-contained plan so any session (esp. the one on the GPU PC) can pick up and 
 without the prior machine's local memory. Newest status at the top. NO em dashes in generated
 text (project rule). Ship every code change through the gated flow (see "Constraints" below).
 
+## STATUS: FULL ENGINE REVIEW + IMPROVEMENT PROGRAM published -- see docs/omr-engine-review-2026-06.md (2026-06-11)
+
+A 22-agent adversarially-verified review (capability matrix, world positioning, refuted-paths
+ledger, prioritized program) now lives at [docs/omr-engine-review-2026-06.md](../omr-engine-review-2026-06.md).
+It is the planning source of truth for engine work; key conclusions:
+
+- HIGHEST IMPACT-PER-EFFORT (unanimous across all 3 strategies): N1 photo-to-PDF shim. Photos
+  never reach Clarity (worker.py gates fusion/streaming on is_pdf_input), so the flagship photo
+  path ships with ZERO rhythm/key/ties BY CONSTRUCTION and a C-major assumption the oracle-keyed
+  eval masks. Wrap non-PDF uploads as a 1-page PDF for Clarity only; geom keeps the original
+  raster (structural never-worse floor). Days of work, unlocks everything cross-engine on photos.
+- THE DENSE WALL IS THE INDUSTRY FRONTIER, not us trailing: published pianoform OMR-NED 57.4 vs
+  92-98 for easier textures. Our ignore-measure pitch recall 0.68-0.93 means 2-3x is recoverable
+  under the measure grid. NOW/NEXT attack: notehead-aware barline veto + adaptive chord
+  clustering (X1), cross-engine measure-grid arbitration via the existing NW alignment which
+  currently DISCARDS Clarity's measure numbers (X2), trained barline detector gated by an
+  offline oracle swap (X3).
+- THE BET: Zeus-class CRNN seq2seq (~30-60M params, LMX out, 16GB-trainable, CPU-servable int8)
+  as a THIRD fusion citizen behind an agreement referee; decided by a pretrained bake-off (X4)
+  BEFORE any training spend. Genuinely new vs the full-symbol defeat: that lost on per-glyph
+  rhythm DETECTION (stem recall 0.054); sequence decoding emits barlines/rhythm as context.
+  Kill criteria pre-registered in the doc.
+- NEWLY CLOSED PATHS (do not retry): standalone strip-level rhythm-only seq2seq channel
+  (dominated by Clarity-on-photos); faint-ink barline threshold + barline-edge snap zone as
+  strategy pillars (reverie's residual is a MISSED STAFF, not barlines; both demoted to
+  hours-scale diagnostics). MUSCIMA++/CVC-MUSCIMA data stays excluded (CC BY-NC-SA taints).
+- MEASURABLE "BEST IN THE WORLD" TARGETS: CC0-26 dense mean toward the 0.68-0.93 ceilings;
+  photo mean note_f1 >= 0.8 + publish the first REAL phone-photo benchmark (none exists
+  publicly); TEDn <= Zeus's 18.40 on OLiMPiC-scanned; cross-engine-agreement correction UX
+  (the Soundslice lesson).
+
 ## STATUS: PHONE-PHOTO robustness -- the cliff is STAFF DETECTION (not the notehead detector); illumination flat-fielding recovers it, clean byte-identical (2026-06-04)
 
 Investigated phone-photo robustness (the product goal: read photos of physical scores, not just clean
