@@ -463,3 +463,160 @@ class TestMeasureCount:
 
     def test_empty_is_zero(self):
         assert fusion._measure_count({}) == 0
+
+
+# --- X2 measure remap: regroup geom chords into Clarity's near-oracle measure grid -----------
+
+
+def _measure_midis(xml):
+    """{measure: sorted midis} for the pitched notes of a built score."""
+    out = {}
+    for e in reconcile.to_events(xml, "x"):
+        if e.pitch is None:
+            continue
+        out.setdefault(e.measure, []).append(reconcile._pitch_to_midi(e.pitch))
+    return {m: sorted(v) for m, v in out.items()}
+
+
+def test_fuse_remaps_oversegmented_geom_into_clarity_grid():
+    # geom split each true measure in two (dense-stack false barlines): four 1-note measures.
+    # Clarity reads the true grid (C D | E F). The remap merges geom's chords into Clarity's
+    # measures while geom's octaves are kept (clarity reads them an octave low here).
+    geom = _xml([
+        {"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []},
+        {"staff1": [{"duration": 1, "pitches": [{"step": "D", "octave": 5}]}], "staff2": []},
+        {"staff1": [{"duration": 1, "pitches": [{"step": "E", "octave": 5}]}], "staff2": []},
+        {"staff1": [{"duration": 1, "pitches": [{"step": "F", "octave": 5}]}], "staff2": []},
+    ])
+    clarity = _xml([
+        {"staff1": [{"duration": 8, "pitches": [{"step": "C", "octave": 4}]},
+                    {"duration": 8, "pitches": [{"step": "D", "octave": 4}]}], "staff2": []},
+        {"staff1": [{"duration": 8, "pitches": [{"step": "E", "octave": 4}]},
+                    {"duration": 8, "pitches": [{"step": "F", "octave": 4}]}], "staff2": []},
+    ])
+    fused = fusion.fuse(geom, clarity)
+    mm = _measure_midis(fused)
+    assert len(mm) == 2, "clarity's 2-measure grid must win over geom's 4"
+    assert mm[1] == [72, 74]   # C5 D5 merged into measure 1 (geom octaves kept)
+    assert mm[2] == [76, 77]   # E5 F5 in measure 2
+
+
+def test_fuse_undersegmented_geom_keeps_its_grid():
+    # UNDER-segmentation (geom 1 measure, Clarity 2) deliberately does NOT remap: that direction
+    # was measured mixed (serenade +0.08 but moonlight1 -0.10, nocturnecsharp -0.42, liminality
+    # clean -0.11 / photo -0.21), so the gate keeps geom's grid there.
+    geom = _xml([
+        {"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]},
+                    {"duration": 1, "pitches": [{"step": "D", "octave": 5}]},
+                    {"duration": 1, "pitches": [{"step": "E", "octave": 5}]},
+                    {"duration": 1, "pitches": [{"step": "F", "octave": 5}]}], "staff2": []},
+    ])
+    clarity = _xml([
+        {"staff1": [{"duration": 8, "pitches": [{"step": "C", "octave": 5}]},
+                    {"duration": 8, "pitches": [{"step": "D", "octave": 5}]}], "staff2": []},
+        {"staff1": [{"duration": 8, "pitches": [{"step": "E", "octave": 5}]},
+                    {"duration": 8, "pitches": [{"step": "F", "octave": 5}]}], "staff2": []},
+    ])
+    fused = fusion.fuse(geom, clarity)
+    assert len(_measure_midis(fused)) == 1  # geom's single measure survives
+
+
+def test_remap_measures_splits_at_clarity_boundary():
+    # The remap CAPABILITY (direct call) splits a geom measure whose chords match across a Clarity
+    # boundary: per-chord placement, which a per-measure vote could not do. The fuse-level gate
+    # decides WHEN this runs; the mechanics are locked here.
+    g_cells = {(1, 1): [(0, [("C", 0, 5)], 1, None), (1, [("D", 0, 5)], 1, None),
+                        (2, [("E", 0, 5)], 1, None), (3, [("F", 0, 5)], 1, None)]}
+    c_cells = {(1, 1): [(0, [("C", 0, 5)], 8, None), (1, [("D", 0, 5)], 8, None)],
+               (2, 1): [(0, [("E", 0, 5)], 8, None), (1, [("F", 0, 5)], 8, None)]}
+    out = fusion._remap_measures(g_cells, c_cells)
+    assert sorted(k[0] for k in out) == [1, 2]
+    assert [c[1][0][0] for c in out[(1, 1)]] == ["C", "D"]
+    assert [c[1][0][0] for c in out[(2, 1)]] == ["E", "F"]
+
+
+def test_remap_measures_unmatched_chord_follows_its_neighbours():
+    # An unmatched geom chord (B, absent from Clarity) inherits the measure of its previous
+    # matched neighbour, so every geom notehead survives the remap (direct-call capability test).
+    g_cells = {(1, 1): [(0, [("C", 0, 5)], 1, None)],
+               (2, 1): [(0, [("B", 0, 4)], 1, None)],
+               (3, 1): [(0, [("E", 0, 5)], 1, None)]}
+    c_cells = {(1, 1): [(0, [("C", 0, 5)], 16, None)],
+               (2, 1): [(0, [("E", 0, 5)], 16, None)]}
+    out = fusion._remap_measures(g_cells, c_cells)
+    assert [c[1][0][0] for c in out[(1, 1)]] == ["C", "B"]
+    assert [c[1][0][0] for c in out[(2, 1)]] == ["E"]
+
+
+def test_remap_measures_leading_unmatched_chord_inherits_next_match():
+    # A geom chord BEFORE the first NW anchor (B, absent from Clarity) has no PREVIOUS matched
+    # neighbour, so the backward pass gives it the NEXT one's measure: a leading extra notehead
+    # survives the remap at the front of its anchor's measure (direct-call capability test).
+    g_cells = {(1, 1): [(0, [("B", 0, 4)], 1, None)],
+               (2, 1): [(0, [("C", 0, 5)], 1, None)],
+               (3, 1): [(0, [("E", 0, 5)], 1, None)]}
+    c_cells = {(1, 1): [(0, [("C", 0, 5)], 16, None)],
+               (2, 1): [(0, [("E", 0, 5)], 16, None)]}
+    out = fusion._remap_measures(g_cells, c_cells)
+    assert [c[1][0][0] for c in out[(1, 1)]] == ["B", "C"]  # stream order kept: B leads its anchor
+    assert [c[1][0][0] for c in out[(2, 1)]] == ["E"]
+
+
+def test_fuse_remap_gate_blocks_without_anchors():
+    # Over-segmented by >= 2 but NO pitch class is shared anywhere: the anchor-rate gate keeps
+    # geom's own grid (a broken / partial Clarity run must never supply the measure grid; the
+    # measured cases are avemaria 0.46 and clairdelune 0.47 anchor rates).
+    geom = _xml([
+        {"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []},
+        {"staff1": [{"duration": 1, "pitches": [{"step": "D", "octave": 5}]}], "staff2": []},
+        {"staff1": [{"duration": 1, "pitches": [{"step": "E", "octave": 5}]}], "staff2": []},
+    ])
+    clarity = _xml([
+        {"staff1": [{"duration": 8, "pitches": [{"step": "F", "alter": 1, "octave": 4}]},
+                    {"duration": 8, "pitches": [{"step": "G", "alter": 1, "octave": 4}]}],
+         "staff2": []},
+    ])
+    fused = fusion.fuse(geom, clarity)
+    mm = _measure_midis(fused)
+    assert len(mm) == 3          # geom's grid survived
+    assert mm[1] == [72] and mm[2] == [74] and mm[3] == [76]
+
+
+def test_fuse_remap_gate_needs_two_measure_overseg(monkeypatch):
+    # gm - cm == 1 (the real-icarus shape, measured -0.12 under a remap) must NOT fire: the gate
+    # needs at least _REMAP_MIN_OVERSEG = 2, so the remap is never invoked here. The same spy
+    # also locks the equal-count case (clean sparse pieces stay byte-identical by construction).
+    called = {}
+
+    def spy(g, c):
+        called["yes"] = True
+        return {}
+
+    monkeypatch.setattr(fusion, "_remap_measures", spy)
+    geom = _xml([
+        {"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []},
+        {"staff1": [{"duration": 1, "pitches": [{"step": "D", "octave": 5}]}], "staff2": []},
+    ])
+    clarity = _xml([
+        {"staff1": [{"duration": 8, "pitches": [{"step": "C", "octave": 5}]},
+                    {"duration": 8, "pitches": [{"step": "D", "octave": 5}]}], "staff2": []},
+    ])
+    fusion.fuse(geom, clarity)
+    assert "yes" not in called
+    geom_eq = _xml([{"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]}],
+                     "staff2": []}])
+    clarity_eq = _xml([{"staff1": [{"duration": 16, "pitches": [{"step": "C", "octave": 5}]}],
+                        "staff2": []}])
+    fusion.fuse(geom_eq, clarity_eq)
+    assert "yes" not in called
+
+
+def test_remap_measures_pads_rest_only_clarity_measure():
+    # A Clarity measure holding only rests contributes no chord cells; without padding it would
+    # collapse out of the rebuilt score and shift every later measure off the truth grid. The pad
+    # keeps measure 2 as an empty slot between the anchored 1 and 3.
+    g_cells = {(1, 1): [(0, [("C", 0, 5)], 4, None)], (2, 1): [(0, [("D", 0, 5)], 4, None)]}
+    c_cells = {(1, 1): [(0, [("C", 0, 4)], 8, None)], (3, 1): [(0, [("D", 0, 4)], 8, None)]}
+    out = fusion._remap_measures(g_cells, c_cells)
+    assert sorted(k[0] for k in out) == [1, 2, 3]
+    assert out[(2, 1)] == []

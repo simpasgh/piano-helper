@@ -300,6 +300,111 @@ def _measure_count(cells: Dict) -> int:
     return len({k[0] for k in cells})
 
 
+_REMAP_MIN_OVERSEG = 2   # geom must report at least this many MORE measures than Clarity for the
+#                          remap to fire. Measured (x2_signals, 2026-06-11): all 8 pieces with
+#                          gm - cm >= 2 AND a healthy anchor rate improved under the remap (mean
+#                          +0.20 note_f1, air +0.47, waltzamin +0.31); the one >=-by-1 piece
+#                          (real icarus, gm 26 vs cm 25) REGRESSED -0.12, so the margin is 2.
+_REMAP_MIN_ANCHOR = 0.55  # minimum fraction of geom chords with an NW match. A broken / partial
+#                          Clarity run anchors few chords (avemaria 0.46, clairdelune 0.47, both
+#                          would regress); every measured winner sits >= 0.598.
+
+
+def _remap_gate(g_cells: Dict, c_cells: Dict) -> bool:
+    """True when the X2 remap should fire: geom OVER-segments vs Clarity by at least
+    _REMAP_MIN_OVERSEG measures (the dense-stack failure the remap was measured to fix) AND
+    enough geom chords anchor to Clarity (_REMAP_MIN_ANCHOR) that Clarity's transcription is
+    trustworthy. The UNDER-segmentation direction (gm < cm) is deliberately OFF: measured mixed
+    (serenade +0.08 but moonlight1 -0.10, nocturnecsharp -0.42, the liminality clean -0.11 and
+    photo -0.21), so a piece where Clarity reports MORE measures keeps geom's grid until a
+    better placement exists. PURE; NEVER raises (False on any failure keeps today's path)."""
+    try:
+        if _measure_count(g_cells) - _measure_count(c_cells) < _REMAP_MIN_OVERSEG:
+            return False
+        n = sum(len(v) for v in g_cells.values())
+        if not n:
+            return False
+        return len(_borrow_from_clarity(g_cells, c_cells)) / n >= _REMAP_MIN_ANCHOR
+    except Exception:
+        return False
+
+
+def _remap_measures(g_cells: Dict, c_cells: Dict) -> Dict:
+    """Regroup geom's chords into CLARITY's measure grid (X2, the measure remap). Measured
+    2026-06-11 (x2_study): on clean dense scores Clarity's measure count is near-ORACLE (exact on
+    6 of 15 pieces, within +-3 on all but one) while geom's barline grid over-segments by up to
+    +40 measures, and the pitch recall trapped under geom's wrong grid is the dense wall's whole
+    headroom (ignore-measure recall 0.68-0.93 vs note_f1 0.2-0.5). So: keep geom's chords (pitch
+    is geom's edge) but place each one into the measure of its NW-matched Clarity chord -- the
+    SAME pitch-class alignment the duration borrow uses, re-run here over (geom stream, Clarity
+    stream-with-measure-numbers). Per-CHORD placement (not a per-measure vote) handles BOTH
+    failure directions: several geom measures matched into one Clarity measure merge (geom
+    over-segmentation), and one geom measure whose chords match across a Clarity boundary splits
+    (geom under-segmentation, the serenade shape). NW pairs are monotonic in both sequences, so
+    the assignment never reorders chords.
+
+    An UNMATCHED geom chord inherits the measure of its nearest MATCHED neighbour in the same
+    staff stream (previous first, else next), so every geom notehead survives. A staff with
+    chords but ZERO matches anywhere aborts the remap ({} -> the caller keeps geom's own grid).
+
+    Missing measure numbers inside the grid span are PADDED as empty cells, because the builder
+    renumbers measures sequentially from the sorted keys: without padding, a Clarity measure
+    holding only rests (it contributes no chord cells) would collapse out of the emitted score
+    and shift every later measure number off the truth grid. The pad runs from Clarity's first
+    seen measure (leading measures geom missed keep their absolute position) to the last
+    ASSIGNED measure (trailing rest-only measures add nothing). PURE; NEVER raises beyond
+    returning {} (callers fall back to the unremapped cells)."""
+    try:
+        out: Dict = {}
+        assigned_any = False
+        for staff in (1, 2):
+            gpc: List[FrozenSet] = []
+            gitems: List = []
+            for (mm, s) in sorted(k for k in g_cells if k[1] == staff):
+                for chord in g_cells[(mm, s)]:
+                    gpc.append(_pc(chord[1]))
+                    gitems.append(chord)
+            if not gitems:
+                continue
+            cpc: List[FrozenSet] = []
+            cmeas: List[int] = []
+            for (cm, s) in sorted(k for k in c_cells if k[1] == staff):
+                for chord in c_cells[(cm, s)]:
+                    cpc.append(_pc(chord[1]))
+                    cmeas.append(cm)
+            assign: List[Optional[int]] = [None] * len(gitems)
+            for gi, ci in _nw(gpc, cpc):
+                assign[gi] = cmeas[ci]
+            if all(a is None for a in assign):
+                return {}  # a populated staff with no anchor at all: keep geom's grid
+            last: Optional[int] = None
+            for i in range(len(assign)):  # unmatched -> previous matched neighbour's measure
+                if assign[i] is None:
+                    assign[i] = last
+                else:
+                    last = assign[i]
+            nxt: Optional[int] = None
+            for i in range(len(assign) - 1, -1, -1):  # leading unmatched -> next matched
+                if assign[i] is None:
+                    assign[i] = nxt
+                else:
+                    nxt = assign[i]
+            for chord, mm in zip(gitems, assign):
+                out.setdefault((mm, staff), []).append(chord)
+                assigned_any = True
+        if not assigned_any:
+            return {}
+        lo = min((k[0] for k in c_cells), default=None)
+        hi = max(k[0] for k in out)
+        if lo is not None:
+            for mm in range(lo, hi):
+                if not any(k[0] == mm for k in out):
+                    out[(mm, 1)] = []  # empty pad keeps later measures at their absolute position
+        return out
+    except Exception:
+        return {}
+
+
 def fuse_prefix(geom_xml, clarity_prefix_xml) -> Optional[bytes]:
     """Fuse for a STREAMING PARTIAL that contains ONLY the systems finalized so far: geom truncated
     to the Clarity prefix's measure count, fused with the Clarity prefix. The pending (not-yet-decoded)
@@ -365,6 +470,15 @@ def fuse(geom_xml, clarity_xml) -> Optional[bytes]:
         c_cells = _chords_by_cell(clarity_xml)
         if not c_cells:
             return geom_xml
+        # X2 MEASURE REMAP, fired only by _remap_gate: geom over-segmented by >= 2 measures
+        # (the dense-stack failure; Clarity's count is near-oracle there, x2_study 2026-06-11)
+        # with enough NW anchors to trust Clarity's transcription. Everything else (agreeing
+        # grids, geom under-segmentation, a broken Clarity run) keeps geom's grid byte-identical;
+        # a failed remap ({} -- no anchors on a populated staff) also keeps it.
+        if _remap_gate(g_cells, c_cells):
+            remapped = _remap_measures(g_cells, c_cells)
+            if remapped:
+                g_cells = remapped
         borrowed = _borrow_from_clarity(g_cells, c_cells)
         beats, beat_type = _read_time(clarity_xml) or (4, 4)
         if beats == beat_type:

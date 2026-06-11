@@ -4,6 +4,69 @@ Self-contained plan so any session (esp. the one on the GPU PC) can pick up and 
 without the prior machine's local memory. Newest status at the top. NO em dashes in generated
 text (project rule). Ship every code change through the gated flow (see "Constraints" below).
 
+## STATUS: X2 MEASURE REMAP SHIPPED (gated) -- dense CC0 fusion mean 0.378 -> 0.438, air +0.47, ZERO regressions, hard floor byte-identical (2026-06-11)
+
+Built and gated the X2 cross-engine measure remap in fusion.py. MECHANISM: `_remap_measures`
+re-groups geom's chords into CLARITY's measure grid via the same pitch-class NW alignment the
+duration borrow uses (per-CHORD placement: merges geom's over-segmentation, can split at a Clarity
+boundary, unmatched chords inherit their nearest matched neighbour, rest-only Clarity measures pad
+as empty slots so absolute positions hold).
+
+THE GATE IS THE FINDING. x2_study showed Clarity's measure count near-oracle on dense CC0 (exact
+on 6/15, within +-3 except toccata -7) vs geom +5..+40 over. But a blind count-disagree remap
+FAILED the hard floor (icarus clean -0.12, liminality clean -0.11, photo-liminality -0.21,
+nocturnecsharp -0.42): when geom's grid is already good and Clarity's is slightly off, remapping
+loses. A selector study over 31 cached piece-rows (x2_signals.tsv; bar-sum-vs-meter violations,
+absolute deviation, NW anchor rate, measure counts) found the clean split: EVERY large win has
+geom OVER-segmented by >= 2 measures with anchor rate >= 0.598; every loss is either
+under-segmentation (gm < cm: moonlight1 -0.10, nocturnecsharp -0.42, both liminalities) or a
+broken Clarity run flagged by low anchor rate (avemaria 0.46, clairdelune 0.47). So
+`_remap_gate` = (gm - cm >= _REMAP_MIN_OVERSEG=2) AND (NW anchor rate >= _REMAP_MIN_ANCHOR=0.55).
+The under-segmentation direction is DELIBERATELY OFF until a better placement exists (serenade's
++0.08 left on the table; so are flight +0.02, twinkle +0.005, photo-reverie +0.02).
+
+GATE RESULT (fusion-mode, base = main fusion vs cand, same geom + same local-Clarity outputs,
+rhythm_repair, scored vs truth): fires on exactly 8 pieces, ALL wins: air 0.438 -> 0.906, waltzamin
+0.512 -> 0.818, furelise 0.213 -> 0.419, entertainer 0.145 -> 0.326, canon 0.391 -> 0.542, maple
+0.209 -> 0.348, turkishmarch 0.161 -> 0.226, nocturne 0.291 -> 0.348. CC0-26 fusion mean 0.3777 ->
+0.4382 (+0.0605). EVERYTHING ELSE BYTE-IDENTICAL: real-4 clean (0.946 / 0.992 / 0.990 / 0.881),
+all 4 photos, and every blind-remap regressor held. Strict per-piece never-worse PASSES, no
+amendment. NOTE: dense CC0 gating now runs LOCALLY (N4: Clarity cloned from
+github.com/clquwu/Clarity-OMR, models from HF, GPU 30s/piece; --fast is CPU-only, drop it on GPU).
+
+## STATUS: X4 BAKE-OFF GREENLIGHT -- Zeus reads the dense wall (canon 0.999 raw); the seq2seq third-engine program is GO (2026-06-11)
+
+Ran the pre-registered X4 bake-off locally (full record + artifacts: C:\Users\pascu\omr-train\x4\).
+VERDICT: GREENLIGHT, passed multiple ways.
+
+- **Zeus (ufal/olimpic-icdar24, zeus-olimpic checkpoint, CRNN -> LMX)**: per-system crops from
+  geom's own staff detection (pair bbox + 0.5x system-height margin), concatenated + delinearized,
+  scored on the real gate. Dense CC0: canon 0.391 -> **0.999** raw note_f1; toccata 0.047 -> 0.461
+  raw / 0.875 alignment-ceiling; maple 0.209 -> 0.410 / 0.977; nocturne 0.291 -> 0.396 / 0.850.
+  Pitch-class recall 0.96-1.00 and exact-midi recall 0.92-1.00 EVERYWHERE (the fusion-borrow
+  salvage path is wide open). The raw-vs-ceiling gap is mostly ONE trivial bug: truth numbers a
+  pickup measure 0, Zeus numbers it 1 (a global -1 shift alone takes maple 0.410 -> 0.977).
+  CONTROL: olimpic-scanned (real IMSLP scans) through the same harness reproduced published
+  quality (SER 4.97% vs published 17.72% full-set; harness-mean note_f1 0.945), so the verdict is
+  about the model class, not the harness. Zeus reads keys AND meters correctly (canon D major,
+  nocturne Eb 12/8 with the Bb4 anacrusis, maple Ab 2/4). CPU-deployable: ~1.5 s/system, 27 MB
+  model, CC BY-SA (model+data), MIT code; TF 2.12 needs Python 3.11 and is CPU-only on Windows.
+- **SMT (antoniorv6/SMT, transformer -> bekern)**: clean NO-GO on our distribution WITH a passing
+  control (own-test CER 3.50% / note_f1 0.983, published-equivalent): on CC0 it hallucinates
+  measures (canon 141 vs truth 102) and collapses kern spine structure on dense systems; a
+  half-width causal test ruled out input size. Same verdict for the zeus-grandstaff checkpoint.
+- **THE LESSON: training distribution dominates model class.** The MuseScore-trained checkpoint
+  aces the MuseScore-rendered bench AND real scans; the GrandStaff-(Verovio-)trained ones fail it.
+  This calibrates L2 (the data factory): engraving coverage is the lever, not architecture.
+- Install gotchas (HF checkpoint/code mismatches, transformers pin, pickle conventions, the
+  anacrusis measure-0 scoring trap) are recorded in the x4 workspace; key ones: SMT checkpoints
+  need repo @ d25acd4 + transformers==4.43.3; zeus.py --test takes pickle paths WITHOUT extension;
+  concatenate per-system LMX with spaces and delinearize ONCE.
+
+NEXT for the bet (L4 now unblocked): wire Zeus as a flag-gated third engine (OMR_SEQ2SEQ) behind
+the referee design, fix the anacrusis numbering in the decode, and evaluate zeus-olimpic on the
+real-4 + photos before any training spend.
+
 ## STATUS: X1 NOTEHEAD-AWARE BARLINE VETO SHIPPED (clean path only) -- dense CC0 mean 0.364 -> 0.378, waltzamin +0.255, clean 4 byte-identical (2026-06-11)
 
 Implemented the N5-cleared barline veto: `_veto_headed_barlines` drops a candidate only when it
