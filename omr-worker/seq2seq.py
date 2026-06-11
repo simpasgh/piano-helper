@@ -17,8 +17,11 @@ l4v2_stage1.tsv / l4v2_stage2.tsv) found the validated two-stage rule this modul
   same-sign runs of >= MIN_RUN consecutive shifted chords AND only on pieces whose pooled
   disagree rate is <= MAX_DISAGREE (an unrestricted borrow regressed 18 pieces: a true
   missing 8va is a long same-sign run in an otherwise-agreeing piece; scattered mixed-sign
-  disagreement means geom itself is the unreliable side). Measured: reverie zeus
-  0.773 -> 0.837, the other 24 matched pieces byte-identical.
+  disagreement means geom itself is the unreliable side). Measured (l4v2_stage1.tsv, the
+  chosen 0.08/4 rule): rewrites fire on 4 of 30 pieces; reverie zeus 0.773 -> 0.837 is the
+  target gain, nocturne -0.0024 / maple -0.0025 / furelise +0.0022 are noise-level, the
+  other 26 pieces unchanged. Stage 2's zero-violations result was measured WITH these
+  corrected files, so the tiny dips sit inside the validated guarantee.
 
   STAGE 2, THE REFEREE: az_pc = mean per-measure F1 of PITCH-CLASS multisets, zeus(corrected)
   vs CLARITY (staves pooled per measure, 1-based running measure indices, measures present in

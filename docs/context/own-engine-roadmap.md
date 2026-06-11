@@ -83,8 +83,12 @@ geom's; rewrite a zeus note's octave to geom's when the pitch class matches and 
 EXACTLY +-12, but ONLY inside maximal same-sign runs of >= 4 consecutive shifted chords AND only
 on pieces whose pooled disagree rate <= 0.08 (an UNRESTRICTED borrow regressed 18 pieces: a true
 missing 8va is a long same-sign run in an otherwise-agreeing piece; scattered mixed-sign
-disagreement means geom itself is unreliable there). Result: reverie zeus 0.773 -> 0.837, the
-other 24 untouched pieces byte-identical, zeus-corr mean 0.6999.
+disagreement means geom itself is unreliable there). Result (CORRECTED at the integration
+review 2026-06-11 against l4v2_stage1.tsv; the original "other 24 untouched byte-identical"
+claim was wrong): rewrites fire on 4 of 30 pieces, reverie zeus 0.773 -> 0.837 plus three
+noise-level movers (nocturne -0.0024, maple -0.0025, furelise +0.0022), the other 26
+unchanged; zeus-corr mean 0.6999. Stage 2's zero-violations result is measured over these
+corrected files, so the dips are inside the gate.
 
 STAGE 2, THE REFEREE: per piece compute az_pc = mean per-measure F1 of PITCH-CLASS multisets,
 zeus(corrected) vs CLARITY (staves pooled, 1-based running measure index both sides), and af_pc =
