@@ -163,8 +163,33 @@ def _assign_to_staves(
         return [[] for _ in staves]
 
 
+def _write_clarity_pdf(gray, path: str) -> bool:
+    """Write the FLAT-FIELDED raster as a one-page PDF for the PDF-only Clarity engine (the
+    photo-to-PDF shim, OMR_PHOTO_CLARITY). Clarity's Stage A collapses on a raw phone photo
+    (measured 0-2 of 6-22 systems found) but recovers on the dewarped + illumination-normalized
+    raster (6/6 icarus, 7/8 reverie), so the dump is ALWAYS normalize_illumination(gray); on an
+    evenly-lit image (a clean screenshot) the flat-field is a guarded no-op, so nothing degrades.
+    The page size maps native pixels to 300 DPI (width_pt = px * 72 / 300), the resolution
+    Clarity rasterizes PDFs at, so the round trip preserves the raster ~losslessly. Returns True
+    when the PDF was written; False on ANY failure (never raises: the dump is an optional side
+    output and must not cost the decode)."""
+    try:
+        # Local imports (not the module-level ultralytics-guarded ones): the dump only needs
+        # numpy + PIL, which geom_omr.GEOM_AVAILABLE already implies, even in a torch-less env.
+        import numpy as _np
+        from PIL import Image
+
+        illum = geom_omr.normalize_illumination(gray)
+        arr = _np.clip(illum * 255.0, 0.0, 255.0).astype("uint8")
+        Image.fromarray(arr, mode="L").save(path, format="PDF", resolution=300.0, quality=95)
+        return True
+    except Exception:
+        return False
+
+
 def transcribe_with_detector(image, detector: NoteheadDetector,
-                             key_fifths: int = 0) -> Optional[bytes]:
+                             key_fifths: int = 0,
+                             dump_clarity_pdf: Optional[str] = None) -> Optional[bytes]:
     """End-to-end transcription using the TRAINED detector for noteheads and geom_omr for staff
     geometry + the exact pitch decode. Mirrors geom_omr.transcribe_geometric but swaps the
     notehead source: the trained YOLO detector + _assign_to_staves replace the classical
@@ -177,6 +202,10 @@ def transcribe_with_detector(image, detector: NoteheadDetector,
     key_fifths: key signature passed to decode_pitch so accidentals come from the key (default 0
         = C major). A real deployment detects this from the engraved key signature; the synthetic
         eval can pass the known key to measure the decode ceiling.
+    dump_clarity_pdf: when set, ALSO write the raster this decode used (dewarped when the dewarp
+        was kept, flat-fielded always) as a one-page PDF at this path, so the worker can hand a
+        photo upload to the PDF-only Clarity engine (_write_clarity_pdf). None (the default, and
+        every PDF upload) changes nothing.
     """
     if not (DETECTOR_AVAILABLE and geom_omr.GEOM_AVAILABLE):
         return None
@@ -241,6 +270,11 @@ def transcribe_with_detector(image, detector: NoteheadDetector,
         if not staves:
             return None
         work = gray_dw if use_dw else gray
+        # Photo-to-PDF shim side output: the raster THIS decode runs on (dewarped when kept),
+        # flat-fielded and wrapped as a one-page PDF for Clarity. Best-effort: a dump failure
+        # leaves no file and the worker simply skips Clarity (geom-alone, today's behavior).
+        if dump_clarity_pdf:
+            _write_clarity_pdf(work, dump_clarity_pdf)
         centers = detector.detect(det_source, imgsz=_auto_imgsz(work.shape))
         if not centers:
             return None
@@ -313,6 +347,10 @@ def main(argv=None) -> int:
                     help="pin the key signature for the decode. Omit it: the notehead-only path "
                          "assumes C major; the --symbols path DETECTS the key from the engraved "
                          "key signature.")
+    ap.add_argument("--dump-clarity-pdf", default=None,
+                    help="ALSO write the decode's (dewarped, flat-fielded) raster as a one-page "
+                         "PDF here, so the worker can hand a photo upload to the PDF-only Clarity "
+                         "engine (the OMR_PHOTO_CLARITY shim). Best-effort side output.")
     args = ap.parse_args(argv)
 
     if not DETECTOR_AVAILABLE:
@@ -323,7 +361,8 @@ def main(argv=None) -> int:
         xml = transcribe_with_symbols(args.image, detector, key_fifths=args.key_fifths)
     else:
         kf = args.key_fifths if args.key_fifths is not None else 0
-        xml = transcribe_with_detector(args.image, detector, key_fifths=kf)
+        xml = transcribe_with_detector(args.image, detector, key_fifths=kf,
+                                       dump_clarity_pdf=args.dump_clarity_pdf)
     if not xml:
         return 2
     with open(args.out, "wb") as f:

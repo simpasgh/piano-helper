@@ -193,6 +193,27 @@ def fusion_enabled():
     return raw.strip().lower() in ("1", "true")
 
 
+# PHOTO-TO-PDF SHIM (OMR_PHOTO_CLARITY, default OFF). Clarity is PDF-only, so a photo upload
+# historically got geom alone: no rhythm (every note duration:1), no key borrow (C-major assumed),
+# no ties. With the flag on, the fusion path asks geom to dump the raster its decode actually used
+# (dewarped when the dewarp was kept, flat-fielded always) as a one-page PDF and runs Clarity on
+# THAT: the raw photo defeats Clarity's Stage A (measured 0-2 of 6-22 systems), the preprocessed
+# raster recovers it (6/6 icarus, 7/8 reverie, 9 liminality). geom itself keeps consuming the
+# ORIGINAL raster, so flag off, or ANY shim failure (no dump, Clarity decline), produces exactly
+# the geom-alone bytes of today: a structural never-worse floor.
+PHOTO_CLARITY_ENV = "OMR_PHOTO_CLARITY"
+
+
+def photo_clarity_enabled():
+    """True when OMR_PHOTO_CLARITY is truthy: on a NON-PDF upload, wrap geom's dewarped raster as
+    a one-page PDF and run Clarity on it so the fusion (rhythm/key/ties) works on photos too. Only
+    meaningful when geom_enabled() and fusion_enabled() are also True. Mirrors fusion_enabled."""
+    raw = os.environ.get(PHOTO_CLARITY_ENV)
+    if raw is None:
+        return False
+    return raw.strip().lower() in ("1", "true")
+
+
 # PROGRESSIVE publishing (progressive.py), gated by OMR_PROGRESSIVE (default OFF). When ON, process_job
 # writes the result key MULTIPLE times: in-progress writes are marked omr-status=partial so the browser
 # renders the first notes while the rest still computes, and the final write is the complete result.
@@ -745,12 +766,15 @@ def run_clarity_stream(pdf_path, workdir, on_system, timeout=None):
     return final_bytes
 
 
-def geom_command(python, script, image_path, weights, out_path, device="cpu", key_fifths=None):
+def geom_command(python, script, image_path, weights, out_path, device="cpu", key_fifths=None,
+                 dump_clarity_pdf=None):
     """Build the trained-geometric-engine argv. Pure so it is unit-testable without running the
     engine (mirrors clarity_command). Runs geom_detector.py's CLI on a RASTER image (a PDF is
     rasterized first, like oemer). key_fifths (when not None) pins the key signature for the decode
     via --key-fifths so geom reads non-C accidentals correctly instead of assuming C major; the
-    fusion path supplies Clarity's detected key on non-C pieces. None keeps geom's C-major default."""
+    fusion path supplies Clarity's detected key on non-C pieces. None keeps geom's C-major default.
+    dump_clarity_pdf (when not None) asks geom to ALSO write its dewarped raster as a one-page PDF
+    there, the photo-to-PDF shim input for the PDF-only Clarity (OMR_PHOTO_CLARITY)."""
     cmd = [
         python,
         script,
@@ -764,16 +788,21 @@ def geom_command(python, script, image_path, weights, out_path, device="cpu", ke
     ]
     if key_fifths is not None:
         cmd += ["--key-fifths", str(int(key_fifths))]
+    if dump_clarity_pdf is not None:
+        cmd += ["--dump-clarity-pdf", dump_clarity_pdf]
     return cmd
 
 
-def run_geom(image_path, workdir, timeout=None, key_fifths=None):
+def run_geom(image_path, workdir, timeout=None, key_fifths=None, dump_clarity_pdf=None):
     """Run our trained geometric engine as a subprocess in its OWN torch venv. Returns the output
     .musicxml path or None on ANY failure (env unset/missing, subprocess error, timeout, or exit 2
     = nothing recognized) so the caller falls back to the existing engines. Never raises into
     process_job. Gated by GEOM_PYTHON + GEOM_WEIGHTS being set and present on disk. key_fifths (when
     not None) is forwarded to the geom CLI's --key-fifths so the decode uses that key instead of
-    assuming C major (the fusion path passes Clarity's detected key on non-C pieces)."""
+    assuming C major (the fusion path passes Clarity's detected key on non-C pieces).
+    dump_clarity_pdf (when not None) is forwarded to --dump-clarity-pdf: geom also writes its
+    dewarped raster as a one-page PDF there for the photo-to-PDF Clarity shim; best-effort (the
+    caller checks the file exists before using it)."""
     python = os.environ.get(GEOM_PYTHON_ENV)
     weights = os.environ.get(GEOM_WEIGHTS_ENV)
     if not python or not weights:
@@ -785,7 +814,8 @@ def run_geom(image_path, workdir, timeout=None, key_fifths=None):
     out_path = os.path.join(workdir, "geom.musicxml")
     try:
         subprocess.run(
-            geom_command(python, script, image_path, weights, out_path, key_fifths=key_fifths),
+            geom_command(python, script, image_path, weights, out_path, key_fifths=key_fifths,
+                         dump_clarity_pdf=dump_clarity_pdf),
             check=True,
             cwd=workdir,
             timeout=timeout,
@@ -1738,11 +1768,12 @@ def process_job(client, bucket, job_id):
                 log("geom input copy failed for %s (%r); geom disabled this job" % (job_id, err))
                 geom_input_png = None
 
-        def _geom_body(key_fifths=None):
+        def _geom_body(key_fifths=None, dump_clarity_pdf=None):
             """Run geom on this upload (raster prep + run_geom) and return its MusicXML bytes, or
             None on decline/failure. Shared by the primary and fallback positions below. key_fifths
             (when set) is forwarded to geom's decode so the fusion can re-key it under Clarity's
-            detected key on a non-C piece."""
+            detected key on a non-C piece. dump_clarity_pdf (when set, photo path only) asks geom
+            to also write its dewarped raster as a one-page PDF for the Clarity shim."""
             try:
                 geom_image = (
                     rasterize_if_pdf(input_path, workdir)[0] if is_pdf_input else geom_input_png
@@ -1752,7 +1783,8 @@ def process_job(client, bucket, job_id):
                 return None
             if geom_image is None:
                 return None
-            gp = run_geom(geom_image, workdir, key_fifths=key_fifths)
+            gp = run_geom(geom_image, workdir, key_fifths=key_fifths,
+                          dump_clarity_pdf=dump_clarity_pdf)
             if not gp:
                 return None
             with open(gp, "rb") as fh:
@@ -1809,6 +1841,28 @@ def process_job(client, bucket, job_id):
                                 clarity_bytes = fh.read()
                         except Exception as err:
                             log("fusion: clarity read failed for %s (%r)" % (job_id, err))
+                elif photo_clarity_enabled():
+                    # PHOTO-TO-PDF SHIM (OMR_PHOTO_CLARITY): geom decodes the ORIGINAL raster
+                    # (unchanged) and dumps the dewarped+flat-fielded raster it used as a one-page
+                    # PDF; Clarity then reads THAT (its Stage A collapses on the raw photo but
+                    # recovers on the preprocessed raster). Sequential, not concurrent like the
+                    # PDF path above, because Clarity's input IS geom's dump (~5-10s of geom
+                    # before Clarity's minutes). Any failure leaves clarity_bytes None and
+                    # fuse(geom, None) returns geom unchanged: today's photo output, the floor.
+                    clarity_pdf = os.path.join(workdir, "clarity-input.pdf")
+                    geom_bytes = _geom_body(dump_clarity_pdf=clarity_pdf)
+                    if geom_bytes and os.path.isfile(clarity_pdf):
+                        # The photo job now waits on Clarity (~minutes, was ~seconds), so surface
+                        # geom's pitch immediately, mirroring the PDF fast-then-refine above.
+                        if progressive_enabled():
+                            publish_partial(geom_bytes)
+                        clarity_path = run_clarity(clarity_pdf, workdir)
+                        if clarity_path:
+                            try:
+                                with open(clarity_path, "rb") as fh:
+                                    clarity_bytes = fh.read()
+                            except Exception as err:
+                                log("photo fusion: clarity read failed for %s (%r)" % (job_id, err))
                 else:
                     geom_bytes = _geom_body()
                 # On a non-C piece, re-decode geom under Clarity's detected key (notehead geom

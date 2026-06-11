@@ -220,3 +220,43 @@ class TestAdaptiveIllumination:
                                                              else real_ds(g, normalize_illum=True)))
         assert self._run_warped(monkeypatch) == b"<score-partwise/>"
         assert captured["normalize_illum"] is True  # reverted: illum-off lost staves vs flat-fielded
+
+
+@requires_geom
+class TestClarityPdfDump:
+    """The photo-to-PDF shim side output (OMR_PHOTO_CLARITY): transcribe_with_detector with
+    dump_clarity_pdf set ALSO writes the raster the decode used (dewarped when the dewarp was
+    kept), flat-fielded, as a one-page PDF for the PDF-only Clarity engine. The dump is
+    best-effort: it can never perturb or abort the decode."""
+
+    def test_clean_page_dump_writes_a_pdf(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(geom_detector, "DETECTOR_AVAILABLE", True)
+        out = tmp_path / "clarity-input.pdf"
+        det = _StubDetector()
+        geom_detector.transcribe_with_detector(_page(), det, dump_clarity_pdf=str(out))
+        assert det.calls, "the decode ran (staves found, detect() reached)"
+        assert out.read_bytes().startswith(b"%PDF")
+
+    def test_warped_page_dumps_the_dewarped_raster(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(geom_detector, "DETECTOR_AVAILABLE", True)
+        out = tmp_path / "clarity-input.pdf"
+        geom_detector.transcribe_with_detector(
+            _page(slope=0.05), _StubDetector(), dump_clarity_pdf=str(out))
+        assert out.read_bytes().startswith(b"%PDF")
+
+    def test_no_dump_arg_writes_nothing(self, tmp_path, monkeypatch):
+        # The default (None) leaves the workdir untouched: no side file, behavior unchanged.
+        monkeypatch.setattr(geom_detector, "DETECTOR_AVAILABLE", True)
+        geom_detector.transcribe_with_detector(_page(), _StubDetector())
+        assert list(tmp_path.iterdir()) == []
+
+    def test_dump_failure_never_breaks_the_decode(self, tmp_path, monkeypatch):
+        # An unwritable target (a DIRECTORY path) makes the dump fail silently; the decode
+        # still runs to detect() exactly as without the dump.
+        monkeypatch.setattr(geom_detector, "DETECTOR_AVAILABLE", True)
+        det = _StubDetector()
+        geom_detector.transcribe_with_detector(_page(), det, dump_clarity_pdf=str(tmp_path))
+        assert det.calls
+
+    def test_write_clarity_pdf_bad_input_returns_false(self, tmp_path):
+        assert geom_detector._write_clarity_pdf(None, str(tmp_path / "x.pdf")) is False
