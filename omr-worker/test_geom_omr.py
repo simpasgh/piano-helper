@@ -1144,3 +1144,33 @@ def test_decode_passes_heads_to_detect_barlines(monkeypatch):
     out = geom_omr._decode_staves_to_musicxml(staves, per_staff, gray=gray)
     assert out is not None
     assert seen["heads"] is per_staff
+
+
+@requires_geom
+def test_detect_barlines_photo_path_skips_head_veto():
+    # PHOTO scope-out: dewarp jitter puts detected heads near genuinely faint real bars (measured:
+    # the veto on the photo path cost the tctab photo -0.024), so heads are IGNORED when photo=True
+    # and the photo output is byte-identical with or without them.
+    import numpy as np
+    from PIL import Image, ImageDraw
+    interline, top, gap = 16, 40, 64
+    treble = [top + i * interline for i in range(5)]
+    bass = [treble[-1] + gap + i * interline for i in range(5)]
+    im = Image.new("L", (400, int(bass[-1] + 60)), 255)
+    d = ImageDraw.Draw(im)
+    for ly in treble + bass:
+        d.line([(0, ly), (400, ly)], fill=0, width=2)
+    for bx in (40, 340):
+        d.line([(bx, treble[0]), (bx, bass[-1])], fill=0, width=2)
+    stacks = (115, 190, 265)
+    for sx in stacks:
+        d.line([(sx, treble[0]), (sx, treble[-1] + 12)], fill=0, width=2)
+        d.line([(sx, bass[0] - 12), (sx, bass[-1])], fill=0, width=2)
+    gray = np.asarray(im, dtype=np.float32) / 255.0
+    staves = geom_omr.detect_systems(gray)
+    assert len(staves) == 2
+    heads = [[(float(sx), float(treble[2])) for sx in stacks],
+             [(float(sx), float(bass[2])) for sx in stacks]]
+    with_heads = geom_omr.detect_barlines(gray, staves, photo=True, heads=heads)
+    without = geom_omr.detect_barlines(gray, staves, photo=True)
+    assert with_heads == without  # heads change NOTHING on the photo path

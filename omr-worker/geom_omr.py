@@ -1211,11 +1211,15 @@ def detect_barlines(gray, staves: List[List[float]], normalize_illum: bool = Tru
                         scores.append(float(gcov[s:x].max()) if gcov is not None else 1.0)
                 else:
                     x += 1
-            if heads is not None:
-                # Notehead side-information: a weak (non-gap-crossing) candidate with a head on its
-                # column is a chord/stem stack, never a real bar (measured 98.8% vs 0%, see
-                # _BAR_HEAD_VETO_IL). Runs BEFORE the narrow-measure filter so the surviving grid
-                # _drop_extra_barlines reasons about is already stack-free.
+            if heads is not None and not photo:
+                # Notehead side-information, CLEAN PATH ONLY: a weak (non-gap-crossing) candidate
+                # with a head on its column is a chord/stem stack, never a real bar (measured 98.8%
+                # vs 0% on clean dense renders, see _BAR_HEAD_VETO_IL). Runs BEFORE the
+                # narrow-measure filter so the surviving grid _drop_extra_barlines reasons about is
+                # already stack-free. The PHOTO path is excluded: dewarp jitter puts detected heads
+                # near genuinely faint real bars (measured: the veto on the photo path cost the
+                # tctab photo -0.024 note_f1 while gaining nothing elsewhere), and photos have
+                # their own tuned recovery chain (_BAR_COV_PHOTO + _insert_missing_barlines).
                 head_xs = [float(hx) for idx in (ti, bi)
                            if idx is not None and idx < len(heads)
                            for (hx, _hy) in heads[idx]]

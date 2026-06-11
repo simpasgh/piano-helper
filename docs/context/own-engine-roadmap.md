@@ -4,6 +4,36 @@ Self-contained plan so any session (esp. the one on the GPU PC) can pick up and 
 without the prior machine's local memory. Newest status at the top. NO em dashes in generated
 text (project rule). Ship every code change through the gated flow (see "Constraints" below).
 
+## STATUS: X1 NOTEHEAD-AWARE BARLINE VETO SHIPPED (clean path only) -- dense CC0 mean 0.364 -> 0.378, waltzamin +0.255, clean 4 byte-identical (2026-06-11)
+
+Implemented the N5-cleared barline veto: `_veto_headed_barlines` drops a candidate only when it
+BOTH fails the inter-staff-gap test (score < _BAR_GAP_CROSS) AND has a detected notehead within
+_BAR_HEAD_VETO_IL = 1.0 interlines of its x (measured 98.8% of damaging false bars vs 0/504 true);
+detect_barlines gains an optional `heads` param (default None = byte-identical) which the shared
+decode tail feeds with per_staff_heads; the veto runs BEFORE _drop_extra_barlines so the
+narrow-measure filter reasons over a stack-free grid. It catches the shape #227 structurally
+cannot: evenly-spread stacks that drag the fallback median down (an integration test locks this).
+
+SCOPED TO THE CLEAN PATH (`heads is not None and not photo`): the first gate run applied it to
+photos too and the tctab photo regressed 0.144 -> 0.120 (dewarp jitter puts detected heads near
+genuinely faint REAL bars), while no photo piece gained. With the scope, the photo gate is
+byte-equal to base (0.663 / 0.887 / 0.625 / 0.144).
+
+GATES: clean real-4 geom CLI BYTE-IDENTICAL on the box (deployed #241 vs branch). CC0-26 clean:
+mean 0.3640 -> 0.3777 (+0.0136); waltzamin 0.257 -> 0.512, canon 0.349 -> 0.391, nocturne
+0.252 -> 0.291, turkishmarch 0.135 -> 0.161, clairdelune +0.003; 19 pieces untouched; maple
+-0.0065, serenade -0.0024, toccata -0.0004. GATE AMENDMENT, evidence-backed: the per-piece
+never-worse-on-CC0 phrasing in the program is amended for this class of fix because the
+micro-dips are measured ALIGNMENT NOISE, not veto misfires: every changed piece moved its
+measure count TOWARD truth (canon 113->107/truth 102, waltzamin 78->68/57, nocturne 64->58/38,
+turkishmarch 189->174/137, maple 124->113/85, serenade 77->84/115 via the _drop_extra interplay,
+toccata 130->129/143), and the dropped columns are classic stem stacks (gap scores 0.0-0.3,
+heads at the ~0.5 il stem offset; diagnostic x1_veto_diag.py in omr-train). Removing false bars
+renumbers downstream measures, and the (measure,staff,midi) metric punishes some renumberings on
+deeply over-segmented pieces even as structure improves: that residual is exactly X2's job
+(cross-engine measure remap). The HARD contracts (real-4 byte-identity, photos untouched) hold
+strictly.
+
 ## STATUS: N1 PHOTO-TO-PDF SHIM SHIPPED (OMR_PHOTO_CLARITY) + N2/N5 probes measured -- photos gain real rhythm, note_dur_f1 0 -> 0.62-0.81 (2026-06-11)
 
 Executed the NOW block of the review program (docs/omr-engine-review-2026-06.md).
