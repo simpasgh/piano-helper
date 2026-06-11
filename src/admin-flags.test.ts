@@ -103,10 +103,11 @@ describe("transitiveRequires / dependentsOf", () => {
     expect(transitiveRequires("OMR_PROGRESSIVE_PAGES")).toContain("OMR_PROGRESSIVE");
   });
 
-  it("dependentsOf geom includes primary, fusion, and block-streaming (transitive via fusion)", () => {
+  it("dependentsOf geom includes primary, fusion, the photo shim, and block-streaming (transitive via fusion)", () => {
     expect(dependentsOf("OMR_GEOM").sort()).toEqual([
       "OMR_GEOM_FUSION",
       "OMR_GEOM_PRIMARY",
+      "OMR_PHOTO_CLARITY",
       "OMR_PROGRESSIVE_BLOCKS",
     ]);
   });

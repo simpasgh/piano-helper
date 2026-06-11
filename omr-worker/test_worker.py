@@ -1057,6 +1057,126 @@ def test_geom_fusion_non_pdf_uses_geom_alone(tmp_path, monkeypatch):
     assert seen["c"] is None  # no clarity for non-PDF
 
 
+# --- PHOTO-TO-PDF shim (OMR_PHOTO_CLARITY): Clarity rhythm/key/ties on photo uploads -------------
+
+
+def test_photo_clarity_enabled_truthy_parsing(monkeypatch):
+    monkeypatch.delenv("OMR_PHOTO_CLARITY", raising=False)
+    assert worker.photo_clarity_enabled() is False
+    for on in ("1", "true", "TRUE", " True "):
+        monkeypatch.setenv("OMR_PHOTO_CLARITY", on)
+        assert worker.photo_clarity_enabled() is True, on
+    for off in ("0", "false", "", "garbage"):
+        monkeypatch.setenv("OMR_PHOTO_CLARITY", off)
+        assert worker.photo_clarity_enabled() is False, off
+
+
+def test_geom_command_dump_clarity_pdf_arg():
+    # The dump path rides on geom's CLI only when requested; the default argv is unchanged.
+    base = worker.geom_command("py", "s.py", "img.png", "w.pt", "out.xml")
+    assert "--dump-clarity-pdf" not in base
+    dumped = worker.geom_command("py", "s.py", "img.png", "w.pt", "out.xml",
+                                 dump_clarity_pdf="/work/clarity-input.pdf")
+    assert dumped[-2:] == ["--dump-clarity-pdf", "/work/clarity-input.pdf"]
+    assert dumped[: len(base)] == base
+
+
+def test_photo_clarity_runs_clarity_on_geom_dump(tmp_path, monkeypatch):
+    # OMR_PHOTO_CLARITY on a NON-PDF upload: geom dumps its dewarped raster as a one-page PDF,
+    # Clarity runs on THAT dump (never the original photo), and the fusion gets both bytes.
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    monkeypatch.setenv("OMR_PHOTO_CLARITY", "1")
+    geom_out = tmp_path / "geom.musicxml"; geom_out.write_text("<score>geom</score>")
+    clar_out = tmp_path / "clarity.musicxml"; clar_out.write_text("<score>clarity</score>")
+    seen = {}
+
+    def fake_run_geom(image, workdir, **k):
+        dump = k.get("dump_clarity_pdf")
+        seen["dump_arg"] = dump
+        if dump:
+            with open(dump, "wb") as fh:
+                fh.write(b"%PDF-1.4 shim")
+        return str(geom_out)
+
+    def fake_run_clarity(pdf_path, workdir, **k):
+        seen["clarity_input"] = pdf_path
+        return str(clar_out)
+
+    monkeypatch.setattr(worker, "run_geom", fake_run_geom)
+    monkeypatch.setattr(worker, "run_clarity", fake_run_clarity)
+
+    def fake_fuse(g, c):
+        seen["g"], seen["c"] = g, c
+        return b"<score>fused</score>"
+
+    monkeypatch.setattr(worker.fusion, "fuse", fake_fuse)
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"\x89PNG fake")
+    _drive_process_job(monkeypatch, client, is_pdf=False)
+    assert client.put_body == b"<score>fused</score>"
+    assert seen["clarity_input"] == seen["dump_arg"]  # Clarity read the DUMP, not the photo
+    assert seen["clarity_input"].endswith("clarity-input.pdf")
+    assert seen["g"] == b"<score>geom</score>"
+    assert seen["c"] == b"<score>clarity</score>"
+
+
+def test_photo_clarity_no_dump_skips_clarity(tmp_path, monkeypatch):
+    # geom produced a result but NO dump file (dump failed / older geom): Clarity must not run and
+    # the output is geom's bytes unchanged -- the structural never-worse floor. With progressive on
+    # there is also no redundant partial (nothing to refine to), so exactly one complete write.
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    monkeypatch.setenv("OMR_PHOTO_CLARITY", "1")
+    monkeypatch.setenv("OMR_PROGRESSIVE", "1")
+    geom_out = tmp_path / "geom.musicxml"; geom_out.write_text("<score>geom</score>")
+    monkeypatch.setattr(worker, "run_geom", lambda *a, **k: str(geom_out))  # never writes the dump
+
+    def clarity_must_not_run(*a, **k):
+        raise AssertionError("no dump PDF was written, so Clarity must not run")
+
+    monkeypatch.setattr(worker, "run_clarity", clarity_must_not_run)
+    monkeypatch.setattr(worker.fusion, "fuse", lambda g, c: g)  # fuse(geom, None) -> geom
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"\x89PNG fake")
+    _drive_process_job(monkeypatch, client, is_pdf=False)
+    assert len(client.puts) == 1, "no Clarity refine -> no partial, one complete write"
+    assert client.put_body == b"<score>geom</score>"
+
+
+def test_photo_clarity_geom_none_skips_clarity(tmp_path, monkeypatch):
+    # geom declined entirely: there is no dump and no geom bytes, so Clarity must not run and the
+    # job falls through to the later engines exactly as with the flag off.
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    monkeypatch.setenv("OMR_PHOTO_CLARITY", "1")
+    monkeypatch.setattr(worker, "run_geom", lambda *a, **k: None)
+
+    def clarity_must_not_run(*a, **k):
+        raise AssertionError("geom declined, so the shim must not run Clarity")
+
+    monkeypatch.setattr(worker, "run_clarity", clarity_must_not_run)
+    monkeypatch.setattr(worker.fusion, "fuse", lambda g, c: g)
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    fell_through = {}
+
+    def fake_legacy(job_id, input_path, workdir, is_pdf_input):
+        fell_through["legacy"] = True
+        return None, None
+
+    monkeypatch.setattr(worker, "_select_legacy", fake_legacy)
+
+    client = _FakeClient(input_bytes=b"\x89PNG fake")
+    _drive_process_job(monkeypatch, client, is_pdf=False)
+    assert fell_through.get("legacy") is True  # the pre-shim fallback chain ran unchanged
+
+
 def test_geom_fusion_takes_precedence_over_primary(tmp_path, monkeypatch):
     # With both OMR_GEOM_FUSION and OMR_GEOM_PRIMARY set, fusion runs and geom-primary does not
     # re-run geom or override the fused result (geom runs exactly once, for the fusion).
@@ -1810,6 +1930,44 @@ def test_progressive_non_pdf_publishes_no_partial(tmp_path, monkeypatch):
     _drive_process_job(monkeypatch, client, is_pdf=False)
     assert len(client.puts) == 1, "no refine on a non-PDF, so no partial"
     assert client.puts[0]["metadata"]["omr-status"] == "complete"
+
+
+def test_progressive_photo_clarity_publishes_geom_partial_then_fused_complete(tmp_path, monkeypatch):
+    # With the photo-to-PDF shim ON, a photo job DOES have a refine (Clarity on geom's dump takes
+    # minutes), so the fast-then-refine shape applies to photos too: geom's pitch partial first,
+    # the fused result as the complete.
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    monkeypatch.setenv("OMR_PHOTO_CLARITY", "1")
+    monkeypatch.setenv("OMR_PROGRESSIVE", "1")
+    geom_out = tmp_path / "geom.musicxml"
+    geom_out.write_bytes(_pg_xml(["C", "D"]))
+    clar_out = tmp_path / "clarity.musicxml"
+    clar_out.write_text("<score>clarity</score>")
+
+    def fake_run_geom(image, workdir, **k):
+        dump = k.get("dump_clarity_pdf")
+        if dump:
+            with open(dump, "wb") as fh:
+                fh.write(b"%PDF-1.4 shim")
+        return str(geom_out)
+
+    monkeypatch.setattr(worker, "run_geom", fake_run_geom)
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clar_out))
+    monkeypatch.setattr(worker.fusion, "fuse", lambda g, c: b"<score>fused</score>")
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"\x89PNG fake")
+    _drive_process_job(monkeypatch, client, is_pdf=False)
+
+    assert len(client.puts) == 2, "one geom partial then one fused complete"
+    partial, complete = client.puts[0], client.puts[1]
+    assert partial["metadata"]["omr-status"] == "partial"
+    assert b'name="omr-status">partial' in partial["body"]
+    assert complete["metadata"]["omr-status"] == "complete"
+    assert complete["body"] == b"<score>fused</score>"
 
 
 def test_progressive_off_fusion_writes_once_complete(tmp_path, monkeypatch):
