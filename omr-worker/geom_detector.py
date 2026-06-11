@@ -14,6 +14,8 @@ GEOM_AVAILABLE contract. NEVER raises from a public function; returns a safe def
 """
 from __future__ import annotations
 
+import os
+import sys
 from typing import List, Optional, Tuple
 
 import geom_omr
@@ -187,9 +189,148 @@ def _write_clarity_pdf(gray, path: str) -> bool:
         return False
 
 
+def _staff_dewarp_decision(gray):
+    """The FULL staff-detection decision pipeline for one raster: raw detection, the classical
+    dewarp with its never-worse-on-clean gate, and the adaptive flat-field refinement. Extracted
+    verbatim from transcribe_with_detector so the GUARDED UVDoc candidate (OMR_UVDOC) can run the
+    SAME decision on the rectified raster and compare used-staff counts. Behavior with one caller
+    is byte-identical to the pre-extraction inline block.
+
+    Returns (staves, use_dw, gray_dw, normalize_illum):
+      staves          - the USED staff list (raw, dewarped, or dewarped-illum-off);
+      use_dw          - whether the dewarp was kept (downstream must run on gray_dw);
+      gray_dw         - dewarp_staff_lines(gray) (identical to gray when the dewarp declined);
+      normalize_illum - whether the decode tail flat-fields (the adaptive illumination decision).
+
+    NEVER raises beyond what detect_systems/dewarp_staff_lines guarantee (both are no-raise)."""
+    # DEWARP tilted / perspective-curved staff lines (real phone photos), the camera-OMR lever:
+    # detect_systems keys on near-full-width dark rows, which a tilted/curved photographed page
+    # smears across rows, so the staff is lost. Straightening the lines recovers detection and the
+    # geometry the pitch decode needs.
+    #
+    # NEVER-WORSE-ON-CLEAN GUARD: keep the dewarp ONLY when it strictly INCREASES the number of
+    # detected staves. A clean page's lines are already horizontal, so its staves are fully detected
+    # raw and dewarping cannot add any -> we fall back to the ORIGINAL raster and the clean path is
+    # byte-identical (detector + staves + barlines all on the untouched image). A warped page's
+    # staff count jumps, so the dewarp is kept and the detector, staff geometry, and barlines ALL
+    # run on the dewarped image (notehead centres and staff lines share one straightened space).
+    staves_raw = geom_omr.detect_systems(gray)
+    gray_dw = geom_omr.dewarp_staff_lines(gray)
+    use_dw = False
+    staves = staves_raw
+    # Whether the downstream geometry (these staves, plus barlines + ottavas in the decode tail) is
+    # flat-fielded. Default True = today's behavior; the CLEAN path never dewarps, so it keeps True
+    # and stays byte-identical. Only the KEPT-dewarp (warped photo) path below may flip it.
+    normalize_illum = True
+    if gray_dw is not gray:
+        staves_dw = geom_omr.detect_systems(gray_dw)
+        if len(staves_dw) > len(staves_raw):
+            use_dw, staves = True, staves_dw
+            # ADAPTIVE ILLUMINATION (warped-photo path only). The flat-field rescues a genuine deep
+            # broad shadow but HURTS a photo that is merely uneven (it over-corrects the gradient and
+            # amplifies noise in the dense row projection, splitting/merging staves). Keep it only
+            # when such a shadow is present, else drop it and re-detect the staves flat-field-free so
+            # they share the decode's illumination space. Measured: lifts liminality + tctab, holds
+            # reverie (its deep shadow keeps the flat-field). Clean never reaches here.
+            normalize_illum = geom_omr._illum_has_deep_shadow(gray_dw)
+            if not normalize_illum:
+                staves_ni = geom_omr.detect_systems(gray_dw, normalize_illum=False)
+                # Drop the flat-field only if doing so does not LOSE staves vs the flat-fielded
+                # detection that justified keeping the dewarp (len(staves) == the staves_dw count
+                # here). If illum-off finds fewer (or none), the flat-field was actually helping
+                # detection, so keep it -- the final staves then stay > the raw count (never-worse).
+                if len(staves_ni) >= len(staves):
+                    staves = staves_ni
+                else:
+                    normalize_illum = True
+    return staves, use_dw, gray_dw, normalize_illum
+
+
+# Lazily-loaded UVDoc state, cached per (dir, checkpoint) so repeat calls within one process (the
+# eval harness; prod runs one transcription per subprocess) skip the model reload.
+_UVDOC_STATE = {"key": None, "utils": None, "model": None, "device": None}
+
+
+def _uvdoc_rectify(gray):
+    """Rectify a photographed page with the pretrained UVDoc document unwarper (MIT,
+    github.com/tanguymagne/UVDoc), the OMR_UVDOC candidate raster. The probe-validated recipe:
+    resize the page to UVDoc's IMG_SIZE for the warp-grid inference, then bilinear-unwarp the
+    FULL-RESOLUTION raster with that grid (C:/Users/pascu/omr-train/uvdoc_rectify.py).
+
+    Wholly optional and environment-gated: UVDOC_DIR must point at the UVDoc clone (its utils.py /
+    model.py) and UVDOC_MODEL at the checkpoint (model/best_model.pkl). Unset env, a missing clone,
+    an import/torch/checkpoint failure, or ANY inference error returns None and the caller keeps
+    the original raster, so this can never make a job worse. NEVER raises.
+
+    gray: float [0,1] HxW grayscale (the _to_gray contract). Returns the rectified float [0,1]
+    HxW grayscale at the SAME resolution, or None."""
+    try:
+        uvdoc_dir = os.environ.get("UVDOC_DIR")
+        ckpt = os.environ.get("UVDOC_MODEL")
+        if not uvdoc_dir or not ckpt or not os.path.isdir(uvdoc_dir) or not os.path.isfile(ckpt):
+            return None
+        import numpy as _np
+
+        arr = _np.asarray(gray, _np.float32)
+        if arr.ndim != 2 or arr.size == 0:
+            return None
+        import cv2
+        import torch
+
+        key = (os.path.abspath(uvdoc_dir), os.path.abspath(ckpt))
+        if _UVDOC_STATE["key"] != key:
+            # UVDoc's utils.py does `from model import UVDocnet`, so its clone dir must lead the
+            # import path while we load it; restore sys.path right after (the modules stay cached
+            # in sys.modules). A name collision (some other top-level `utils`) surfaces as a
+            # missing attribute below -> the except returns None.
+            inserted = uvdoc_dir not in sys.path
+            if inserted:
+                sys.path.insert(0, uvdoc_dir)
+            try:
+                import utils as _uvdoc_utils
+            finally:
+                if inserted:
+                    try:
+                        sys.path.remove(uvdoc_dir)
+                    except ValueError:
+                        pass
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            # NOT utils.load_model: it calls torch.load without map_location and the shipped
+            # checkpoint stores CUDA-tagged tensors, so it RAISES on a CPU-only box (measured).
+            # Load the state dict onto the CPU, then move the net to the chosen device.
+            state = torch.load(ckpt, map_location="cpu")
+            model = _uvdoc_utils.UVDocnet(num_filter=32, kernel_size=5)
+            model.load_state_dict(state["model_state"])
+            model.to(device)
+            model.eval()
+            _UVDOC_STATE.update(key=key, utils=_uvdoc_utils, model=model, device=device)
+        u = _UVDOC_STATE["utils"]
+        model, device = _UVDOC_STATE["model"], _UVDOC_STATE["device"]
+        # The model expects a 3-channel image; replicate the gray channel (equivalent content).
+        rgb = _np.repeat(_np.clip(arr, 0.0, 1.0)[:, :, None], 3, axis=2)
+        inp = torch.from_numpy(
+            cv2.resize(rgb, tuple(u.IMG_SIZE)).transpose(2, 0, 1)
+        ).unsqueeze(0).to(device)
+        with torch.no_grad():
+            points2d, _ = model(inp)
+        size = arr.shape[::-1]  # (w, h)
+        unwarped = u.bilinear_unwarping(
+            warped_img=torch.from_numpy(rgb.transpose(2, 0, 1)).unsqueeze(0).to(device),
+            point_positions=torch.unsqueeze(points2d[0], dim=0),
+            img_size=tuple(size),
+        )
+        out = unwarped[0].detach().cpu().numpy()[0]  # channel 0 of the replicated gray
+        if out.shape != arr.shape:
+            return None
+        return _np.clip(out.astype(_np.float32), 0.0, 1.0)
+    except Exception:
+        return None
+
+
 def transcribe_with_detector(image, detector: NoteheadDetector,
                              key_fifths: int = 0,
-                             dump_clarity_pdf: Optional[str] = None) -> Optional[bytes]:
+                             dump_clarity_pdf: Optional[str] = None,
+                             try_uvdoc: bool = False) -> Optional[bytes]:
     """End-to-end transcription using the TRAINED detector for noteheads and geom_omr for staff
     geometry + the exact pitch decode. Mirrors geom_omr.transcribe_geometric but swaps the
     notehead source: the trained YOLO detector + _assign_to_staves replace the classical
@@ -202,10 +343,16 @@ def transcribe_with_detector(image, detector: NoteheadDetector,
     key_fifths: key signature passed to decode_pitch so accidentals come from the key (default 0
         = C major). A real deployment detects this from the engraved key signature; the synthetic
         eval can pass the known key to measure the decode ceiling.
-    dump_clarity_pdf: when set, ALSO write the raster this decode used (dewarped when the dewarp
-        was kept, flat-fielded always) as a one-page PDF at this path, so the worker can hand a
-        photo upload to the PDF-only Clarity engine (_write_clarity_pdf). None (the default, and
-        every PDF upload) changes nothing.
+    dump_clarity_pdf: when set, ALSO write the raster this decode used (UVDoc-rectified when that
+        candidate won, dewarped when the dewarp was kept, flat-fielded always) as a one-page PDF
+        at this path, so the worker can hand a photo upload to the PDF-only Clarity engine
+        (_write_clarity_pdf). None (the default, and every PDF upload) changes nothing.
+    try_uvdoc: when True (OMR_UVDOC, non-PDF uploads only), ALSO rectify the page with the
+        pretrained UVDoc unwarper and run the SAME staff decision on the rectified raster; the
+        rectified branch is adopted ONLY when its used-staff count strictly exceeds the
+        original's (never-worse guard; an unconditional swap was measured as a KILL because a
+        rectified page looks almost clean and bypasses every photo adaptation). False (the
+        default, and every PDF upload) never touches UVDoc: the path is byte-identical to before.
     """
     if not (DETECTOR_AVAILABLE and geom_omr.GEOM_AVAILABLE):
         return None
@@ -213,46 +360,29 @@ def transcribe_with_detector(image, detector: NoteheadDetector,
         gray = geom_omr._to_gray(image)
         if gray is None:
             return None
-        # DEWARP tilted / perspective-curved staff lines (real phone photos), the camera-OMR lever:
-        # detect_systems keys on near-full-width dark rows, which a tilted/curved photographed page
-        # smears across rows, so the staff is lost. Straightening the lines recovers detection and the
-        # geometry the pitch decode needs.
-        #
-        # NEVER-WORSE-ON-CLEAN GUARD: keep the dewarp ONLY when it strictly INCREASES the number of
-        # detected staves. A clean page's lines are already horizontal, so its staves are fully detected
-        # raw and dewarping cannot add any -> we fall back to the ORIGINAL raster and the clean path is
-        # byte-identical (detector + staves + barlines all on the untouched image). A warped page's
-        # staff count jumps, so the dewarp is kept and the detector, staff geometry, and barlines ALL
-        # run on the dewarped image (notehead centres and staff lines share one straightened space).
-        staves_raw = geom_omr.detect_systems(gray)
-        gray_dw = geom_omr.dewarp_staff_lines(gray)
-        use_dw = False
-        staves = staves_raw
-        # Whether the downstream geometry (these staves, plus barlines + ottavas in the decode tail) is
-        # flat-fielded. Default True = today's behavior; the CLEAN path never dewarps, so it keeps True
-        # and stays byte-identical. Only the KEPT-dewarp (warped photo) path below may flip it.
-        normalize_illum = True
-        if gray_dw is not gray:
-            staves_dw = geom_omr.detect_systems(gray_dw)
-            if len(staves_dw) > len(staves_raw):
-                use_dw, staves = True, staves_dw
-                # ADAPTIVE ILLUMINATION (warped-photo path only). The flat-field rescues a genuine deep
-                # broad shadow but HURTS a photo that is merely uneven (it over-corrects the gradient and
-                # amplifies noise in the dense row projection, splitting/merging staves). Keep it only
-                # when such a shadow is present, else drop it and re-detect the staves flat-field-free so
-                # they share the decode's illumination space. Measured: lifts liminality + tctab, holds
-                # reverie (its deep shadow keeps the flat-field). Clean never reaches here.
-                normalize_illum = geom_omr._illum_has_deep_shadow(gray_dw)
-                if not normalize_illum:
-                    staves_ni = geom_omr.detect_systems(gray_dw, normalize_illum=False)
-                    # Drop the flat-field only if doing so does not LOSE staves vs the flat-fielded
-                    # detection that justified keeping the dewarp (len(staves) == the staves_dw count
-                    # here). If illum-off finds fewer (or none), the flat-field was actually helping
-                    # detection, so keep it -- the final staves then stay > the raw count (never-worse).
-                    if len(staves_ni) >= len(staves):
-                        staves = staves_ni
-                    else:
-                        normalize_illum = True
+        staves, use_dw, gray_dw, normalize_illum = _staff_dewarp_decision(gray)
+
+        det_source = image
+        uvdoc_used = False
+        if try_uvdoc:
+            # GUARDED UVDoc candidate (OMR_UVDOC): rectify the page and run the FULL staff
+            # decision on the rectified raster too. Adopt it ONLY when it yields strictly MORE
+            # used staves than the original branch (measured: reverie photo 0.663 -> 0.822
+            # adopted, the other real photos reject it and stay byte-identical; both tctab
+            # single pages adopt with more staves). Any rectify failure, a tie/loss on staff
+            # count, or a failed RGB handoff keeps the original branch.
+            rect = _uvdoc_rectify(gray)
+            if rect is not None:
+                r_staves, r_use_dw, r_gray_dw, r_illum = _staff_dewarp_decision(rect)
+                if len(r_staves) > len(staves):
+                    # The detector must see the raster the decode geometry lives in, so the
+                    # rectified branch is adopted only with a successful in-memory RGB handoff.
+                    rect_rgb = geom_omr._gray_to_uint8_rgb(r_gray_dw if r_use_dw else rect)
+                    if rect_rgb is not None:
+                        gray, staves, use_dw, gray_dw, normalize_illum = (
+                            rect, r_staves, r_use_dw, r_gray_dw, r_illum)
+                        det_source = rect_rgb
+                        uvdoc_used = True
 
         # When the dewarp is kept, the detector MUST run on the dewarped raster so its notehead centres
         # share the dewarped staff/barline coordinate space. The dewarped image is handed over in-memory
@@ -260,19 +390,22 @@ def transcribe_with_detector(image, detector: NoteheadDetector,
         # raw staves, the original image, and the default flat-field) rather than mixing a raw-coordinate
         # detection with dewarped staves -- a mismatch would assign heads to the wrong staves. Size the
         # detector to the image it actually runs on (a tall multi-page stitch needs a larger imgsz).
-        det_source = image
-        if use_dw:
+        # (The adopted UVDoc branch already did its handoff above, so it is skipped here.)
+        if use_dw and not uvdoc_used:
             rgb = geom_omr._gray_to_uint8_rgb(gray_dw)
             if rgb is not None:
                 det_source = rgb  # feed the straightened raster to the detector (in-memory, no temp)
             else:
-                use_dw, staves, normalize_illum = False, staves_raw, True  # failed -> raw space
+                # failed -> raw space: the original raster's own staves (detect_systems is
+                # deterministic, so this equals the helper's staves_raw), today's fallback.
+                use_dw, staves, normalize_illum = False, geom_omr.detect_systems(gray), True
         if not staves:
             return None
         work = gray_dw if use_dw else gray
-        # Photo-to-PDF shim side output: the raster THIS decode runs on (dewarped when kept),
-        # flat-fielded and wrapped as a one-page PDF for Clarity. Best-effort: a dump failure
-        # leaves no file and the worker simply skips Clarity (geom-alone, today's behavior).
+        # Photo-to-PDF shim side output: the raster THIS decode runs on (UVDoc-rectified when that
+        # candidate won, dewarped when kept), flat-fielded and wrapped as a one-page PDF for
+        # Clarity. Best-effort: a dump failure leaves no file and the worker simply skips Clarity
+        # (geom-alone, today's behavior).
         if dump_clarity_pdf:
             _write_clarity_pdf(work, dump_clarity_pdf)
         centers = detector.detect(det_source, imgsz=_auto_imgsz(work.shape))
@@ -351,6 +484,12 @@ def main(argv=None) -> int:
                     help="ALSO write the decode's (dewarped, flat-fielded) raster as a one-page "
                          "PDF here, so the worker can hand a photo upload to the PDF-only Clarity "
                          "engine (the OMR_PHOTO_CLARITY shim). Best-effort side output.")
+    ap.add_argument("--try-uvdoc", action="store_true",
+                    help="ALSO rectify the page with the pretrained UVDoc unwarper (UVDOC_DIR + "
+                         "UVDOC_MODEL env) and decode the rectified raster INSTEAD when its staff "
+                         "decision finds strictly MORE used staves (the OMR_UVDOC guarded "
+                         "candidate; the worker passes this for photo uploads only). Any UVDoc "
+                         "failure silently keeps the original raster.")
     args = ap.parse_args(argv)
 
     if not DETECTOR_AVAILABLE:
@@ -362,7 +501,8 @@ def main(argv=None) -> int:
     else:
         kf = args.key_fifths if args.key_fifths is not None else 0
         xml = transcribe_with_detector(args.image, detector, key_fifths=kf,
-                                       dump_clarity_pdf=args.dump_clarity_pdf)
+                                       dump_clarity_pdf=args.dump_clarity_pdf,
+                                       try_uvdoc=args.try_uvdoc)
     if not xml:
         return 2
     with open(args.out, "wb") as f:

@@ -214,6 +214,28 @@ def photo_clarity_enabled():
     return raw.strip().lower() in ("1", "true")
 
 
+# UVDoc GUARDED RECTIFY (OMR_UVDOC, default OFF; non-PDF uploads only). geom ALSO rectifies the
+# photographed page with the pretrained UVDoc document unwarper (MIT, 32MB checkpoint; UVDOC_DIR +
+# UVDOC_MODEL env in the geom subprocess) and decodes the rectified raster INSTEAD only when the
+# full staff-decision pipeline finds strictly MORE used staves on it (geom_detector --try-uvdoc).
+# An unconditional swap was measured as a KILL (a rectified page looks almost clean, so every
+# photo adaptation downstream disengages: liminality photo 0.625 -> 0.086); the strictly-more-
+# staves guard makes it never-worse (measured through the integrated path: reverie photo
+# 0.663 -> 0.822 adopted, every other photo byte-identical; both tctab single pages adopt).
+# PDF uploads NEVER try it: a PDF raster is not a warped photo.
+UVDOC_ENV = "OMR_UVDOC"
+
+
+def uvdoc_enabled():
+    """True when OMR_UVDOC is truthy: on a NON-PDF upload, geom also tries the UVDoc-rectified
+    raster behind the strictly-more-staves guard. Only meaningful when geom_enabled() is also
+    True (it rides on the geom CLI). Mirrors photo_clarity_enabled."""
+    raw = os.environ.get(UVDOC_ENV)
+    if raw is None:
+        return False
+    return raw.strip().lower() in ("1", "true")
+
+
 # PROGRESSIVE publishing (progressive.py), gated by OMR_PROGRESSIVE (default OFF). When ON, process_job
 # writes the result key MULTIPLE times: in-progress writes are marked omr-status=partial so the browser
 # renders the first notes while the rest still computes, and the final write is the complete result.
@@ -767,14 +789,16 @@ def run_clarity_stream(pdf_path, workdir, on_system, timeout=None):
 
 
 def geom_command(python, script, image_path, weights, out_path, device="cpu", key_fifths=None,
-                 dump_clarity_pdf=None):
+                 dump_clarity_pdf=None, try_uvdoc=False):
     """Build the trained-geometric-engine argv. Pure so it is unit-testable without running the
     engine (mirrors clarity_command). Runs geom_detector.py's CLI on a RASTER image (a PDF is
     rasterized first, like oemer). key_fifths (when not None) pins the key signature for the decode
     via --key-fifths so geom reads non-C accidentals correctly instead of assuming C major; the
     fusion path supplies Clarity's detected key on non-C pieces. None keeps geom's C-major default.
     dump_clarity_pdf (when not None) asks geom to ALSO write its dewarped raster as a one-page PDF
-    there, the photo-to-PDF shim input for the PDF-only Clarity (OMR_PHOTO_CLARITY)."""
+    there, the photo-to-PDF shim input for the PDF-only Clarity (OMR_PHOTO_CLARITY). try_uvdoc
+    (when truthy) adds --try-uvdoc, the guarded UVDoc rectified-raster candidate (OMR_UVDOC,
+    photo uploads only); the default keeps the argv byte-identical to before."""
     cmd = [
         python,
         script,
@@ -790,10 +814,13 @@ def geom_command(python, script, image_path, weights, out_path, device="cpu", ke
         cmd += ["--key-fifths", str(int(key_fifths))]
     if dump_clarity_pdf is not None:
         cmd += ["--dump-clarity-pdf", dump_clarity_pdf]
+    if try_uvdoc:
+        cmd += ["--try-uvdoc"]
     return cmd
 
 
-def run_geom(image_path, workdir, timeout=None, key_fifths=None, dump_clarity_pdf=None):
+def run_geom(image_path, workdir, timeout=None, key_fifths=None, dump_clarity_pdf=None,
+             try_uvdoc=False):
     """Run our trained geometric engine as a subprocess in its OWN torch venv. Returns the output
     .musicxml path or None on ANY failure (env unset/missing, subprocess error, timeout, or exit 2
     = nothing recognized) so the caller falls back to the existing engines. Never raises into
@@ -802,7 +829,8 @@ def run_geom(image_path, workdir, timeout=None, key_fifths=None, dump_clarity_pd
     assuming C major (the fusion path passes Clarity's detected key on non-C pieces).
     dump_clarity_pdf (when not None) is forwarded to --dump-clarity-pdf: geom also writes its
     dewarped raster as a one-page PDF there for the photo-to-PDF Clarity shim; best-effort (the
-    caller checks the file exists before using it)."""
+    caller checks the file exists before using it). try_uvdoc (when truthy) is forwarded to
+    --try-uvdoc, the guarded UVDoc rectified-raster candidate (OMR_UVDOC; photo uploads only)."""
     python = os.environ.get(GEOM_PYTHON_ENV)
     weights = os.environ.get(GEOM_WEIGHTS_ENV)
     if not python or not weights:
@@ -815,7 +843,7 @@ def run_geom(image_path, workdir, timeout=None, key_fifths=None, dump_clarity_pd
     try:
         subprocess.run(
             geom_command(python, script, image_path, weights, out_path, key_fifths=key_fifths,
-                         dump_clarity_pdf=dump_clarity_pdf),
+                         dump_clarity_pdf=dump_clarity_pdf, try_uvdoc=try_uvdoc),
             check=True,
             cwd=workdir,
             timeout=timeout,
@@ -1773,7 +1801,10 @@ def process_job(client, bucket, job_id):
             None on decline/failure. Shared by the primary and fallback positions below. key_fifths
             (when set) is forwarded to geom's decode so the fusion can re-key it under Clarity's
             detected key on a non-C piece. dump_clarity_pdf (when set, photo path only) asks geom
-            to also write its dewarped raster as a one-page PDF for the Clarity shim."""
+            to also write its dewarped raster as a one-page PDF for the Clarity shim. try_uvdoc
+            is decided HERE (OMR_UVDOC and a non-PDF upload), not per call site, so every geom run
+            for this job (fusion, primary, fallback, AND the rekey rerun) makes the same guarded
+            UVDoc raster decision; PDF uploads structurally never try it."""
             try:
                 geom_image = (
                     rasterize_if_pdf(input_path, workdir)[0] if is_pdf_input else geom_input_png
@@ -1784,7 +1815,8 @@ def process_job(client, bucket, job_id):
             if geom_image is None:
                 return None
             gp = run_geom(geom_image, workdir, key_fifths=key_fifths,
-                          dump_clarity_pdf=dump_clarity_pdf)
+                          dump_clarity_pdf=dump_clarity_pdf,
+                          try_uvdoc=uvdoc_enabled() and not is_pdf_input)
             if not gp:
                 return None
             with open(gp, "rb") as fh:
