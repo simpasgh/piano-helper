@@ -1306,6 +1306,392 @@ def test_uvdoc_rekey_rerun_also_tries_uvdoc(tmp_path, monkeypatch):
     assert all(k.get("try_uvdoc") is True for k in calls), calls
 
 
+# --- L4 Zeus seq2seq referee (OMR_SEQ2SEQ): third engine on clean PDFs ---------------------
+
+import os  # noqa: E402
+
+
+def test_seq2seq_enabled_truthy_parsing(monkeypatch):
+    monkeypatch.delenv("OMR_SEQ2SEQ", raising=False)
+    assert worker.seq2seq_enabled() is False
+    for on in ("1", "true", "TRUE", " True "):
+        monkeypatch.setenv("OMR_SEQ2SEQ", on)
+        assert worker.seq2seq_enabled() is True, on
+    for off in ("0", "false", "", "garbage"):
+        monkeypatch.setenv("OMR_SEQ2SEQ", off)
+        assert worker.seq2seq_enabled() is False, off
+
+
+def test_zeus_command_shape():
+    # The EXACT invocation the cx33 serving spike validated: relative zeus.py (cwd is the repo's
+    # zeus/ subdir), --load = model DIR, --test = pickle path WITHOUT .pickle, --exp = out dir.
+    cmd = worker.zeus_command("/venv/bin/python", "/opt/zeus/model", "/work/zeus/crops",
+                              "/work/zeus-out")
+    assert cmd == ["/venv/bin/python", "zeus.py", "--load", "/opt/zeus/model",
+                   "--test", "/work/zeus/crops", "--exp", "/work/zeus-out"]
+
+
+def test_zeus_crops_command_shape():
+    cmd = worker.zeus_crops_command("/geom/python", "/w/zeus_crops.py", "/job/stitched.png",
+                                    "/job/zeus/crops.pickle")
+    assert cmd == ["/geom/python", "/w/zeus_crops.py", "/job/stitched.png", "-o",
+                   "/job/zeus/crops.pickle"]
+
+
+def test_run_zeus_returns_none_when_env_unset(tmp_path, monkeypatch):
+    for var in ("ZEUS_PYTHON", "ZEUS_OMR_DIR", "ZEUS_MODEL"):
+        monkeypatch.delenv(var, raising=False)
+
+    def must_not_spawn(*a, **k):
+        raise AssertionError("no subprocess may run without the zeus env")
+
+    monkeypatch.setattr(worker.subprocess, "run", must_not_spawn)
+    assert worker.run_zeus(str(tmp_path / "crops.pickle"), str(tmp_path)) is None
+    # Partially set env declines the same way.
+    monkeypatch.setenv("ZEUS_PYTHON", sys.executable)
+    assert worker.run_zeus(str(tmp_path / "crops.pickle"), str(tmp_path)) is None
+
+
+def test_run_zeus_returns_none_when_env_set_but_missing_on_disk(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZEUS_PYTHON", str(tmp_path / "missing-python"))
+    monkeypatch.setenv("ZEUS_OMR_DIR", str(tmp_path / "missing-repo"))
+    monkeypatch.setenv("ZEUS_MODEL", str(tmp_path / "missing-model"))
+
+    def must_not_spawn(*a, **k):
+        raise AssertionError("no subprocess may run when the zeus env points nowhere")
+
+    monkeypatch.setattr(worker.subprocess, "run", must_not_spawn)
+    assert worker.run_zeus(str(tmp_path / "crops.pickle"), str(tmp_path)) is None
+
+
+def _zeus_env(tmp_path, monkeypatch):
+    """A fake on-disk zeus install (python + repo with zeus/zeus.py + model dir) wired into the
+    env, so run_zeus passes its locator guards."""
+    repo = tmp_path / "olimpic"
+    (repo / "zeus").mkdir(parents=True)
+    (repo / "zeus" / "zeus.py").write_text("# stub")
+    model = tmp_path / "model"
+    model.mkdir()
+    monkeypatch.setenv("ZEUS_PYTHON", sys.executable)
+    monkeypatch.setenv("ZEUS_OMR_DIR", str(repo))
+    monkeypatch.setenv("ZEUS_MODEL", str(model))
+    return repo, model
+
+
+def test_run_zeus_invokes_stock_cli_and_reads_predicted_lmx(tmp_path, monkeypatch):
+    repo, model = _zeus_env(tmp_path, monkeypatch)
+    workdir = tmp_path / "job"
+    workdir.mkdir()
+    pickle_path = workdir / "zeus" / "crops.pickle"
+    pickle_path.parent.mkdir()
+    pickle_path.write_bytes(b"pkl")
+    seen = {}
+
+    def fake_run(cmd, check, cwd, timeout):
+        seen["cmd"], seen["cwd"], seen["timeout"] = cmd, cwd, timeout
+        out_dir = cmd[cmd.index("--exp") + 1]
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, "crops.predicted.lmx"), "w") as fh:
+            fh.write("measure note C4\nmeasure note D4\n\n")
+
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+    lines = worker.run_zeus(str(pickle_path), str(workdir), timeout=300)
+    assert lines == ["measure note C4", "measure note D4"]  # blank line dropped, order kept
+    test_arg = seen["cmd"][seen["cmd"].index("--test") + 1]
+    assert not test_arg.endswith(".pickle")  # the stock CLI appends .pickle itself
+    assert seen["cmd"] == worker.zeus_command(
+        sys.executable, str(model), test_arg, seen["cmd"][seen["cmd"].index("--exp") + 1])
+    assert seen["cwd"] == os.path.join(str(repo), "zeus")
+    assert seen["timeout"] == 300
+
+
+def test_run_zeus_returns_none_when_no_result_file(tmp_path, monkeypatch):
+    _zeus_env(tmp_path, monkeypatch)
+    pickle_path = tmp_path / "crops.pickle"
+    pickle_path.write_bytes(b"pkl")
+    monkeypatch.setattr(worker.subprocess, "run", lambda *a, **k: None)  # exits 0, writes nothing
+    assert worker.run_zeus(str(pickle_path), str(tmp_path)) is None
+
+
+def test_run_zeus_crops_returns_none_when_geom_python_unset(tmp_path, monkeypatch):
+    monkeypatch.delenv("GEOM_PYTHON", raising=False)
+
+    def must_not_spawn(*a, **k):
+        raise AssertionError("no subprocess may run without GEOM_PYTHON")
+
+    monkeypatch.setattr(worker.subprocess, "run", must_not_spawn)
+    assert worker.run_zeus_crops("/img.png", str(tmp_path)) is None
+
+
+def test_run_zeus_crops_runs_script_and_returns_pickle(tmp_path, monkeypatch):
+    monkeypatch.setenv("GEOM_PYTHON", sys.executable)
+    seen = {}
+
+    def fake_run(cmd, check, cwd, timeout):
+        seen["cmd"] = cmd
+        with open(cmd[cmd.index("-o") + 1], "wb") as fh:
+            fh.write(b"pickle-bytes")
+
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+    out = worker.run_zeus_crops("/img/stitched.png", str(tmp_path))
+    assert out == os.path.join(str(tmp_path), "zeus", "crops.pickle")
+    assert seen["cmd"][0] == sys.executable
+    assert seen["cmd"][1].endswith("zeus_crops.py")
+    assert seen["cmd"][2] == "/img/stitched.png"
+
+
+def test_run_zeus_crops_decline_exit_returns_none(tmp_path, monkeypatch):
+    # zeus_crops exits 2 on "no systems" (a clean decline) -> CalledProcessError -> None.
+    monkeypatch.setenv("GEOM_PYTHON", sys.executable)
+
+    def fake_run(cmd, check, cwd, timeout):
+        raise worker.subprocess.CalledProcessError(2, cmd)
+
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+    assert worker.run_zeus_crops("/img.png", str(tmp_path)) is None
+
+
+def test_seq2seq_referee_stage_failures_keep_the_fused_body(tmp_path, monkeypatch):
+    raster = tmp_path / "stitched.png"
+    raster.write_bytes(b"png")
+    fused = b"<score>fused</score>"
+
+    # Missing geom / clarity / raster: decline before any stage runs.
+    monkeypatch.setattr(worker, "run_zeus_crops",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not run")))
+    assert worker._seq2seq_referee("j", str(tmp_path), fused, None, b"<c/>", str(raster)) is fused
+    assert worker._seq2seq_referee("j", str(tmp_path), fused, b"<g/>", None, str(raster)) is fused
+    assert worker._seq2seq_referee("j", str(tmp_path), fused, b"<g/>", b"<c/>", None) is fused
+    assert worker._seq2seq_referee(
+        "j", str(tmp_path), fused, b"<g/>", b"<c/>", str(tmp_path / "gone.png")) is fused
+
+    # Stage A declines -> fused; Stage B must never run.
+    monkeypatch.setattr(worker, "run_zeus_crops", lambda *a, **k: None)
+    monkeypatch.setattr(worker, "run_zeus",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not run")))
+    assert worker._seq2seq_referee("j", str(tmp_path), fused, b"<g/>", b"<c/>", str(raster)) is fused
+
+    # Stage B declines -> fused; assemble must never run.
+    monkeypatch.setattr(worker, "run_zeus_crops", lambda *a, **k: str(tmp_path / "c.pickle"))
+    monkeypatch.setattr(worker, "run_zeus", lambda *a, **k: None)
+    monkeypatch.setattr(worker.seq2seq, "assemble",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not run")))
+    assert worker._seq2seq_referee("j", str(tmp_path), fused, b"<g/>", b"<c/>", str(raster)) is fused
+
+    # Stage C (assemble) declines -> fused.
+    monkeypatch.setattr(worker, "run_zeus", lambda *a, **k: ["measure"])
+    monkeypatch.setattr(worker.seq2seq, "assemble", lambda *a, **k: None)
+    assert worker._seq2seq_referee("j", str(tmp_path), fused, b"<g/>", b"<c/>", str(raster)) is fused
+
+    # A raising pick -> fused (the outer try/except floor).
+    monkeypatch.setattr(worker.seq2seq, "assemble", lambda *a, **k: b"<zeus/>")
+    monkeypatch.setattr(worker.seq2seq, "pick",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert worker._seq2seq_referee("j", str(tmp_path), fused, b"<g/>", b"<c/>", str(raster)) is fused
+
+
+def test_seq2seq_off_pdf_fusion_never_runs_zeus(tmp_path, monkeypatch):
+    # Flag OFF (unset): the fusion result is the body and the zeus stages are never invoked --
+    # byte-identity with today is structural (the referee call is inside the flag check).
+    monkeypatch.delenv("OMR_SEQ2SEQ", raising=False)
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    geom_out = tmp_path / "geom.musicxml"; geom_out.write_text("<score>geom</score>")
+    clar_out = tmp_path / "clarity.musicxml"; clar_out.write_text("<score>clarity</score>")
+    monkeypatch.setattr(worker, "rasterize_if_pdf", lambda p, w: ("/fake/stitched.png", True))
+    monkeypatch.setattr(worker, "run_geom", lambda *a, **k: str(geom_out))
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clar_out))
+    monkeypatch.setattr(worker.fusion, "fuse", lambda g, c: b"<score>fused</score>")
+
+    def must_not_run(*a, **k):
+        raise AssertionError("the seq2seq referee must not run with the flag off")
+
+    monkeypatch.setattr(worker, "_seq2seq_referee", must_not_run)
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"%PDF-1.4 fake")
+    _drive_process_job(monkeypatch, client, is_pdf=True)
+    assert client.put_body == b"<score>fused</score>"
+
+
+def test_seq2seq_on_pdf_runs_stages_and_applies_the_pick(tmp_path, monkeypatch):
+    # Flag ON + PDF + fusion succeeded: crops run on the SAME raster geom decoded, zeus runs on
+    # the crops pickle, assemble gets (lines, geom bytes, ZEUS_OMR_DIR), pick gets (fused, zeus,
+    # clarity), and the picked body is what lands in the complete write.
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    monkeypatch.setenv("OMR_SEQ2SEQ", "1")
+    monkeypatch.setenv("ZEUS_OMR_DIR", "/opt/zeus/olimpic-icdar24")
+    raster = tmp_path / "stitched.png"; raster.write_bytes(b"png")
+    geom_out = tmp_path / "geom.musicxml"; geom_out.write_text("<score>geom</score>")
+    clar_out = tmp_path / "clarity.musicxml"; clar_out.write_text("<score>clarity</score>")
+    monkeypatch.setattr(worker, "rasterize_if_pdf", lambda p, w: (str(raster), True))
+    monkeypatch.setattr(worker, "run_geom", lambda *a, **k: str(geom_out))
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clar_out))
+    monkeypatch.setattr(worker.fusion, "fuse", lambda g, c: b"<score>fused</score>")
+    seen = {}
+
+    def fake_crops(image_path, workdir, timeout=None):
+        seen["crops_raster"] = image_path
+        return str(tmp_path / "crops.pickle")
+
+    def fake_zeus(pickle_path, workdir, timeout=None):
+        seen["zeus_pickle"] = pickle_path
+        return ["measure 1", "measure 2"]
+
+    def fake_assemble(lines, geom_xml, zeus_dir):
+        seen["assemble"] = (lines, geom_xml, zeus_dir)
+        return b"<score>zeus</score>"
+
+    def fake_pick(fused, zeus_final, clarity):
+        seen["pick"] = (fused, zeus_final, clarity)
+        return zeus_final
+
+    monkeypatch.setattr(worker, "run_zeus_crops", fake_crops)
+    monkeypatch.setattr(worker, "run_zeus", fake_zeus)
+    monkeypatch.setattr(worker.seq2seq, "assemble", fake_assemble)
+    monkeypatch.setattr(worker.seq2seq, "pick", fake_pick)
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"%PDF-1.4 fake")
+    _drive_process_job(monkeypatch, client, is_pdf=True)
+    assert client.put_body == b"<score>zeus</score>"            # the pick decided the body
+    assert seen["crops_raster"] == str(raster)                   # crops on geom's own raster
+    assert seen["zeus_pickle"] == str(tmp_path / "crops.pickle")
+    lines, geom_xml, zeus_dir = seen["assemble"]
+    assert lines == ["measure 1", "measure 2"]
+    assert geom_xml == b"<score>geom</score>"
+    assert zeus_dir == "/opt/zeus/olimpic-icdar24"
+    fused, zeus_final, clarity = seen["pick"]
+    assert fused == b"<score>fused</score>"
+    assert zeus_final == b"<score>zeus</score>"
+    assert clarity == b"<score>clarity</score>"
+
+
+def test_seq2seq_pick_keeps_fusion_when_referee_says_so(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    monkeypatch.setenv("OMR_SEQ2SEQ", "1")
+    raster = tmp_path / "stitched.png"; raster.write_bytes(b"png")
+    geom_out = tmp_path / "geom.musicxml"; geom_out.write_text("<score>geom</score>")
+    clar_out = tmp_path / "clarity.musicxml"; clar_out.write_text("<score>clarity</score>")
+    monkeypatch.setattr(worker, "rasterize_if_pdf", lambda p, w: (str(raster), True))
+    monkeypatch.setattr(worker, "run_geom", lambda *a, **k: str(geom_out))
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clar_out))
+    monkeypatch.setattr(worker.fusion, "fuse", lambda g, c: b"<score>fused</score>")
+    monkeypatch.setattr(worker, "run_zeus_crops", lambda *a, **k: str(tmp_path / "c.pickle"))
+    monkeypatch.setattr(worker, "run_zeus", lambda *a, **k: ["measure"])
+    monkeypatch.setattr(worker.seq2seq, "assemble", lambda *a, **k: b"<score>zeus</score>")
+    monkeypatch.setattr(worker.seq2seq, "pick", lambda fused, z, c: fused)  # referee: fusion
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"%PDF-1.4 fake")
+    _drive_process_job(monkeypatch, client, is_pdf=True)
+    assert client.put_body == b"<score>fused</score>"
+
+
+def test_seq2seq_photo_upload_never_runs_zeus(tmp_path, monkeypatch):
+    # Photos are camera-OOD for zeus (measured NO-GO): even with the flag on AND the photo
+    # shim providing Clarity bytes, a non-PDF upload must never reach the zeus stages.
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    monkeypatch.setenv("OMR_PHOTO_CLARITY", "1")
+    monkeypatch.setenv("OMR_SEQ2SEQ", "1")
+    geom_out = tmp_path / "geom.musicxml"; geom_out.write_text("<score>geom</score>")
+    clar_out = tmp_path / "clarity.musicxml"; clar_out.write_text("<score>clarity</score>")
+
+    def fake_run_geom(image, workdir, **k):
+        dump = k.get("dump_clarity_pdf")
+        if dump:
+            with open(dump, "wb") as fh:
+                fh.write(b"%PDF-1.4 shim")
+        return str(geom_out)
+
+    monkeypatch.setattr(worker, "run_geom", fake_run_geom)
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clar_out))
+    monkeypatch.setattr(worker.fusion, "fuse", lambda g, c: b"<score>fused</score>")
+
+    def must_not_run(*a, **k):
+        raise AssertionError("zeus must never run on a photo upload")
+
+    monkeypatch.setattr(worker, "_seq2seq_referee", must_not_run)
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"\x89PNG fake")
+    _drive_process_job(monkeypatch, client, is_pdf=False)
+    assert client.put_body == b"<score>fused</score>"
+
+
+def test_fusion_block_stream_fills_the_seq2seq_sink(tmp_path, monkeypatch):
+    # The sink exposes the final fuse's inputs (re-keyed geom + whole-file Clarity) so the
+    # referee compares the same engines the complete body was fused from. Partials + the
+    # returned body are unchanged by the sink.
+    geom_whole = _grand_staff_geom(["C", "D"], steps_bass=["E", "F"])
+    clarity_whole = _clarity_doc(["C", "D"], [4, 8])
+    monkeypatch.setattr(worker, "run_clarity_stream",
+                        lambda p, w, cb, timeout=None: clarity_whole)
+    sink = {}
+    final = worker._fusion_block_stream("job", "in.pdf", str(tmp_path), lambda **k: geom_whole,
+                                        lambda b, **k: None, sink=sink)
+    assert final == worker.fusion.fuse(geom_whole, clarity_whole)
+    assert sink["geom"] == geom_whole
+    assert sink["clarity"] == clarity_whole
+
+
+def test_seq2seq_applies_to_block_stream_complete_only(tmp_path, monkeypatch):
+    # Block-stream progressive + the flag: every PARTIAL stays pure fusion (published before the
+    # referee), and the referee runs ONCE on the complete body with the sink's geom/clarity and
+    # the captured raster.
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    monkeypatch.setenv("OMR_PROGRESSIVE", "1")
+    monkeypatch.setenv("OMR_PROGRESSIVE_BLOCKS", "1")
+    monkeypatch.setenv("OMR_SEQ2SEQ", "1")
+    raster = tmp_path / "stitched.png"; raster.write_bytes(b"png")
+    geom_out = tmp_path / "geom.musicxml"; geom_out.write_bytes(_pg_xml(["C"]))
+    monkeypatch.setattr(worker, "rasterize_if_pdf", lambda p, w: (str(raster), True))
+    monkeypatch.setattr(worker, "run_geom", lambda *a, **k: str(geom_out))
+
+    def fake_block_stream(job_id, input_path, workdir, geom_body, publish_partial, sink=None):
+        geom_bytes = geom_body()  # the real path runs geom here, which captures the raster
+        publish_partial(_pg_xml(["C"]), systems_total=2, systems_done=1)
+        if sink is not None:
+            sink["geom"], sink["clarity"] = geom_bytes, b"<score>clarity</score>"
+        return b"<score>fused-final</score>"
+
+    monkeypatch.setattr(worker, "_fusion_block_stream", fake_block_stream)
+    seen = {}
+
+    def fake_referee(job_id, workdir, fused_body, geom_bytes, clarity_bytes, raster_path):
+        seen["args"] = (fused_body, geom_bytes, clarity_bytes, raster_path)
+        return b"<score>zeus-picked</score>"
+
+    monkeypatch.setattr(worker, "_seq2seq_referee", fake_referee)
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"%PDF-1.4 fake")
+    _drive_process_job(monkeypatch, client, is_pdf=True)
+    statuses = [p["metadata"]["omr-status"] for p in client.puts]
+    assert statuses == ["partial", "complete"]
+    assert b"zeus-picked" not in client.puts[0]["body"]          # the partial stayed fusion
+    assert client.puts[1]["body"] == b"<score>zeus-picked</score>"  # the complete was refereed
+    fused_body, geom_bytes, clarity_bytes, raster_path = seen["args"]
+    assert fused_body == b"<score>fused-final</score>"
+    assert geom_bytes == _pg_xml(["C"])
+    assert clarity_bytes == b"<score>clarity</score>"
+    assert raster_path == str(raster)                            # captured by _geom_body
+
+
 def test_geom_fusion_takes_precedence_over_primary(tmp_path, monkeypatch):
     # With both OMR_GEOM_FUSION and OMR_GEOM_PRIMARY set, fusion runs and geom-primary does not
     # re-run geom or override the fused result (geom runs exactly once, for the fusion).
@@ -2428,7 +2814,7 @@ def test_progressive_blocks_wired_into_process_job(tmp_path, monkeypatch):
     monkeypatch.setenv("OMR_PROGRESSIVE", "1")
     monkeypatch.setenv("OMR_PROGRESSIVE_BLOCKS", "1")
 
-    def fake_block_stream(job_id, input_path, workdir, geom_body, publish_partial):
+    def fake_block_stream(job_id, input_path, workdir, geom_body, publish_partial, sink=None):
         # Each partial holds ONLY the finished systems + carries the frontier (total, done).
         publish_partial(_pg_xml(["C"]), systems_total=3, systems_done=1)        # system 1 partial
         publish_partial(_pg_xml(["C", "D"]), systems_total=3, systems_done=2)   # system 2 partial

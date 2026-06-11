@@ -15,7 +15,7 @@ export type FlagState = Record<FlagKey, boolean>;
 export interface FlagMeta {
   key: FlagKey;
   label: string;
-  // 1-based rank within the whole list, primitive (1) -> advanced (10); drives display order.
+  // 1-based rank within the whole list, primitive (1) -> advanced (11); drives display order.
   tier: number;
   section: FlagSection;
   // Direct prerequisites: this flag is meaningless unless these are also on.
@@ -111,9 +111,20 @@ export const FLAG_METADATA: readonly FlagMeta[] = [
     algorithm: "Pretrained UVDoc document unwarper pre-rectifies the photo; the full staff/dewarp decision runs on BOTH rasters and the rectified one wins only with strictly more used staves. Needs the geom engine.",
   },
   {
+    key: "OMR_SEQ2SEQ",
+    label: "Zeus seq2seq referee (third engine)",
+    tier: 8,
+    section: "engine",
+    requires: ["OMR_GEOM", "OMR_GEOM_FUSION"],
+    summary: "Clean PDFs only: also read the score with the Zeus seq2seq model and keep it when it agrees better with Clarity than the fusion does.",
+    accuracy: "Big on dense clean scores where the fusion collapses: picked mean 0.702 vs always-fusion 0.507 on the 30-piece study (canon 0.999, k545 0.975, serenade 0.935), zero never-worse violations measured. The referee keeps the fusion unless Zeus's per-measure agreement with Clarity is strictly higher. Photos never use it (measured no-go).",
+    latency: "+~25-30s per PDF job: one batched TensorFlow inference over all systems (~24s fixed startup + ~1.5s per system). Any failure just keeps the fusion.",
+    algorithm: "Geom's staff detection crops each grand-staff system; the zeus-olimpic CRNN reads them to LMX; a gated octave borrow from geom repairs missing-8va regions; per-measure pitch-class agreement vs Clarity referees Zeus against the fusion. Needs geom + fusion.",
+  },
+  {
     key: "OMR_PROGRESSIVE",
     label: "Progressive: fast-then-refine",
-    tier: 8,
+    tier: 9,
     section: "delivery",
     requires: [],
     recommended: true,
@@ -125,7 +136,7 @@ export const FLAG_METADATA: readonly FlagMeta[] = [
   {
     key: "OMR_PROGRESSIVE_PAGES",
     label: "Progressive: per-page streaming",
-    tier: 9,
+    tier: 10,
     section: "delivery",
     requires: ["OMR_PROGRESSIVE"],
     summary: "Stream a multi-page PDF page by page (measure 1 shows while measure 20 is still computing).",
@@ -136,7 +147,7 @@ export const FLAG_METADATA: readonly FlagMeta[] = [
   {
     key: "OMR_PROGRESSIVE_BLOCKS",
     label: "Progressive: block-by-block (per system)",
-    tier: 10,
+    tier: 11,
     section: "delivery",
     requires: ["OMR_PROGRESSIVE", "OMR_GEOM_FUSION"],
     summary: "Stream REAL rhythm one staff system at a time, with no pitch-only placeholder.",

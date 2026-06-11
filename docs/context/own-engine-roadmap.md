@@ -4,6 +4,75 @@ Self-contained plan so any session (esp. the one on the GPU PC) can pick up and 
 without the prior machine's local memory. Newest status at the top. NO em dashes in generated
 text (project rule). Ship every code change through the gated flow (see "Constraints" below).
 
+## STATUS: L4 ZEUS INTEGRATION BUILT (OMR_SEQ2SEQ, default OFF, clean PDFs only) -- integrated gate 7/7 picks MATCH the study, fusion floor structural (2026-06-11)
+
+Built the third engine path on branch feat/omr-seq2seq: after the whole-file geom+Clarity
+fusion completes on a PDF, the worker also reads the piece with zeus-olimpic and the validated
+selector-v2 referee picks. ANY failure at ANY stage keeps the fused bytes unchanged.
+
+ARCHITECTURE (three subprocess-mirrored stages, ONE batched zeus invocation per piece because
+of the measured ~24s fixed TF startup):
+  A. omr-worker/zeus_crops.py (GEOM_PYTHON venv): detect_systems + _pair_staves on the SAME
+     stitched 350-DPI raster geom decoded; each grand-staff pair cropped with the olimpic
+     margin (pair staffline bbox + 0.5 x system height on all four sides, clamped; copied from
+     x4/make_crops_real.py) into ONE pickle of {"path","image","lmx":"measure","musicxml":""}
+     entries (copied from x4/make_pickles_real.py). Exit 2 = no systems = clean decline.
+  B. worker.run_zeus: the STOCK zeus CLI exactly as the cx33 spike validated
+     (cwd=<ZEUS_OMR_DIR>/zeus; argv [ZEUS_PYTHON, zeus.py, --load ZEUS_MODEL, --test
+     <pickle-path-without-.pickle>, --exp <outdir>]; result <outdir>/crops.predicted.lmx, one
+     LMX line per system). Env locators ZEUS_PYTHON / ZEUS_OMR_DIR / ZEUS_MODEL, all three
+     present + on disk or the stage declines. Timeouts: crops 120s, zeus 300s.
+  C. omr-worker/seq2seq.py (worker venv, pure): delinearize ONCE (lines joined with spaces;
+     GUARDED in-function import of app.linearization + app.symbolic from ZEUS_OMR_DIR,
+     stdlib-only, runs on py3.11); the GATED OCTAVE BORROW ported faithfully from
+     l4v2_octave_borrow.correct_octaves_gated (constants max_disagree=0.08, min_run=4; NW
+     pitch-class chord match zeus-vs-geom via fusion's _nw/_pc; rewrite only midi delta exactly
+     +-12, only inside maximal same-sign runs >= 4, mixed chords never); the referee ported
+     from l4v2_agree_referee (az_pc/af_pc = mean per-measure F1 of pitch-class multisets vs
+     Clarity, staves pooled, missing measure scores 0); pick = zeus iff az_pc > af_pc STRICTLY,
+     anything else (missing Clarity, no signal, exception) = fused.
+
+WIRING + the block-stream scoping decision: ONE wiring point at the end of the fusion branch
+(worker.py, `source == "fusion" and is_pdf_input and seq2seq_enabled()`), running on the
+COMPLETE body only. The whole-file arm exposes its fuse inputs directly; _fusion_block_stream
+gained an optional `sink` that exposes the final fuse's (re-keyed geom, whole-file Clarity), so
+PROD (PROGRESSIVE_BLOCKS=1) GETS THE REFEREE on the complete write while every streamed partial
+stays pure fusion. The per-page path (OMR_PROGRESSIVE_PAGES, off in prod) has no whole-file
+Clarity, so it structurally keeps the fusion (documented limitation, not a failure mode).
+Photos NEVER run zeus (camera-OOD, measured NO-GO): is_pdf_input gates the wiring point, locked
+by test. rhythm_repair is applied by the EXISTING complete-write post chain to whichever body
+wins (no double repair; assemble returns the un-repaired corrected zeus).
+
+INTEGRATED GATE (local, l4int_gate.py in C:/Users/pascu/omr-train, NOT committed): the REAL
+stages end-to-end (real zeus venv x4/venv_zeus + zeus-olimpic model; pdfium raster at the prod
+350 DPI + worker.stitch_pages_vertical since this box has no poppler; cached x2_out geom and
+Clarity = the same engine outputs the study used; worker post chain; scored vs truth). 7/7
+picks MATCH the study, fusion-side f1 byte-matches it on all 7:
+  canon    fus 0.5423 zeus 1.0000 (study 0.9994) az 0.814 af 0.736 -> ZEUS   MATCH
+  k545     fus 0.0747 zeus 0.9719 (study 0.9753) az 0.722 af 0.242 -> ZEUS   MATCH
+  serenade fus 0.1333 zeus 0.9348 (study 0.9353) az 0.697 af 0.225 -> ZEUS   MATCH
+  icarus   fus 0.9898 zeus 0.9547 (study 0.9547) az 0.836 af 0.878 -> FUSION MATCH
+  tctab    fus 0.9916 zeus 0.9841 (study 0.9820) az 0.877 af 0.885 -> FUSION MATCH
+  reverie  fus 0.8811 zeus 0.7480 (study 0.8373) az 0.853 af 0.863 -> FUSION MATCH
+  furelise fus 0.4186 zeus 0.2504 (study 0.2601) az 0.502 af 0.725 -> FUSION MATCH
+Regenerated-zeus deviation, measured cause: the integrated crops come from the 350-DPI STITCHED
+raster (prod shape) instead of the study's 300-DPI per-page pdfium crops, so the zeus arm moves
+slightly (within 0.005 on every PICKED side); the largest mover is reverie's UNPICKED zeus arm
+(0.837 -> 0.748), which the referee routes to fusion either way (af > az holds). Flag-off
+byte-identity is structural (the referee call sits inside the seq2seq_enabled() check; test
+locks the referee is never invoked with the flag off).
+
+FLAGS: OMR_SEQ2SEQ in flag_config.py + flags-server.ts (same position, exact-order parity test)
++ admin-flags.ts metadata (engine tier 8, requires OMR_GEOM + OMR_GEOM_FUSION, honest copy:
+clean PDFs only, +~25-30s/job, picked-mean evidence; delivery tiers renumbered 9-11).
+
+BOX DEPLOY (cx33; /opt/zeus already deployed and spike-verified): (1) deploy the omr-worker
+code; (2) add to /etc/piano-helper-omr.env: ZEUS_PYTHON=/opt/zeus/venv/bin/python
+ZEUS_OMR_DIR=/opt/zeus/olimpic-icdar24 ZEUS_MODEL=/opt/zeus/models/zeus-olimpic-1.0-2024-02-12.model
+(3) RESTART the service (worker.py + seq2seq.py are in-process changes AND the env file changed);
+(4) verify a clean-PDF job logs "seq2seq referee picked ..." with OMR_SEQ2SEQ=1 via /admin;
+(5) re-run the real-4 + a dense CC0 piece on the box before leaving the flag on.
+
 ## STATUS: L4 SELECTOR V2 -- THE REFEREE GATE PASSES (89.7% accuracy, ZERO violations, picked mean 0.702 vs fusion 0.507); the Zeus integration is UNBLOCKED (2026-06-11)
 
 The selector-v2 study (scripts omr-train/l4v2_*.py, tables l4v2_stage1.tsv / l4v2_stage2.tsv,
@@ -14,8 +83,12 @@ geom's; rewrite a zeus note's octave to geom's when the pitch class matches and 
 EXACTLY +-12, but ONLY inside maximal same-sign runs of >= 4 consecutive shifted chords AND only
 on pieces whose pooled disagree rate <= 0.08 (an UNRESTRICTED borrow regressed 18 pieces: a true
 missing 8va is a long same-sign run in an otherwise-agreeing piece; scattered mixed-sign
-disagreement means geom itself is unreliable there). Result: reverie zeus 0.773 -> 0.837, the
-other 24 untouched pieces byte-identical, zeus-corr mean 0.6999.
+disagreement means geom itself is unreliable there). Result (CORRECTED at the integration
+review 2026-06-11 against l4v2_stage1.tsv; the original "other 24 untouched byte-identical"
+claim was wrong): rewrites fire on 4 of 30 pieces, reverie zeus 0.773 -> 0.837 plus three
+noise-level movers (nocturne -0.0024, maple -0.0025, furelise +0.0022), the other 26
+unchanged; zeus-corr mean 0.6999. Stage 2's zero-violations result is measured over these
+corrected files, so the dips are inside the gate.
 
 STAGE 2, THE REFEREE: per piece compute az_pc = mean per-measure F1 of PITCH-CLASS multisets,
 zeus(corrected) vs CLARITY (staves pooled, 1-based running measure index both sides), and af_pc =

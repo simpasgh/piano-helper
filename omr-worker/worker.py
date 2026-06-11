@@ -68,6 +68,11 @@ import clarity_stream
 # to the time signature (never-raise, never-worse). See rhythm_repair.py.
 import rhythm_repair
 
+# seq2seq is the L4 Zeus third-engine assembly + referee (OMR_SEQ2SEQ). PURE stdlib at import
+# time like fusion/reconcile (the zeus model itself runs as a subprocess via run_zeus, and the
+# delinearizer import is guarded INSIDE seq2seq.delinearize), so importing it here is free.
+import seq2seq
+
 UPLOAD_PREFIX = "uploads/"
 RESULT_SUFFIX = ".musicxml"
 RESULT_CONTENT_TYPE = "application/vnd.recordare.musicxml+xml"
@@ -231,6 +236,27 @@ def uvdoc_enabled():
     raster behind the strictly-more-staves guard. Only meaningful when geom_enabled() is also
     True (it rides on the geom CLI). Mirrors photo_clarity_enabled."""
     raw = os.environ.get(UVDOC_ENV)
+    if raw is None:
+        return False
+    return raw.strip().lower() in ("1", "true")
+
+
+# L4 ZEUS SEQ2SEQ REFEREE (OMR_SEQ2SEQ, default OFF; CLEAN PDFs ONLY -- photos are camera-OOD,
+# measured NO-GO). After the geom+Clarity fusion completes, the worker ALSO reads the piece with
+# the zeus-olimpic seq2seq model (ufal/olimpic-icdar24, CRNN -> LMX) over geom's own grand-staff
+# system crops, repairs zeus's missing-8va octaves from geom (gated borrow), and keeps zeus ONLY
+# when its per-measure pitch-class agreement with Clarity STRICTLY exceeds the fusion's (the
+# validated L4 selector-v2 referee: 89.7% pick accuracy, zero never-worse violations, picked mean
+# 0.702 vs always-fusion 0.507 on the 30-piece study). ANY failure at ANY stage keeps the fused
+# result unchanged: the fusion is the structural floor. See seq2seq.py + zeus_crops.py.
+SEQ2SEQ_ENV = "OMR_SEQ2SEQ"
+
+
+def seq2seq_enabled():
+    """True when OMR_SEQ2SEQ is truthy: on a PDF upload, run the zeus seq2seq third engine after
+    the fusion and let the agreement referee pick. Only meaningful when geom_enabled() and
+    fusion_enabled() are also True. Mirrors photo_clarity_enabled."""
+    raw = os.environ.get(SEQ2SEQ_ENV)
     if raw is None:
         return False
     return raw.strip().lower() in ("1", "true")
@@ -858,6 +884,169 @@ def run_geom(image_path, workdir, timeout=None, key_fifths=None, dump_clarity_pd
     if os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
         return out_path
     return None
+
+
+# The zeus seq2seq engine (ufal/olimpic-icdar24) lives in its OWN venv (TensorFlow 2.12, py3.11)
+# and is invoked as a subprocess, exactly like Clarity. Three env vars locate it (mirroring
+# CLARITY_PYTHON/CLARITY_OMR_DIR); if any is unset or missing on disk, run_zeus returns None and
+# the referee keeps the fused result.
+#   ZEUS_PYTHON   path to the zeus venv's python interpreter
+#   ZEUS_OMR_DIR  path to the cloned olimpic-icdar24 repo (must contain zeus/zeus.py + app/)
+#   ZEUS_MODEL    path to the zeus-olimpic model DIRECTORY (options.json/tags.txt/weights.h5)
+ZEUS_PYTHON_ENV = "ZEUS_PYTHON"
+ZEUS_OMR_DIR_ENV = "ZEUS_OMR_DIR"
+ZEUS_MODEL_ENV = "ZEUS_MODEL"
+
+# zeus.py lives in the repo's zeus/ subdir and imports its sibling ser_metric by cwd-relative
+# name, so the subprocess runs with cwd=<ZEUS_OMR_DIR>/zeus and a RELATIVE script name -- the
+# exact invocation the cx33 serving spike validated.
+ZEUS_SUBDIR = "zeus"
+ZEUS_SCRIPT_NAME = "zeus.py"
+
+# Stage A (system crops + pickle) runs in the GEOM venv (numpy/PIL): zeus_crops.py beside this
+# file, mirroring GEOM_SCRIPT_NAME. The pickle BASENAME is what zeus names its result after
+# (<exp>/<basename>.predicted.lmx), so keep it a constant the reader derives from too.
+ZEUS_CROPS_SCRIPT_NAME = "zeus_crops.py"
+ZEUS_PICKLE_BASENAME = "crops"
+
+# Per-stage wall-clock caps. The crops stage is a fast classical decode (~seconds); the zeus
+# stage is ONE batched TF inference over every system in the piece (the cx33 spike measured a
+# ~24s fixed TF startup + ~1.5s/system, hence one invocation per piece, never per-system), so
+# 300s comfortably covers the densest real piece while still bounding a wedged TF.
+SEQ2SEQ_CROPS_TIMEOUT_SECONDS = 120
+SEQ2SEQ_ZEUS_TIMEOUT_SECONDS = 300
+
+
+def zeus_crops_command(python, script, image_path, out_pickle):
+    """Build the Stage-A argv (zeus_crops.py in the geom venv). Pure so it is unit-testable
+    without running anything (mirrors geom_command)."""
+    return [python, script, image_path, "-o", out_pickle]
+
+
+def run_zeus_crops(image_path, workdir, timeout=None):
+    """Run Stage A: crop the page raster's grand-staff systems into ONE zeus pickle. Returns the
+    pickle path or None on ANY failure (env unset/missing, subprocess error, timeout, exit 2 =
+    no systems = clean decline) so the caller keeps the fused result. Never raises. Rides on
+    GEOM_PYTHON (the geom venv has numpy/PIL; no weights needed, the crop is classical)."""
+    python = os.environ.get(GEOM_PYTHON_ENV)
+    if not python:
+        return None
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), ZEUS_CROPS_SCRIPT_NAME)
+    if not os.path.isfile(python) or not os.path.isfile(script):
+        log("seq2seq crops env set but python/script missing (python=%r)" % (python,))
+        return None
+    out_pickle = os.path.join(workdir, "zeus", ZEUS_PICKLE_BASENAME + ".pickle")
+    try:
+        os.makedirs(os.path.dirname(out_pickle), exist_ok=True)
+        subprocess.run(
+            zeus_crops_command(python, script, image_path, out_pickle),
+            check=True,
+            cwd=workdir,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as err:
+        log("zeus crops timed out after %ss" % getattr(err, "timeout", timeout))
+        return None
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError) as err:
+        # exit 2 (no systems detected) lands here too -> clean decline, keep the fusion.
+        log("zeus crops failed or declined: %s" % err)
+        return None
+    if os.path.isfile(out_pickle) and os.path.getsize(out_pickle) > 0:
+        return out_pickle
+    return None
+
+
+def zeus_command(python, model, test_path_no_ext, out_dir):
+    """Build the STOCK zeus CLI argv, exactly as the cx33 spike validated: zeus.py --load takes
+    the model DIRECTORY, --test takes the pickle path WITHOUT its .pickle extension, --exp names
+    the output dir (zeus writes <exp>/<basename>.predicted.lmx there). The script name is
+    relative because the caller runs it with cwd=<ZEUS_OMR_DIR>/zeus. Pure (mirrors
+    clarity_command)."""
+    return [python, ZEUS_SCRIPT_NAME, "--load", model, "--test", test_path_no_ext,
+            "--exp", out_dir]
+
+
+def run_zeus(pickle_path, workdir, timeout=None):
+    """Run Stage B: ONE batched zeus inference over the piece's system pickle. Returns the
+    predicted LMX lines (one per system, in document order, blank lines dropped) or None on ANY
+    failure (env unset/missing on disk, subprocess error, timeout, no/empty result file) so the
+    caller keeps the fused result. Never raises."""
+    python = os.environ.get(ZEUS_PYTHON_ENV)
+    omr_dir = os.environ.get(ZEUS_OMR_DIR_ENV)
+    model = os.environ.get(ZEUS_MODEL_ENV)
+    if not python or not omr_dir or not model:
+        return None
+    zeus_cwd = os.path.join(omr_dir, ZEUS_SUBDIR)
+    script = os.path.join(zeus_cwd, ZEUS_SCRIPT_NAME)
+    if not os.path.isfile(python) or not os.path.isfile(script) or not os.path.exists(model):
+        log("zeus env set but python/repo/model missing (python=%r dir=%r model=%r)"
+            % (python, omr_dir, model))
+        return None
+    test_path = pickle_path[:-len(".pickle")] if pickle_path.endswith(".pickle") else pickle_path
+    out_dir = os.path.join(workdir, "zeus-out")
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        subprocess.run(
+            zeus_command(python, model, test_path, out_dir),
+            check=True,
+            cwd=zeus_cwd,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as err:
+        log("zeus timed out after %ss" % getattr(err, "timeout", timeout))
+        return None
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError) as err:
+        log("zeus failed: %s" % err)
+        return None
+    name = os.path.splitext(os.path.basename(test_path))[0]
+    lmx_path = os.path.join(out_dir, name + ".predicted.lmx")
+    if not os.path.isfile(lmx_path):
+        log("zeus produced no %s" % lmx_path)
+        return None
+    try:
+        with open(lmx_path, encoding="utf-8") as fh:
+            lines = [ln.rstrip("\r\n") for ln in fh]
+    except OSError as err:
+        log("zeus result unreadable (%r)" % err)
+        return None
+    lines = [ln for ln in lines if ln.strip()]
+    return lines or None
+
+
+def _seq2seq_referee(job_id, workdir, fused_body, geom_bytes, clarity_bytes, raster_path):
+    """Run the three zeus stages on a CLEAN-PDF fusion result and let the validated agreement
+    referee pick: crops (geom venv) -> one batched zeus inference (zeus venv) -> assemble
+    (delinearize + gated octave borrow, in-process) -> pick (zeus iff its per-measure
+    pitch-class agreement with Clarity strictly exceeds the fusion's). The fused result is the
+    FLOOR: any missing input, any stage failure, any exception returns it unchanged. The
+    returned body goes through process_job's existing post chain (merge -> normalize_ties ->
+    rhythm_repair -> drop_ties_across_rests), which is what applies rhythm repair to whichever
+    side won, exactly as the study scored both arms. NEVER raises."""
+    try:
+        if not fused_body or not geom_bytes or not clarity_bytes:
+            return fused_body
+        if not raster_path or not os.path.isfile(raster_path):
+            return fused_body
+        pickle_path = run_zeus_crops(raster_path, workdir,
+                                     timeout=SEQ2SEQ_CROPS_TIMEOUT_SECONDS)
+        if not pickle_path:
+            log("%s seq2seq: no system crops; keeping fusion" % job_id)
+            return fused_body
+        lines = run_zeus(pickle_path, workdir, timeout=SEQ2SEQ_ZEUS_TIMEOUT_SECONDS)
+        if not lines:
+            log("%s seq2seq: zeus produced nothing; keeping fusion" % job_id)
+            return fused_body
+        zeus_final = seq2seq.assemble(lines, geom_bytes, os.environ.get(ZEUS_OMR_DIR_ENV))
+        if not zeus_final:
+            log("%s seq2seq: assemble failed; keeping fusion" % job_id)
+            return fused_body
+        picked = seq2seq.pick(fused_body, zeus_final, clarity_bytes)
+        log("%s seq2seq referee picked %s (%d systems)"
+            % (job_id, "zeus" if picked is zeus_final else "fusion", len(lines)))
+        return picked
+    except Exception as err:  # never raise into process_job; the fusion is the floor
+        log("seq2seq referee failed for %s (%r); keeping fusion" % (job_id, err))
+        return fused_body
 
 
 def _rekey_geom(geom_bytes, clarity_bytes, rerun_keyed):
@@ -1614,7 +1803,7 @@ def _transcribe_one_page(page_pdf, page_dir):
         return None
 
 
-def _fusion_block_stream(job_id, input_path, workdir, geom_body, publish_partial):
+def _fusion_block_stream(job_id, input_path, workdir, geom_body, publish_partial, sink=None):
     """BLOCK-BY-BLOCK progressive fusion (OMR_PROGRESSIVE_BLOCKS, PDF only). geom runs ONCE over the
     whole page for pitch; Clarity streams REAL rhythm per staff SYSTEM from ONE warm invocation
     (run_clarity_stream). For each system k, publish a partial that holds ONLY the FINISHED systems:
@@ -1631,7 +1820,13 @@ def _fusion_block_stream(job_id, input_path, workdir, geom_body, publish_partial
     system ~28s), so the geom future is ready by the first fuse. Returns the final fused MusicXML
     bytes (the COMPLETE body process_job writes), or None to fall back to whole-file fusion (Clarity
     stream unavailable, no systems, or nothing fusable) so it is never worse than the path below.
-    NEVER raises."""
+    NEVER raises.
+
+    sink (OPTIONAL, a dict): on a successful final fuse, receives the inputs of that fuse
+    ("geom" = the re-keyed whole-page geom bytes, "clarity" = Clarity's whole-file bytes) so the
+    caller's seq2seq referee (OMR_SEQ2SEQ) can compare the SAME engines the complete body was
+    fused from. Filling it changes nothing here: every partial and the returned body are
+    byte-identical with or without a sink."""
     try:
         # Kick geom off in the background; resolve it lazily on the first system so a slow geom does
         # not stall the stream's startup but is still ready before we need its pitch.
@@ -1681,6 +1876,9 @@ def _fusion_block_stream(job_id, input_path, workdir, geom_body, publish_partial
         fused_final = fusion.fuse(geom_bytes, clarity_whole)
         if not fused_final:
             return None
+        if sink is not None:
+            # Expose the final fuse's inputs for the caller's seq2seq referee (OMR_SEQ2SEQ).
+            sink["geom"], sink["clarity"] = geom_bytes, clarity_whole
         # Note: process_job runs the shared post-transform chain (merge -> normalize -> rhythm
         # repair) on whatever we return, so the returned body matches the whole-file fusion complete.
         return fused_final
@@ -1796,6 +1994,13 @@ def process_job(client, bucket, job_id):
                 log("geom input copy failed for %s (%r); geom disabled this job" % (job_id, err))
                 geom_input_png = None
 
+        # Context for the seq2seq referee (OMR_SEQ2SEQ): the raster geom decoded (captured once
+        # by _geom_body) plus the geom/clarity bytes the complete fusion was built from (filled
+        # by whichever fusion sub-path produced the body). The referee declines, keeping the
+        # fused result, when any of the three is missing (e.g. the per-page path, which has no
+        # whole-file Clarity), so an unfilled context is structurally the fusion of today.
+        seq_ctx = {}
+
         def _geom_body(key_fifths=None, dump_clarity_pdf=None):
             """Run geom on this upload (raster prep + run_geom) and return its MusicXML bytes, or
             None on decline/failure. Shared by the primary and fallback positions below. key_fifths
@@ -1814,6 +2019,11 @@ def process_job(client, bucket, job_id):
                 return None
             if geom_image is None:
                 return None
+            if is_pdf_input:
+                # Capture the stitched raster path for the seq2seq referee (its Stage-A crops
+                # consume the SAME raster geom decoded). The rekey rerun re-captures the same
+                # value, so this is idempotent.
+                seq_ctx["raster"] = geom_image
             gp = run_geom(geom_image, workdir, key_fifths=key_fifths,
                           dump_clarity_pdf=dump_clarity_pdf,
                           try_uvdoc=uvdoc_enabled() and not is_pdf_input)
@@ -1836,7 +2046,8 @@ def process_job(client, bucket, job_id):
             # equals whole-file fusion. Returns None to fall back (stream unavailable / no systems),
             # so it is a pure refinement of the paths below.
             if progressive_enabled() and progressive_blocks_enabled() and is_pdf_input:
-                streamed = _fusion_block_stream(job_id, input_path, workdir, _geom_body, publish_partial)
+                streamed = _fusion_block_stream(job_id, input_path, workdir, _geom_body,
+                                                publish_partial, sink=seq_ctx)
                 if streamed is not None:
                     body, source = streamed, "fusion"
                     log("%s recognized via fusion (block-by-block progressive)" % job_id)
@@ -1901,10 +2112,25 @@ def process_job(client, bucket, job_id):
                 # otherwise assumes C major and reads key-signature accidentals a semitone off).
                 geom_bytes = _rekey_geom(geom_bytes, clarity_bytes,
                                          lambda ck: _geom_body(key_fifths=ck))
+                # Expose the fuse inputs for the seq2seq referee below (PDF only; on a photo the
+                # referee never fires because is_pdf_input gates it).
+                seq_ctx["geom"], seq_ctx["clarity"] = geom_bytes, clarity_bytes
                 fused = fusion.fuse(geom_bytes, clarity_bytes)
                 if fused:
                     body, source = fused, "fusion"
                     log("%s recognized via fusion (geom pitch + clarity rhythm)" % job_id)
+
+            # L4 ZEUS SEQ2SEQ REFEREE (OMR_SEQ2SEQ, default OFF): on a CLEAN PDF whose COMPLETE
+            # body came from the fusion (whole-file or block-stream; every block-stream PARTIAL
+            # above stays pure fusion), also read the piece with the zeus seq2seq engine and keep
+            # zeus only when the validated agreement referee says so. The per-page progressive
+            # path leaves seq_ctx without geom/clarity (it has no whole-file Clarity), so it
+            # structurally keeps the fusion. Photos never reach here (is_pdf_input). Any stage
+            # failure inside returns body unchanged: the fused result is the floor.
+            if (body is not None and source == "fusion" and is_pdf_input
+                    and seq2seq_enabled()):
+                body = _seq2seq_referee(job_id, workdir, body, seq_ctx.get("geom"),
+                                        seq_ctx.get("clarity"), seq_ctx.get("raster"))
 
         # geom PRIMARY (OMR_GEOM + OMR_GEOM_PRIMARY): runs FIRST and wins if it returns a result,
         # ahead of the LLM/ensemble. Override behaviour the user opted into; remove OMR_GEOM_PRIMARY
