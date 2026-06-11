@@ -260,3 +260,153 @@ class TestClarityPdfDump:
 
     def test_write_clarity_pdf_bad_input_returns_false(self, tmp_path):
         assert geom_detector._write_clarity_pdf(None, str(tmp_path / "x.pdf")) is False
+
+
+def _staff_page(nstaves, h=1200, w=900, il=12):
+    """A clean (horizontal) page with exactly `nstaves` separated 5-line staves, so two pages with
+    different counts give the UVDoc guard a deterministic strictly-more / equal / fewer signal."""
+    import numpy as np
+    g = np.ones((h, w), np.float32)
+    anchors = np.linspace(120, h - 120, nstaves) if nstaves > 1 else [120.0]
+    for x in range(120, w - 120):
+        for t in anchors:
+            for k in range(5):
+                y = int(round(t + k * il))
+                if 1 <= y < h - 1:
+                    g[y - 1:y + 1, x] = 0.0
+    return g
+
+
+class _RecordingFixedDetector:
+    """Records every image handed to detect() AND returns preset centres, so both the gate's
+    chosen raster and the decode tail are observable without real YOLO."""
+
+    def __init__(self, centers):
+        self.centers = centers
+        self.calls = []
+
+    def detect(self, image, imgsz=None):
+        self.calls.append(image)
+        return list(self.centers)
+
+
+@requires_geom
+class TestUvdocGuard:
+    """The GUARDED UVDoc candidate (OMR_UVDOC / --try-uvdoc): transcribe_with_detector ALSO runs
+    the full staff decision on a UVDoc-rectified raster and adopts it ONLY when its used-staff
+    count strictly exceeds the original branch's. Pure control flow under test (_uvdoc_rectify is
+    stubbed, no torch); the real model is exercised by the local GPU gate, not CI."""
+
+    @staticmethod
+    def _capture_decode(monkeypatch):
+        captured = {}
+
+        def fake_decode(staves, per_staff, key_fifths=0, gray=None, normalize_illum=True, photo=False):
+            captured["staves"] = staves
+            captured["gray"] = gray
+            captured["photo"] = photo
+            return b"<score-partwise/>"
+
+        monkeypatch.setattr(geom_detector, "DETECTOR_AVAILABLE", True)
+        monkeypatch.setattr(geom_omr, "_decode_staves_to_musicxml", fake_decode)
+        return captured
+
+    def test_try_uvdoc_false_never_calls_rectify(self, monkeypatch):
+        # The byte-identity lock: the default (and every PDF upload) must never touch UVDoc.
+        monkeypatch.setattr(geom_detector, "DETECTOR_AVAILABLE", True)
+
+        def must_not_run(gray):
+            raise AssertionError("try_uvdoc=False must never call _uvdoc_rectify")
+
+        monkeypatch.setattr(geom_detector, "_uvdoc_rectify", must_not_run)
+        det = _StubDetector()
+        geom_detector.transcribe_with_detector(_page(), det)
+        assert det.calls  # the normal decode path still ran to detect()
+
+    def test_adopts_rectified_when_strictly_more_staves(self, monkeypatch):
+        import numpy as np
+        captured = self._capture_decode(monkeypatch)
+        orig, rect = _staff_page(2), _staff_page(6)
+        # fixture precondition: the rectified page really yields strictly more staves
+        assert len(geom_omr.detect_systems(rect)) > len(geom_omr.detect_systems(orig))
+        monkeypatch.setattr(geom_detector, "_uvdoc_rectify", lambda g: rect)
+        det = _RecordingFixedDetector([(450.0, 132.0, 0.9)])
+        out = geom_detector.transcribe_with_detector(orig, det, try_uvdoc=True)
+        assert out == b"<score-partwise/>"
+        assert captured["gray"] is rect  # the decode ran on the RECTIFIED raster
+        # the detector saw the rectified raster via the in-memory RGB handoff, not the original
+        src = det.calls[0]
+        assert isinstance(src, np.ndarray) and src.ndim == 3 and src.dtype == np.uint8
+        assert len(captured["staves"]) == len(geom_omr.detect_systems(rect))
+
+    def test_rejects_rectified_on_equal_staves(self, monkeypatch):
+        captured = self._capture_decode(monkeypatch)
+        orig, rect = _staff_page(3), _staff_page(3)
+        monkeypatch.setattr(geom_detector, "_uvdoc_rectify", lambda g: rect)
+        det = _RecordingFixedDetector([(450.0, 132.0, 0.9)])
+        assert geom_detector.transcribe_with_detector(orig, det, try_uvdoc=True) == b"<score-partwise/>"
+        assert det.calls[0] is orig  # equal count -> STRICT guard rejects, original raster kept
+        assert captured["gray"] is not rect
+
+    def test_rejects_rectified_on_fewer_staves(self, monkeypatch):
+        captured = self._capture_decode(monkeypatch)
+        orig, rect = _staff_page(4), _staff_page(2)
+        monkeypatch.setattr(geom_detector, "_uvdoc_rectify", lambda g: rect)
+        det = _RecordingFixedDetector([(450.0, 132.0, 0.9)])
+        assert geom_detector.transcribe_with_detector(orig, det, try_uvdoc=True) == b"<score-partwise/>"
+        assert det.calls[0] is orig
+        assert captured["gray"] is not rect
+
+    def test_rectify_failure_is_a_noop(self, monkeypatch):
+        # _uvdoc_rectify returning None (unset env / model failure) keeps the original path.
+        captured = self._capture_decode(monkeypatch)
+        orig = _staff_page(3)
+        monkeypatch.setattr(geom_detector, "_uvdoc_rectify", lambda g: None)
+        det = _RecordingFixedDetector([(450.0, 132.0, 0.9)])
+        assert geom_detector.transcribe_with_detector(orig, det, try_uvdoc=True) == b"<score-partwise/>"
+        assert det.calls[0] is orig
+        assert len(captured["staves"]) == len(geom_omr.detect_systems(orig))
+
+    def test_adopted_branch_dumps_the_rectified_raster(self, monkeypatch, tmp_path):
+        # The shim contract: dump_clarity_pdf must capture whichever raster the decode used,
+        # which on an adopted UVDoc branch is the RECTIFIED one.
+        self._capture_decode(monkeypatch)
+        orig, rect = _staff_page(2), _staff_page(6)
+        monkeypatch.setattr(geom_detector, "_uvdoc_rectify", lambda g: rect)
+        dumped = {}
+
+        def fake_dump(gray, path):
+            dumped["gray"] = gray
+            dumped["path"] = path
+            return True
+
+        monkeypatch.setattr(geom_detector, "_write_clarity_pdf", fake_dump)
+        geom_detector.transcribe_with_detector(
+            orig, _RecordingFixedDetector([(450.0, 132.0, 0.9)]),
+            dump_clarity_pdf=str(tmp_path / "clarity-input.pdf"), try_uvdoc=True)
+        assert dumped["gray"] is rect
+
+    def test_uvdoc_rectify_env_unset_returns_none(self, monkeypatch):
+        monkeypatch.delenv("UVDOC_DIR", raising=False)
+        monkeypatch.delenv("UVDOC_MODEL", raising=False)
+        assert geom_detector._uvdoc_rectify(_page()) is None
+
+    def test_uvdoc_rectify_missing_paths_return_none(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("UVDOC_DIR", str(tmp_path / "no-such-clone"))
+        monkeypatch.setenv("UVDOC_MODEL", str(tmp_path / "no-such-model.pkl"))
+        assert geom_detector._uvdoc_rectify(_page()) is None
+
+    def test_cli_try_uvdoc_threads_to_transcribe(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(geom_detector, "DETECTOR_AVAILABLE", True)
+        seen = {}
+
+        def fake_transcribe(image, detector, key_fifths=0, dump_clarity_pdf=None, try_uvdoc=False):
+            seen["try_uvdoc"] = try_uvdoc
+            return b"<score-partwise/>"
+
+        monkeypatch.setattr(geom_detector, "transcribe_with_detector", fake_transcribe)
+        out = tmp_path / "o.xml"
+        rc = geom_detector.main(["img.png", "--weights", "w.pt", "-o", str(out), "--try-uvdoc"])
+        assert rc == 0 and seen["try_uvdoc"] is True
+        rc = geom_detector.main(["img.png", "--weights", "w.pt", "-o", str(out)])
+        assert rc == 0 and seen["try_uvdoc"] is False

@@ -1177,6 +1177,135 @@ def test_photo_clarity_geom_none_skips_clarity(tmp_path, monkeypatch):
     assert fell_through.get("legacy") is True  # the pre-shim fallback chain ran unchanged
 
 
+# --- UVDoc guarded rectify (OMR_UVDOC): photo-only learned-dewarp candidate ----------------------
+
+
+def test_uvdoc_enabled_truthy_parsing(monkeypatch):
+    monkeypatch.delenv("OMR_UVDOC", raising=False)
+    assert worker.uvdoc_enabled() is False
+    for on in ("1", "true", "TRUE", " True "):
+        monkeypatch.setenv("OMR_UVDOC", on)
+        assert worker.uvdoc_enabled() is True, on
+    for off in ("0", "false", "", "garbage"):
+        monkeypatch.setenv("OMR_UVDOC", off)
+        assert worker.uvdoc_enabled() is False, off
+
+
+def test_geom_command_try_uvdoc_arg():
+    # --try-uvdoc rides on geom's CLI only when requested; the default argv is unchanged.
+    base = worker.geom_command("py", "s.py", "img.png", "w.pt", "out.xml")
+    assert "--try-uvdoc" not in base
+    flagged = worker.geom_command("py", "s.py", "img.png", "w.pt", "out.xml", try_uvdoc=True)
+    assert flagged[-1] == "--try-uvdoc"
+    assert flagged[:-1] == base
+
+
+def test_uvdoc_photo_upload_threads_try_uvdoc(tmp_path, monkeypatch):
+    # OMR_UVDOC on a NON-PDF upload: the geom run carries try_uvdoc=True.
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    monkeypatch.setenv("OMR_UVDOC", "1")
+    geom_out = tmp_path / "geom.musicxml"; geom_out.write_text("<score>geom</score>")
+    seen = {}
+
+    def fake_run_geom(image, workdir, **k):
+        seen["try_uvdoc"] = k.get("try_uvdoc")
+        return str(geom_out)
+
+    monkeypatch.setattr(worker, "run_geom", fake_run_geom)
+    monkeypatch.setattr(worker.fusion, "fuse", lambda g, c: g)
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"\x89PNG fake")
+    _drive_process_job(monkeypatch, client, is_pdf=False)
+    assert seen["try_uvdoc"] is True
+    assert client.put_body == b"<score>geom</score>"
+
+
+def test_uvdoc_pdf_upload_never_tries_uvdoc(tmp_path, monkeypatch):
+    # Flag ON but the upload is a PDF: try_uvdoc must be False (PDFs are structurally untouched).
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    monkeypatch.setenv("OMR_UVDOC", "1")
+    geom_out = tmp_path / "geom.musicxml"; geom_out.write_text("<score>geom</score>")
+    seen = {}
+
+    def fake_run_geom(image, workdir, **k):
+        seen["try_uvdoc"] = k.get("try_uvdoc")
+        return str(geom_out)
+
+    monkeypatch.setattr(worker, "rasterize_if_pdf", lambda p, w: ("/fake/stitched.png", True))
+    monkeypatch.setattr(worker, "run_geom", fake_run_geom)
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: None)
+    monkeypatch.setattr(worker.fusion, "fuse", lambda g, c: g)
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"%PDF-1.4 fake")
+    _drive_process_job(monkeypatch, client, is_pdf=True)
+    assert seen["try_uvdoc"] is False
+
+
+def test_uvdoc_off_photo_upload_does_not_try(tmp_path, monkeypatch):
+    # Flag unset: the geom argv decision is False, exactly today's behavior.
+    monkeypatch.delenv("OMR_UVDOC", raising=False)
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    geom_out = tmp_path / "geom.musicxml"; geom_out.write_text("<score>geom</score>")
+    seen = {}
+
+    def fake_run_geom(image, workdir, **k):
+        seen["try_uvdoc"] = k.get("try_uvdoc")
+        return str(geom_out)
+
+    monkeypatch.setattr(worker, "run_geom", fake_run_geom)
+    monkeypatch.setattr(worker.fusion, "fuse", lambda g, c: g)
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"\x89PNG fake")
+    _drive_process_job(monkeypatch, client, is_pdf=False)
+    assert seen["try_uvdoc"] is False
+
+
+def test_uvdoc_rekey_rerun_also_tries_uvdoc(tmp_path, monkeypatch):
+    # The rekey rerun goes through the same _geom_body, so a photo upload's re-keyed geom run
+    # makes the SAME guarded UVDoc decision as the first run (deterministic raster choice).
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    monkeypatch.setenv("OMR_PHOTO_CLARITY", "1")
+    monkeypatch.setenv("OMR_UVDOC", "1")
+    geom_out = tmp_path / "geom.musicxml"; geom_out.write_text("<score>geom</score>")
+    clar_out = tmp_path / "clarity.musicxml"
+    clar_out.write_text("<score><key><fifths>2</fifths></key></score>")
+    calls = []
+
+    def fake_run_geom(image, workdir, **k):
+        calls.append(dict(k))
+        dump = k.get("dump_clarity_pdf")
+        if dump:
+            with open(dump, "wb") as fh:
+                fh.write(b"%PDF-1.4 shim")
+        return str(geom_out)
+
+    monkeypatch.setattr(worker, "run_geom", fake_run_geom)
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clar_out))
+    monkeypatch.setattr(worker.fusion, "fuse", lambda g, c: g)
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"\x89PNG fake")
+    _drive_process_job(monkeypatch, client, is_pdf=False)
+    rekey_calls = [k for k in calls if k.get("key_fifths")]
+    assert rekey_calls, "Clarity reported fifths=2, so the rekey rerun must have fired"
+    assert all(k.get("try_uvdoc") is True for k in calls), calls
+
+
 def test_geom_fusion_takes_precedence_over_primary(tmp_path, monkeypatch):
     # With both OMR_GEOM_FUSION and OMR_GEOM_PRIMARY set, fusion runs and geom-primary does not
     # re-run geom or override the fused result (geom runs exactly once, for the fusion).

@@ -4,6 +4,95 @@ Self-contained plan so any session (esp. the one on the GPU PC) can pick up and 
 without the prior machine's local memory. Newest status at the top. NO em dashes in generated
 text (project rule). Ship every code change through the gated flow (see "Constraints" below).
 
+## STATUS: L4 PHASE 1 -- Zeus crushes clean CC0 (always-zeus mean 0.698 vs fusion 0.507) but EVERY tested referee FAILED the pre-registered gate; Zeus stays INERT until a better selector exists (2026-06-11)
+
+Completed the L4 pre-integration studies. Data local: omr-train/l4_referee.tsv (30 rows),
+x4/zeus_out (all 26 CC0 + the real 4 + photos), scripts l4_referee_study.py / l4_margin_sweep.py
+/ l4_count_referee.py / l4_zeus_donor.py.
+
+ZEUS REAL-4 + PHOTOS: CLEAN holds the greenlight (liminality 0.964 vs fusion 0.946, tctab 0.982
+vs 0.992, icarus -0.035, reverie -0.108; reverie's gap = the LMX vocabulary has NO ottava token,
+so Zeus emits written pitch in 8va regions; a wrapper could re-apply geom's detect_ottavas
+shift). PHOTOS NO-GO as-is: camera texture is OOD (key/meter misreads on visually clean
+flat-fielded crops; reverie hallucination 353 notes vs 190 clean); loses to the photo fusion on
+3 of 4. Photo viability needs camera-domain training data (L3), not a wrapper.
+
+30-PIECE REFEREE STUDY: always-fusion 0.5067, ALWAYS-ZEUS 0.6979, oracle 0.7155; zeus wins 22/30
+(serenade 0.935 vs 0.133, moonlight1 0.940 vs 0.266, k545 0.975 vs 0.075, flight 0.948 vs
+0.055). EVERY tested ground-truth-free selector FAILED the pre-registered gate (>= 80% accuracy
+AND strict never-worse): (a) bar-sum violation margin: best mean 0.639, dominated by always-zeus;
+persistent violators furelise -0.161 / preludecmaj -0.160 / entertainer -0.050 (zeus ALIGNMENT
+failures with ~0.94 pitch-class recall, invisible to bar sums); (b) geom-overlap: an INVERSE
+signal (low zeus-geom overlap usually means GEOM is the broken side); (c) Clarity-count agreement
+|zm-cm| <= K: max 0.655, real-4 violate at K=0 (grids AGREE there; zeus loses on pitch detail);
+(d) fuse(geom, zeus) through the shipped X2 machinery: 0.503 with floor violations to -0.24
+(where zeus blows out, geom's own pitch skeleton is the broken side: k545 fuse 0.075 vs zeus
+0.975, so a geom-anchored fusion caps the win). PER THE PRE-REGISTERED KILL CRITERION (review
+program section 5): nothing ships; zeus-olimpic stays an inert local checkpoint.
+
+NEXT SELECTOR CANDIDATES (the quantified prize: +0.21 mean over the live fusion): per-measure NW
+alignment quality between zeus and Clarity (both independent of geom), measure-LEVEL 2-of-3
+voting / per-measure hybrid assembly (zeus grid + best-source content per measure), or a
+bounded-regression shipping policy (a product decision: worst -0.16 on 3/30 vs +0.19 mean). Also
+queue the wrapper ottava re-shift and the anacrusis numbering fix before any re-gate.
+
+## STATUS: N2 GUARDED UVDOC BUILT (OMR_UVDOC, default OFF) -- integrated gate: reverie photo 0.663 -> 0.822 adopted, others byte-equal, mean 0.580 -> 0.619; box deploy pending (2026-06-11)
+
+Implemented the GUARDED UVDoc adoption on branch feat/omr-uvdoc-guarded (the N2 probe's PASS
+form; unconditional rectification stays a documented KILL).
+
+DESIGN. geom_detector.transcribe_with_detector gains `try_uvdoc` (CLI --try-uvdoc). The existing
+dewarp-decision block is extracted VERBATIM into `_staff_dewarp_decision(gray)` returning
+(staves, use_dw, gray_dw, normalize_illum). With try_uvdoc on, `_uvdoc_rectify(gray)` (pretrained
+UVDoc unwarper, guarded import from UVDOC_DIR env + UVDOC_MODEL checkpoint; ANY failure returns
+None) produces a rectified raster, the SAME decision helper runs on it, and the rectified branch
+is adopted ONLY when its used-staff count STRICTLY exceeds the original's AND its in-memory RGB
+handoff succeeds. Detector, decode tail, and the dump_clarity_pdf shim side output all follow
+whichever raster won (the shim dumps what the decode used). worker.py: OMR_UVDOC flag (admin
+allowlist + metadata, tier 7 engine, requires OMR_GEOM); `_geom_body` passes
+`try_uvdoc=uvdoc_enabled() and not is_pdf_input` so the rekey rerun makes the identical raster
+decision and PDF uploads are structurally untouched.
+
+GATE (local GPU, integrated path: eval_candidate_uvdoc_integrated.py + uvdoc_integrated_gate.log
+in C:\Users\pascu\omr-train, base try_uvdoc=False vs cand True in the SAME run):
+  reverie    0.663 -> 0.822 (+0.159) ADOPT (used staves 7 -> 8)
+  icarus     0.887 -> 0.887 BYTES-EQUAL (6 -> 6, rejected)
+  liminality 0.625 -> 0.625 BYTES-EQUAL (6 -> 1, rejected)
+  tctab      0.144 -> 0.144 BYTES-EQUAL on the 2-page eval STITCH (15 -> 0, rejected)
+  MEAN 0.580 -> 0.619.
+DEVIATION FROM THE PROBE EXPECTATION, explained: the probe guard compared RAW staff counts on
+pre-rectified pages and adopted only tctab (+0.061); the integrated guard runs the FULL decision
+(classical dewarp + adaptive illum ON TOP of the rectified raster), which legitimately captures
+the probe's reverie ORPHAN FINDING (raw-rectified reverie 0.828, then rejected 6 < 7): rectified
+reverie dewarps to 8 used staves > 7 and lands 0.822. Never-worse held everywhere (BYTES-EQUAL
+verified in-run on the 3 non-adopted pieces).
+
+STITCH CAVEAT (matters for eval only, not prod): UVDoc models ONE page, so rectifying the tctab
+2-page stitch collapses detection (0 staves) and the guard correctly rejects it; the probe's
+tctab gain came from per-page rectification. Prod uploads ARE single pages: as single-page
+inputs, tctab-1 goes 0 -> 10 used staves (ADOPT; rescues a page geom would otherwise DECLINE
+entirely) and tctab-2 goes 6 -> 8 (ADOPT).
+
+CLEAN FLOOR (measured, not just structural): main-vs-branch(try_uvdoc=False) AND
+branch(try_uvdoc=True) are sha256-IDENTICAL on 5 clean rasters (air/canon/arabesque CC0 stitches
++ 2 synthetic val pages); on a clean page the rectified raster cannot add staves, so the strict
+guard rejects it even with the flag on.
+
+CPU LOADER GOTCHA (would have silently no-opped the flag on the box): best_model.pkl stores
+CUDA-tagged tensors and UVDoc's own utils.load_model calls torch.load WITHOUT map_location, so
+it RAISES on CPU-only torch. _uvdoc_rectify therefore loads the state dict with
+map_location="cpu" and moves the net to the chosen device. Measured local CPU rectify: ~0.3s
+first call (incl. load), ~0.13-0.16s warm per 2048x1536 page; the second staff-decision pass
+dominates the added cost (estimate ~1-3s/page on cx33, to be measured).
+
+BOX DEPLOY TODO (cx33): (1) deploy the omr-worker code; (2) clone UVDoc to /opt/uvdoc
+(git clone https://github.com/tanguymagne/UVDoc, MIT; the 32MB checkpoint ships in-repo at
+model/best_model.pkl); (3) add UVDOC_DIR=/opt/uvdoc and UVDOC_MODEL=/opt/uvdoc/model/best_model.pkl
+to /etc/piano-helper-omr.env and RESTART the service (geom runs as a subprocess so code needs no
+restart, but the env-file change does); (4) measure CPU latency on a real photo job; (5) only
+then flip OMR_UVDOC=1 (live via /admin, no restart). The geom venv already has torch (ultralytics)
+and cv2; no new dependency.
+
 ## STATUS: X2 MEASURE REMAP SHIPPED (gated) -- dense CC0 fusion mean 0.378 -> 0.438, air +0.47, ZERO regressions, hard floor byte-identical (2026-06-11)
 
 Built and gated the X2 cross-engine measure remap in fusion.py. MECHANISM: `_remap_measures`
