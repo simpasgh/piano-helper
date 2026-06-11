@@ -4,6 +4,52 @@ Self-contained plan so any session (esp. the one on the GPU PC) can pick up and 
 without the prior machine's local memory. Newest status at the top. NO em dashes in generated
 text (project rule). Ship every code change through the gated flow (see "Constraints" below).
 
+## STATUS: N1 PHOTO-TO-PDF SHIM SHIPPED (OMR_PHOTO_CLARITY) + N2/N5 probes measured -- photos gain real rhythm, note_dur_f1 0 -> 0.62-0.81 (2026-06-11)
+
+Executed the NOW block of the review program (docs/omr-engine-review-2026-06.md).
+
+N1 SHIPPED. Probe on the box: Clarity Stage A collapses on RAW wrapped photos (0/6 icarus,
+1/6 liminality, 0/8 reverie, 0+1/22 tctab) and on dewarp-only (0-2), but RECOVERS FULLY on the
+dewarped + flat-fielded raster: icarus 6/6, reverie 7/8, liminality 9, tctab 12+10 = 22/22
+(per page; the piece geom itself finds 4/22 on). So the shim dumps normalize_illumination(dewarped)
+ALWAYS (the flat-field is a guarded no-op on an evenly-lit screenshot). Implementation:
+geom_detector --dump-clarity-pdf (PIL one-page PDF, 300 DPI native-pixel mapping, quality 95);
+worker fusion branch on non-PDF + flag: geom on the ORIGINAL raster, dump to Clarity SEQUENTIALLY
+(Clarity's input is geom's output), then rekey + fuse; partial published when progressive. Floor is
+STRUCTURAL: no dump / Clarity fail / geom None -> exactly today's geom-alone bytes.
+GATE (box, base = geom+repair vs shim = fuse(geom, clarity-on-dump)+repair, scored vs truth):
+note_f1 IDENTICAL on all 4 (0.887 / 0.663 / 0.625 / 0.144); note_dur_f1 0 -> 0.805 icarus,
+0.628 reverie, 0.620 liminality; duration_acc 0 -> 0.908 / 0.947 / 0.991. CLEAN: branch-vs-deployed
+geom CLI BYTE-IDENTICAL on all 4 clean pieces. CAVEATS: (1) the tctab gate row used the 2-photo
+STITCH (eval artifact); Clarity FAILED on that tall stitched PDF page and the floor held (0.144
+unchanged) -- a real prod upload is ONE photo, where the per-page probe shows 12+10 systems, so
+prod should do better; a per-page shim variant is a possible follow-up. (2) All 4 real photos are
+C major, so the key borrow on photos is live but unmeasured (needs N3's transposed photo capture).
+(3) Photo latency: complete goes ~10s -> ~2-4 min; geom pitch partial still lands ~10s
+(progressive). Clarity probe timing on photos: 84-160s.
+
+N2 PROBE (UVDoc pretrained dewarp): UNCONDITIONAL pre-rectification = KILL (liminality 0.625 ->
+0.086: a pre-rectified page looks "almost clean", the keep-if-more-staves guard then REJECTS the
+classical dewarp and ALL photo-path adaptations downstream are bypassed; icarus -0.080). GUARDED
+(keep only when used-staff count strictly increases) = PASS: tctab 0.144 -> 0.205, others
+untouched, mean 0.580 -> 0.595. Adoption pending (32MB torch model into the worker for +0.061
+on one piece). ORPHAN FINDING for the referee design: raw-rectified reverie scores 0.828 (+0.165,
+best ever) but staff-count selection rejects it (6 < 7) -- "more staves wins" fails reverie AGAIN;
+no ground-truth-free selector yet separates it from liminality's collapse. Artifacts in
+C:\Users\pascu\omr-train\uvdoc*.
+
+N5 DIAGNOSTICS (dense CC0, measurement-only): (a) the X1 barline veto is GO at 1.0 sp radius (NOT
+the 0.5 sp the program guessed): on the DAMAGING-SURVIVOR population (false candidates that survive
+_drop_extra_barlines AND have heads on both sides) 83/84 = 98.8% have a detected head within
+1.0 sp vs 0/504 true barlines -- a near-perfect, never-worse-shaped veto signal. Use the
+damaging-survivor population for eval, not raw candidates (head-free false candidates are real ink:
+repeat/double-bar strokes whose empty slivers the decode already drops). (b) chord MERGING at the
+fixed 1.2 sp threshold is NOT a loss mechanism (0 merged truth onsets on every dense piece;
+MuseScore never engraves distinct onsets < 1.4 sp); the risk is SPLIT-side (max within-chord spread
+is exactly 1.20 sp = the boundary), so 1.2 -> 1.4 sp is free insurance, not a recovery lever; the
+dense cluster deficit is over-segmentation + head recall on dense stacks (canon -17%, entertainer
+-37%, upper bounds due to voice unisons). X1 = veto only. Scripts: C:\Users\pascu\omr-train\n5_*.py.
+
 ## STATUS: FULL ENGINE REVIEW + IMPROVEMENT PROGRAM published -- see docs/omr-engine-review-2026-06.md (2026-06-11)
 
 A 22-agent adversarially-verified review (capability matrix, world positioning, refuted-paths
