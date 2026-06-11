@@ -103,13 +103,23 @@ describe("transitiveRequires / dependentsOf", () => {
     expect(transitiveRequires("OMR_PROGRESSIVE_PAGES")).toContain("OMR_PROGRESSIVE");
   });
 
-  it("dependentsOf geom includes primary, fusion, the photo shim, UVDoc, and block-streaming (transitive via fusion)", () => {
+  it("dependentsOf geom includes primary, fusion, the photo shim, the seq2seq referee, UVDoc, and block-streaming (transitive via fusion)", () => {
     expect(dependentsOf("OMR_GEOM").sort()).toEqual([
       "OMR_GEOM_FUSION",
       "OMR_GEOM_PRIMARY",
       "OMR_PHOTO_CLARITY",
       "OMR_PROGRESSIVE_BLOCKS",
+      "OMR_SEQ2SEQ",
       "OMR_UVDOC",
     ]);
+  });
+
+  it("the seq2seq referee requires geom + fusion (cascade on and off)", () => {
+    const on = withFlag(emptyState(), "OMR_SEQ2SEQ", true);
+    expect(on.OMR_SEQ2SEQ).toBe(true);
+    expect(on.OMR_GEOM_FUSION).toBe(true);
+    expect(on.OMR_GEOM).toBe(true);
+    expect(withFlag(on, "OMR_GEOM_FUSION", false).OMR_SEQ2SEQ).toBe(false);
+    expect(withFlag(on, "OMR_GEOM", false).OMR_SEQ2SEQ).toBe(false);
   });
 });
