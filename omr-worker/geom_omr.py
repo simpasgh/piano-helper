@@ -33,6 +33,7 @@ live worker.
 
 from __future__ import annotations
 
+import bisect
 from typing import List, Optional, Tuple
 
 # --- Guarded imports ---------------------------------------------------------------------
@@ -998,6 +999,50 @@ def _drop_extra_barlines(xs: List[float], scores: List[float]) -> List[float]:
         return xs
 
 
+_BAR_HEAD_VETO_IL = 1.0  # a non-gap-crossing candidate with a detected notehead within this many
+#                          interlines of its x is a chord/stem stack, not a barline. Measured on the
+#                          dense CC0 set (N5 diagnostics, 2026-06-11): 98.8% (83/84) of the
+#                          measure-damaging FALSE candidates that survive _drop_extra_barlines have a
+#                          head within 1.0 interline, vs 0 of 504 TRUE barlines (engraving keeps
+#                          noteheads clear of real bars; at 0.5 interlines the same signal only
+#                          reaches 54% of false bars, so 1.0 is the measured radius). This catches
+#                          the over-segmentation _drop_extra_barlines cannot see: false bars that do
+#                          NOT carve an anomalously-narrow measure (canon keeps 13 such extra bars).
+
+
+def _veto_headed_barlines(xs: List[float], scores: List[float], head_xs: List[float],
+                          sp: float) -> Tuple[List[float], List[float]]:
+    """Remove barline candidates that BOTH fail the inter-staff-gap test (score < _BAR_GAP_CROSS)
+    AND have a detected notehead within _BAR_HEAD_VETO_IL interlines of their x. A real barline
+    crosses the gap and never carries a head on its column, so such a candidate is a dense
+    chord/stem stack read as a bar: the dense-score over-segmentation mechanism. A gap-crossing
+    candidate is NEVER vetoed regardless of heads (real barlines are structurally exempt), and
+    with no heads / no usable interline everything is kept, so a caller without head information
+    is byte-identical. Returns the filtered (xs, scores) PAIR, kept index-aligned for the
+    downstream _drop_extra_barlines. PURE; NEVER raises."""
+    try:
+        if not xs or not head_xs or sp <= 0 or len(scores) != len(xs):
+            return xs, scores
+        hs = sorted(float(h) for h in head_xs)
+        tol = _BAR_HEAD_VETO_IL * sp
+        kx: List[float] = []
+        ks: List[float] = []
+        for x, sc in zip(xs, scores):
+            if sc < _BAR_GAP_CROSS:
+                i = bisect.bisect_left(hs, x)
+                near = min(
+                    (hs[i] - x) if i < len(hs) else float("inf"),
+                    (x - hs[i - 1]) if i > 0 else float("inf"),
+                )
+                if near <= tol:
+                    continue  # a headed non-gap-crossing column is a stack, not a bar
+            kx.append(x)
+            ks.append(sc)
+        return kx, ks
+    except Exception:
+        return xs, scores
+
+
 def _best_thin_barcol(seg, thr: float, maxw: int) -> Optional[int]:
     """Index (within `seg`) of the strongest THIN gap-crossing column, or None if none qualifies. A
     candidate is a contiguous run of gcov >= _BAR_GAP_CROSS whose width is <= maxw (a real barline is a
@@ -1075,13 +1120,20 @@ def _insert_missing_barlines(xs: List[float], gcov, sp: float) -> List[float]:
 
 
 def detect_barlines(gray, staves: List[List[float]], normalize_illum: bool = True,
-                    photo: bool = False) -> List[List[float]]:
+                    photo: bool = False,
+                    heads: Optional[List[List[Tuple[float, float]]]] = None) -> List[List[float]]:
     """Detect barline x-positions per grand-staff pair. Returns a list aligned with `staves`:
     out[i] is the sorted barline x-centers for the grand staff staff i belongs to (the treble and
     bass of a pair share one list). NEVER raises; returns empty lists on failure so the decode
     falls back to even binning. `photo=True` (the dewarp path) lowers the coverage bar to
     _BAR_COV_PHOTO to recover a real photo's faint barlines; clean uploads never dewarp so they keep
     _BAR_COV and are byte-identical.
+
+    heads (optional, index-aligned with staves like the decode's per_staff_heads) supplies the
+    detected notehead (x, y) centers as SIDE-INFORMATION for the candidate filter: a
+    non-gap-crossing candidate with a head within _BAR_HEAD_VETO_IL interlines of its x is a dense
+    chord/stem stack misread as a barline and is vetoed (_veto_headed_barlines) before the
+    narrow-measure filter. None (the default) skips the veto entirely, byte-identical to before.
 
     normalize_illum (default True) applies the flat-field first (a no-op on a clean page); the
     warped-photo decode threads through whatever detect_systems used so barlines share the same
@@ -1159,6 +1211,15 @@ def detect_barlines(gray, staves: List[List[float]], normalize_illum: bool = Tru
                         scores.append(float(gcov[s:x].max()) if gcov is not None else 1.0)
                 else:
                     x += 1
+            if heads is not None:
+                # Notehead side-information: a weak (non-gap-crossing) candidate with a head on its
+                # column is a chord/stem stack, never a real bar (measured 98.8% vs 0%, see
+                # _BAR_HEAD_VETO_IL). Runs BEFORE the narrow-measure filter so the surviving grid
+                # _drop_extra_barlines reasons about is already stack-free.
+                head_xs = [float(hx) for idx in (ti, bi)
+                           if idx is not None and idx < len(heads)
+                           for (hx, _hy) in heads[idx]]
+                xs, scores = _veto_headed_barlines(xs, scores, head_xs, sp)
             xs = _drop_extra_barlines(xs, scores)  # drop EXTRA non-gap-crossing (false) barlines only
             if photo:
                 xs = _insert_missing_barlines(xs, gcov, sp)  # recover faded bars in over-wide measures
@@ -1521,7 +1582,8 @@ def _decode_staves_to_musicxml(
     Returns MusicXML bytes, or None if nothing usable was found. NEVER raises.
     """
     try:
-        barlines = (detect_barlines(gray, staves, normalize_illum=normalize_illum, photo=photo)
+        barlines = (detect_barlines(gray, staves, normalize_illum=normalize_illum, photo=photo,
+                                    heads=per_staff_heads)
                     if gray is not None else [[] for _ in staves])
         # Ottava (8va / 8vb) brackets per staff: a note under one SOUNDS an octave higher (8va) or
         # lower (8vb) than its written staff position. geom decodes the WRITTEN position, so without

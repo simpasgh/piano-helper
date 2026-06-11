@@ -771,7 +771,7 @@ def test_decode_forwards_normalize_illum(monkeypatch):
     import numpy as np
     captured = {}
 
-    def fake_barlines(gray, staves, normalize_illum=True, photo=False):
+    def fake_barlines(gray, staves, normalize_illum=True, photo=False, heads=None):
         captured["barlines"] = normalize_illum
         return [[] for _ in staves]
 
@@ -1037,3 +1037,110 @@ def test_detect_barlines_photo_recovers_faint_barline():
     photo = geom_omr.detect_barlines(gray, staves, photo=True)[0]
     assert not any(abs(x - 150) <= 4 for x in clean), "faint barline must be missed on the clean path"
     assert any(abs(x - 150) <= 4 for x in photo), "faint barline must be recovered on the photo path"
+
+
+# --- Notehead-aware barline veto (X1): heads as side-information against dense stacks -------
+# _veto_headed_barlines drops a NON-gap-crossing candidate with a detected notehead within
+# _BAR_HEAD_VETO_IL interlines of its x (measured on dense CC0: 98.8% of measure-damaging false
+# bars vs 0/504 true bars). It catches the over-segmentation _drop_extra_barlines cannot see:
+# false bars that do not carve a narrow measure.
+
+
+def test_veto_headed_barlines_drops_headed_weak():
+    xs = [0.0, 100.0, 200.0, 300.0]
+    scores = [1.0, 0.1, 1.0, 1.0]
+    kx, ks = geom_omr._veto_headed_barlines(xs, scores, [104.0], sp=16.0)  # head 4px from x=100
+    assert kx == [0.0, 200.0, 300.0]
+    assert ks == [1.0, 1.0, 1.0]  # scores stay index-aligned with the survivors
+
+
+def test_veto_headed_barlines_keeps_gap_crossing_even_with_head():
+    # a REAL barline (gap-crossing) is never vetoed, even with a head right on its column.
+    xs = [0.0, 100.0, 200.0]
+    scores = [1.0, 0.9, 1.0]
+    kx, ks = geom_omr._veto_headed_barlines(xs, scores, [100.0], sp=16.0)
+    assert (kx, ks) == (xs, scores)
+
+
+def test_veto_headed_barlines_keeps_weak_without_nearby_head():
+    # the tctab analog: a weak (cluttered-gap) but REAL barline with no head within one interline
+    # survives the veto; only _drop_extra_barlines' narrow-measure logic may ever judge it.
+    xs = [0.0, 100.0, 200.0]
+    scores = [1.0, 0.1, 1.0]
+    kx, ks = geom_omr._veto_headed_barlines(xs, scores, [150.0], sp=16.0)
+    assert (kx, ks) == (xs, scores)
+
+
+def test_veto_headed_barlines_radius_is_one_interline():
+    xs = [100.0]
+    scores = [0.0]
+    inside, _ = geom_omr._veto_headed_barlines(xs, scores, [116.0], sp=16.0)   # exactly 1.0 il
+    outside, _ = geom_omr._veto_headed_barlines(xs, scores, [117.0], sp=16.0)  # just past it
+    assert inside == [] and outside == xs
+
+
+def test_veto_headed_barlines_degenerate_noops():
+    assert geom_omr._veto_headed_barlines([], [], [1.0], 16.0) == ([], [])
+    xs, scores = [1.0, 2.0], [0.0, 0.0]
+    assert geom_omr._veto_headed_barlines(xs, scores, [], 16.0) == (xs, scores)    # no heads
+    assert geom_omr._veto_headed_barlines(xs, scores, [1.0], 0.0) == (xs, scores)  # bad interline
+    assert geom_omr._veto_headed_barlines(xs, scores, [1.0], -1.0) == (xs, scores)
+    assert geom_omr._veto_headed_barlines(xs, [0.0], [1.0], 16.0) == (xs, [0.0])   # mismatch
+
+
+@requires_geom
+def test_detect_barlines_heads_veto_catches_evenly_spread_stacks():
+    # INTEGRATION, the canon mechanism _drop_extra_barlines structurally CANNOT see: only 2 real
+    # bars (fewer than 3 strong candidates), so its median-width scale falls back to ALL candidates
+    # and the 3 evenly-spread stacks define the median themselves -> nothing is "too close" and
+    # every stack SURVIVES the narrow-measure filter. With the stacks' noteheads passed as side
+    # information the veto removes all 3; without heads the legacy output keeps them (locks that
+    # the veto, not some other filter, is what catches this shape).
+    import numpy as np
+    from PIL import Image, ImageDraw
+    interline, top, gap = 16, 40, 64
+    treble = [top + i * interline for i in range(5)]
+    bass = [treble[-1] + gap + i * interline for i in range(5)]
+    im = Image.new("L", (400, int(bass[-1] + 60)), 255)
+    d = ImageDraw.Draw(im)
+    for ly in treble + bass:
+        d.line([(0, ly), (400, ly)], fill=0, width=2)
+    for bx in (40, 340):                                        # only 2 real, gap-crossing bars
+        d.line([(bx, treble[0]), (bx, bass[-1])], fill=0, width=2)
+    stacks = (115, 190, 265)                                    # evenly spread inside the measure
+    for sx in stacks:
+        d.line([(sx, treble[0]), (sx, treble[-1] + 12)], fill=0, width=2)
+        d.line([(sx, bass[0] - 12), (sx, bass[-1])], fill=0, width=2)
+    gray = np.asarray(im, dtype=np.float32) / 255.0
+    staves = geom_omr.detect_systems(gray)
+    assert len(staves) == 2
+    legacy = geom_omr.detect_barlines(gray, staves)
+    assert sum(1 for sx in stacks if any(abs(x - sx) <= 6 for x in legacy[0])) == 3, \
+        "precondition: the narrow-measure filter alone must NOT catch these stacks"
+    heads = [[(float(sx), float(treble[2])) for sx in stacks],
+             [(float(sx), float(bass[2])) for sx in stacks]]
+    vetoed = geom_omr.detect_barlines(gray, staves, heads=heads)
+    for bx in (40, 340):
+        assert any(abs(x - bx) <= 3 for x in vetoed[0]), f"real barline {bx} lost"
+    assert not any(any(abs(x - sx) <= 6 for x in vetoed[0]) for sx in stacks), \
+        "headed stacks must be vetoed"
+
+
+@requires_geom
+def test_decode_passes_heads_to_detect_barlines(monkeypatch):
+    # the shared decode tail forwards per_staff_heads as the veto's side information.
+    seen = {}
+    real = geom_omr.detect_barlines
+
+    def spy(gray, staves, normalize_illum=True, photo=False, heads=None):
+        seen["heads"] = heads
+        return real(gray, staves, normalize_illum=normalize_illum, photo=photo, heads=heads)
+
+    monkeypatch.setattr(geom_omr, "detect_barlines", spy)
+    xs = [40, 140, 240, 340]
+    gray, treble, bass = _draw_grand_staff_with_barlines(xs)
+    staves = geom_omr.detect_systems(gray)
+    per_staff = [[(90.0, treble[2])], [(90.0, bass[2])]]
+    out = geom_omr._decode_staves_to_musicxml(staves, per_staff, gray=gray)
+    assert out is not None
+    assert seen["heads"] is per_staff
