@@ -4,6 +4,41 @@ Self-contained plan so any session (esp. the one on the GPU PC) can pick up and 
 without the prior machine's local memory. Newest status at the top. NO em dashes in generated
 text (project rule). Ship every code change through the gated flow (see "Constraints" below).
 
+## STATUS: L4 SELECTOR V2 -- THE REFEREE GATE PASSES (89.7% accuracy, ZERO violations, picked mean 0.702 vs fusion 0.507); the Zeus integration is UNBLOCKED (2026-06-11)
+
+The selector-v2 study (scripts omr-train/l4v2_*.py, tables l4v2_stage1.tsv / l4v2_stage2.tsv,
+corrected zeus XML in l4v2_out/) found the rule that the phase-1 families missed. Two stages:
+
+STAGE 1, GATED OCTAVE BORROW (zeus <- geom, the missing-8va repair): NW-match zeus chords to
+geom's; rewrite a zeus note's octave to geom's when the pitch class matches and the midi delta is
+EXACTLY +-12, but ONLY inside maximal same-sign runs of >= 4 consecutive shifted chords AND only
+on pieces whose pooled disagree rate <= 0.08 (an UNRESTRICTED borrow regressed 18 pieces: a true
+missing 8va is a long same-sign run in an otherwise-agreeing piece; scattered mixed-sign
+disagreement means geom itself is unreliable there). Result: reverie zeus 0.773 -> 0.837, the
+other 24 untouched pieces byte-identical, zeus-corr mean 0.6999.
+
+STAGE 2, THE REFEREE: per piece compute az_pc = mean per-measure F1 of PITCH-CLASS multisets,
+zeus(corrected) vs CLARITY (staves pooled, 1-based running measure index both sides), and af_pc =
+the same for the live fusion output vs Clarity. RULE: pick zeus(corrected + rhythm_repair) iff
+az_pc > af_pc STRICTLY (missing Clarity -> fusion). On the 30-piece set: 21 zeus picks, accuracy
+26/29 = 89.7% (gate >= 80% PASSED), ZERO never-worse violations (strict PASSED), picked mean
+0.7022 vs always-fusion 0.5067 (+0.196) and oracle 0.7151. Pitch-class (not midi) is LOAD-BEARING:
+it hides zeus's residual octave noise from the health signal so "both healthy, fusion slightly
+better" pieces (reverie -0.006, tctab -0.005) route to fusion. The wrong picks are all
+missed-gain direction (preludeemin +0.328 left on the table, nocturne, gymnopedie-no-Clarity).
+
+HONEST CAVEATS: the boundary is thin (~0.5pp margin each way; any constant in (-0.005, +0.008)
+gives the same outcome) and the constants were selected on these 30 pieces with no holdout. The
+rule defaults to fusion, so an unseen boundary piece picking zeus wrongly loses the small bounded
+class (-0.01..-0.04 observed). Stage-3 per-measure hybrid SKIPPED (residual vs oracle is 0.013,
+mostly one mispick, below the 0.03 trigger).
+
+NEXT (the L4 integration, now unblocked): cx33 serving spike (py3.11 + TF 2.12 CPU + the 27MB
+model; budget <= 3s/system, < 1.5GB RSS), then the worker integration behind OMR_SEQ2SEQ, CLEAN
+PDFs ONLY (photos remain camera-OOD NO-GO): after the fusion completes, run zeus on geom's system
+crops, apply the gated octave borrow, compute az_pc vs af_pc, pick per the rule, flag-gated
+default OFF with the full 30-piece gate + the real-4 floor before any enable.
+
 ## STATUS: L4 PHASE 1 -- Zeus crushes clean CC0 (always-zeus mean 0.698 vs fusion 0.507) but EVERY tested referee FAILED the pre-registered gate; Zeus stays INERT until a better selector exists (2026-06-11)
 
 Completed the L4 pre-integration studies. Data local: omr-train/l4_referee.tsv (30 rows),
