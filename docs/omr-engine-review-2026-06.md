@@ -10,7 +10,7 @@ Synthesis of 5 code maps, 4 research scouts, and 3 strategy proposals with adver
 
 | Dimension | State | Authoritative numbers | Mechanism / evidence |
 |---|---|---|---|
-| **Clean sparse scans** | Strong, at/near SOTA | tctab 0.995, icarus 0.990, liminality 0.946, reverie 0.881 note_f1; CC0 sparse 5/26 >= 0.85 (odetojoy 0.984, minuet 0.968, greensleeves 0.894, carolbells 0.879, gymnopedie 0.867) | Trained YOLO noteheads (saturated: 97-101% head recall in every regime) + classical decode; staff extraction by thinness + adaptive imgsz (#182), barlines (#180), ottava detector. own-engine-roadmap.md:35,57-59 |
+| **Clean sparse scans** | Strong, at/near SOTA | tctab 0.995, icarus 0.990, liminality 0.946, reverie 0.881 note_f1; CC0 sparse 5/26 >= 0.85 (odetojoy 0.984, minuet 0.968, greensleeves 0.894, carolbells 0.879, gymnopedie 0.867) | Trained YOLO noteheads (saturated: 97-101% head recall in every regime) + classical decode; staff extraction by thinness + adaptive imgsz (#182), barlines (#180), ottava detector. own-engine-roadmap.md:66,88-90 (post-insert positions; grep for content, line refs rot as entries are prepended) |
 | **Clean dense scans** | Critical weakness, largest headroom | CC0-26 mean 0.342; 20/26 pieces < 0.5; ignore-measure pitch recall 0.68-0.93 (2-3x recoverable) | Measure over-segmentation: dense chord/stem stacks clear 0.7 barline coverage and survive unless carving a < 0.5x-median measure (geom_omr.py:954-998, module comment 903-922); chord merging at fixed 1.2sp (geom_omr.py:866-900); no missing-bar repair on the clean path (geom_omr.py:1028 is photo-only). cc0_eval_expanded.log |
 | **Phone photos** | Mid; ahead of the field in measurement, walls localized | icarus 0.887, reverie 0.663 (DP ceiling 0.703; residual = entirely missed 8th staff), liminality 0.625 (94% of 0.663 ceiling), tctab 0.144 (4/22 staves, detection-bound); mean ~0.580, up from ~0.18 raw via #224/#227/#228/#229/#230/#233/#238 | All photo behavior hangs off use_dw (dewarp kept), which is why clean stays byte-identical (geom_detector.py:198-256). Wall split: reverie/liminality decode-bound (measure-number shift), tctab detection-bound. tech-lead.md:212-221 |
 | **Rhythm / durations** | Good on clean PDFs, ZERO on photos | Fusion note_dur_f1: liminality 0.946, tctab 0.940, icarus 0.949, reverie 0.865; duration_acc 0.94-1.0. Geom standalone: duration_acc 0.0 (every note duration:1, geom_omr.py:1621) | Wholly borrowed from Clarity via NW pitch-class alignment (fusion.py:124-178); single point of failure, no second source. Photos never reach Clarity (PDF-only: worker.py:1733, 1774, 1785, 1798), so photo rhythm is zero **by construction** |
@@ -19,7 +19,7 @@ Synthesis of 5 code maps, 4 research scouts, and 3 strategy proposals with adver
 | **Ties** | Borrowed, PDF-only | #232 carries Clarity ties through the borrow (metric-neutral); #235 drops ties spanning rests | Ties ride only on NW-matched chords (fusion.py:277); an alignment miss silently drops holds; zero ties on photos |
 | **Ottava** | Good with documented conservative gaps | Reverie clean 0.476 -> 0.881 (classical detector); photo mode +0.192 (reverie 0.471 -> 0.663, #233) | Dashed-rule scan with vertical-isolation gate (geom_omr.py:1209-1261); treble 8vb in the inter-staff gap never scanned, 15ma reads +1 octave, reverie m16-17 continuation deliberately skipped (caps reverie clean at 0.881) |
 | **Chords** | Good clean | chord_recall: icarus 0.964, tctab 0.942, reverie 0.882, liminality 0.758 | x-cluster anchoring at 1.2sp; dense runs merge into false chords (the dense-wall second stage) |
-| **Speed / serving** | Workable, single-box | geom ~5s/page; Clarity 19s load + 9s/system (icarus ~75-111s, tctab ~217s); first streamed partial ~28s; oemer ~180s/page; 1200s engine cap, 15-min client budget | One sequential worker on cx33 (4 vCPU / 7GB cgroup): head-of-line blocking, unauthenticated/unrate-limited upload (functions/api/omr.ts:60-90), manual SSH worker deploys. Progressive block streaming live (R2 flags: GEOM=1, GEOM_FUSION=1, PROGRESSIVE=1, PROGRESSIVE_BLOCKS=1) |
+| **Speed / serving** | Workable, single-box | geom ~5s/page; Clarity 19s load + 9s/system (icarus ~75-100s, tctab ~217s); first streamed partial ~28s; oemer ~180s/page; 1200s engine cap, 15-min client budget | One sequential worker on cx33 (4 vCPU / 7GB cgroup): head-of-line blocking, unauthenticated/unrate-limited upload (functions/api/omr.ts:60-90), manual SSH worker deploys. Progressive block streaming live (R2 flags: GEOM=1, GEOM_FUSION=1, PROGRESSIVE=1, PROGRESSIVE_BLOCKS=1) |
 
 Cross-cutting structural facts: the engine selection ladder is wins-first with **no quality comparison anywhere** (worker.py:1767-1868); ~2,630 lines of ensemble/referee machinery are doubly dead and aimed at the wrong engine pair (Clarity vs oemer); the measure grid is per-system, locally greedy, concatenated with zero global constraint (geom_omr.py:1655-1684); nearly everything binarizes at a single gray < 0.5 ink threshold (geom_omr.py:220, 644, 1111; only photo ottava uses 0.62).
 
@@ -53,7 +53,7 @@ Cross-cutting structural facts: the engine selection ladder is wins-first with *
 
 | Path | Result | Source |
 |---|---|---|
-| LLM-vision as primary engine | exact-F1 0.39, chord_recall 0, octaves systematically wrong | own-engine-roadmap.md:684 |
+| LLM-vision as primary engine | exact-F1 0.39, chord_recall 0, octaves systematically wrong | own-engine-roadmap.md:715 |
 | Audiveris swap or ties-only merge | half of oemer's note count, 0 ties at any DPI | tech-lead.md:602-622 |
 | Classical tie-arc raster detection | ~11% precision (1 TP / 8 FP) | tech-lead.md:639-644 |
 | Pitch fabrication (#113 chord completion) | metrics up, fidelity down; REVERTED; principle: never fabricate pitches | tech-lead.md:682-726 |
@@ -90,7 +90,7 @@ Ordered by impact-per-effort within each horizon. **[P]** = independent / parall
 **N2. UVDoc pretrained learned dewarp probe** [P]
 - *What:* Run UVDoc (8M params, MIT, pretrained, ~1-3s/page CPU) per page **before** stitching on the photo path; adopt only behind the existing staves-increase guard + never-worse note_f1 gate.
 - *Wall:* tctab photo geometry (0.144 vs 0.995 clean; single 2D displacement field cannot straighten a 2-page stitch, the open Unit-2).
-- *First experiment + gate:* half a day; rectified tctab pages through eval_candidate.py. Gate: tctab note_f1 strictly up AND other 4 photos never-worse. On fail, the only second life is a fine-tune on **synthetically warped renders** (known fields); real-capture warp recovery is not a thing. Treat probe-fail as probable kill (page-split prior is against).
+- *First experiment + gate:* half a day; rectified tctab pages through eval_candidate.py. Gate: tctab note_f1 strictly up AND the other 3 pieces never-worse (5 photos, 4 pieces; tctab = 2 photos). On fail, the only second life is a fine-tune on **synthetically warped renders** (known fields); real-capture warp recovery is not a thing. Treat probe-fail as probable kill (page-split prior is against).
 - *Effort:* half-day probe; days if adopted.
 
 **N3. 80-photo eval expansion (and future public benchmark)** [P]
