@@ -4,6 +4,38 @@ Self-contained plan so any session (esp. the one on the GPU PC) can pick up and 
 without the prior machine's local memory. Newest status at the top. NO em dashes in generated
 text (project rule). Ship every code change through the gated flow (see "Constraints" below).
 
+## STATUS: L4 PHASE 1 -- Zeus crushes clean CC0 (always-zeus mean 0.698 vs fusion 0.507) but EVERY tested referee FAILED the pre-registered gate; Zeus stays INERT until a better selector exists (2026-06-11)
+
+Completed the L4 pre-integration studies. Data local: omr-train/l4_referee.tsv (30 rows),
+x4/zeus_out (all 26 CC0 + the real 4 + photos), scripts l4_referee_study.py / l4_margin_sweep.py
+/ l4_count_referee.py / l4_zeus_donor.py.
+
+ZEUS REAL-4 + PHOTOS: CLEAN holds the greenlight (liminality 0.964 vs fusion 0.946, tctab 0.982
+vs 0.992, icarus -0.035, reverie -0.108; reverie's gap = the LMX vocabulary has NO ottava token,
+so Zeus emits written pitch in 8va regions; a wrapper could re-apply geom's detect_ottavas
+shift). PHOTOS NO-GO as-is: camera texture is OOD (key/meter misreads on visually clean
+flat-fielded crops; reverie hallucination 353 notes vs 190 clean); loses to the photo fusion on
+3 of 4. Photo viability needs camera-domain training data (L3), not a wrapper.
+
+30-PIECE REFEREE STUDY: always-fusion 0.5067, ALWAYS-ZEUS 0.6979, oracle 0.7155; zeus wins 22/30
+(serenade 0.935 vs 0.133, moonlight1 0.940 vs 0.266, k545 0.975 vs 0.075, flight 0.948 vs
+0.055). EVERY tested ground-truth-free selector FAILED the pre-registered gate (>= 80% accuracy
+AND strict never-worse): (a) bar-sum violation margin: best mean 0.639, dominated by always-zeus;
+persistent violators furelise -0.161 / preludecmaj -0.160 / entertainer -0.050 (zeus ALIGNMENT
+failures with ~0.94 pitch-class recall, invisible to bar sums); (b) geom-overlap: an INVERSE
+signal (low zeus-geom overlap usually means GEOM is the broken side); (c) Clarity-count agreement
+|zm-cm| <= K: max 0.655, real-4 violate at K=0 (grids AGREE there; zeus loses on pitch detail);
+(d) fuse(geom, zeus) through the shipped X2 machinery: 0.503 with floor violations to -0.24
+(where zeus blows out, geom's own pitch skeleton is the broken side: k545 fuse 0.075 vs zeus
+0.975, so a geom-anchored fusion caps the win). PER THE PRE-REGISTERED KILL CRITERION (review
+program section 5): nothing ships; zeus-olimpic stays an inert local checkpoint.
+
+NEXT SELECTOR CANDIDATES (the quantified prize: +0.21 mean over the live fusion): per-measure NW
+alignment quality between zeus and Clarity (both independent of geom), measure-LEVEL 2-of-3
+voting / per-measure hybrid assembly (zeus grid + best-source content per measure), or a
+bounded-regression shipping policy (a product decision: worst -0.16 on 3/30 vs +0.19 mean). Also
+queue the wrapper ottava re-shift and the anacrusis numbering fix before any re-gate.
+
 ## STATUS: N2 GUARDED UVDOC BUILT (OMR_UVDOC, default OFF) -- integrated gate: reverie photo 0.663 -> 0.822 adopted, others byte-equal, mean 0.580 -> 0.619; box deploy pending (2026-06-11)
 
 Implemented the GUARDED UVDoc adoption on branch feat/omr-uvdoc-guarded (the N2 probe's PASS
