@@ -501,9 +501,10 @@ def test_fuse_remaps_oversegmented_geom_into_clarity_grid():
     assert mm[2] == [76, 77]   # E5 F5 in measure 2
 
 
-def test_fuse_splits_undersegmented_geom_at_clarity_boundary():
-    # geom missed a faint real barline (one 4-note measure); Clarity's grid has the true two.
-    # Per-chord placement SPLITS geom's measure at the boundary (a per-measure vote could not).
+def test_fuse_undersegmented_geom_keeps_its_grid():
+    # UNDER-segmentation (geom 1 measure, Clarity 2) deliberately does NOT remap: that direction
+    # was measured mixed (serenade +0.08 but moonlight1 -0.10, nocturnecsharp -0.42, liminality
+    # clean -0.11 / photo -0.21), so the gate keeps geom's grid there.
     geom = _xml([
         {"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]},
                     {"duration": 1, "pitches": [{"step": "D", "octave": 5}]},
@@ -517,36 +518,44 @@ def test_fuse_splits_undersegmented_geom_at_clarity_boundary():
                     {"duration": 8, "pitches": [{"step": "F", "octave": 5}]}], "staff2": []},
     ])
     fused = fusion.fuse(geom, clarity)
-    mm = _measure_midis(fused)
-    assert len(mm) == 2
-    assert mm[1] == [72, 74] and mm[2] == [76, 77]
+    assert len(_measure_midis(fused)) == 1  # geom's single measure survives
 
 
-def test_fuse_remap_unmatched_chord_follows_its_neighbours():
-    # geom's middle note (B) is absent from Clarity: it inherits the measure of its previous
-    # matched neighbour, so every geom notehead survives the remap.
-    geom = _xml([
-        {"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []},
-        {"staff1": [{"duration": 1, "pitches": [{"step": "B", "octave": 4}]}], "staff2": []},
-        {"staff1": [{"duration": 1, "pitches": [{"step": "E", "octave": 5}]}], "staff2": []},
-    ])
-    clarity = _xml([
-        {"staff1": [{"duration": 16, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []},
-        {"staff1": [{"duration": 16, "pitches": [{"step": "E", "octave": 5}]}], "staff2": []},
-    ])
-    fused = fusion.fuse(geom, clarity)
-    mm = _measure_midis(fused)
-    assert len(mm) == 2
-    assert mm[1] == [71, 72]   # B follows C into measure 1
-    assert mm[2] == [76]
+def test_remap_measures_splits_at_clarity_boundary():
+    # The remap CAPABILITY (direct call) splits a geom measure whose chords match across a Clarity
+    # boundary: per-chord placement, which a per-measure vote could not do. The fuse-level gate
+    # decides WHEN this runs; the mechanics are locked here.
+    g_cells = {(1, 1): [(0, [("C", 0, 5)], 1, None), (1, [("D", 0, 5)], 1, None),
+                        (2, [("E", 0, 5)], 1, None), (3, [("F", 0, 5)], 1, None)]}
+    c_cells = {(1, 1): [(0, [("C", 0, 5)], 8, None), (1, [("D", 0, 5)], 8, None)],
+               (2, 1): [(0, [("E", 0, 5)], 8, None), (1, [("F", 0, 5)], 8, None)]}
+    out = fusion._remap_measures(g_cells, c_cells)
+    assert sorted(k[0] for k in out) == [1, 2]
+    assert [c[1][0][0] for c in out[(1, 1)]] == ["C", "D"]
+    assert [c[1][0][0] for c in out[(2, 1)]] == ["E", "F"]
 
 
-def test_fuse_remap_aborts_without_anchors_keeps_geom_grid():
-    # counts disagree (2 vs 1) but NO pitch class is shared anywhere: the remap has no anchor and
-    # aborts; geom's own grid is kept (today's behavior, the safe floor).
+def test_remap_measures_unmatched_chord_follows_its_neighbours():
+    # An unmatched geom chord (B, absent from Clarity) inherits the measure of its previous
+    # matched neighbour, so every geom notehead survives the remap (direct-call capability test).
+    g_cells = {(1, 1): [(0, [("C", 0, 5)], 1, None)],
+               (2, 1): [(0, [("B", 0, 4)], 1, None)],
+               (3, 1): [(0, [("E", 0, 5)], 1, None)]}
+    c_cells = {(1, 1): [(0, [("C", 0, 5)], 16, None)],
+               (2, 1): [(0, [("E", 0, 5)], 16, None)]}
+    out = fusion._remap_measures(g_cells, c_cells)
+    assert [c[1][0][0] for c in out[(1, 1)]] == ["C", "B"]
+    assert [c[1][0][0] for c in out[(2, 1)]] == ["E"]
+
+
+def test_fuse_remap_gate_blocks_without_anchors():
+    # Over-segmented by >= 2 but NO pitch class is shared anywhere: the anchor-rate gate keeps
+    # geom's own grid (a broken / partial Clarity run must never supply the measure grid; the
+    # measured cases are avemaria 0.46 and clairdelune 0.47 anchor rates).
     geom = _xml([
         {"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []},
         {"staff1": [{"duration": 1, "pitches": [{"step": "D", "octave": 5}]}], "staff2": []},
+        {"staff1": [{"duration": 1, "pitches": [{"step": "E", "octave": 5}]}], "staff2": []},
     ])
     clarity = _xml([
         {"staff1": [{"duration": 8, "pitches": [{"step": "F", "alter": 1, "octave": 4}]},
@@ -555,13 +564,14 @@ def test_fuse_remap_aborts_without_anchors_keeps_geom_grid():
     ])
     fused = fusion.fuse(geom, clarity)
     mm = _measure_midis(fused)
-    assert len(mm) == 2          # geom's grid survived
-    assert mm[1] == [72] and mm[2] == [74]
+    assert len(mm) == 3          # geom's grid survived
+    assert mm[1] == [72] and mm[2] == [74] and mm[3] == [76]
 
 
-def test_fuse_equal_measure_counts_skip_remap(monkeypatch):
-    # When the two grids AGREE on the count (clean sparse pieces) the remap is never invoked, so
-    # the agreeing case is byte-identical to the pre-X2 fusion by construction.
+def test_fuse_remap_gate_needs_two_measure_overseg(monkeypatch):
+    # gm - cm == 1 (the real-icarus shape, measured -0.12 under a remap) must NOT fire: the gate
+    # needs at least _REMAP_MIN_OVERSEG = 2, so the remap is never invoked here. The same spy
+    # also locks the equal-count case (clean sparse pieces stay byte-identical by construction).
     called = {}
 
     def spy(g, c):
@@ -569,11 +579,21 @@ def test_fuse_equal_measure_counts_skip_remap(monkeypatch):
         return {}
 
     monkeypatch.setattr(fusion, "_remap_measures", spy)
-    geom = _xml([{"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]}],
-                  "staff2": []}])
-    clarity = _xml([{"staff1": [{"duration": 16, "pitches": [{"step": "C", "octave": 5}]}],
-                     "staff2": []}])
+    geom = _xml([
+        {"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]}], "staff2": []},
+        {"staff1": [{"duration": 1, "pitches": [{"step": "D", "octave": 5}]}], "staff2": []},
+    ])
+    clarity = _xml([
+        {"staff1": [{"duration": 8, "pitches": [{"step": "C", "octave": 5}]},
+                    {"duration": 8, "pitches": [{"step": "D", "octave": 5}]}], "staff2": []},
+    ])
     fusion.fuse(geom, clarity)
+    assert "yes" not in called
+    geom_eq = _xml([{"staff1": [{"duration": 1, "pitches": [{"step": "C", "octave": 5}]}],
+                     "staff2": []}])
+    clarity_eq = _xml([{"staff1": [{"duration": 16, "pitches": [{"step": "C", "octave": 5}]}],
+                        "staff2": []}])
+    fusion.fuse(geom_eq, clarity_eq)
     assert "yes" not in called
 
 

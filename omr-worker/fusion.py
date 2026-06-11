@@ -300,6 +300,35 @@ def _measure_count(cells: Dict) -> int:
     return len({k[0] for k in cells})
 
 
+_REMAP_MIN_OVERSEG = 2   # geom must report at least this many MORE measures than Clarity for the
+#                          remap to fire. Measured (x2_signals, 2026-06-11): all 8 pieces with
+#                          gm - cm >= 2 AND a healthy anchor rate improved under the remap (mean
+#                          +0.20 note_f1, air +0.47, waltzamin +0.31); the one >=-by-1 piece
+#                          (real icarus, gm 26 vs cm 25) REGRESSED -0.12, so the margin is 2.
+_REMAP_MIN_ANCHOR = 0.55  # minimum fraction of geom chords with an NW match. A broken / partial
+#                          Clarity run anchors few chords (avemaria 0.46, clairdelune 0.47, both
+#                          would regress); every measured winner sits >= 0.598.
+
+
+def _remap_gate(g_cells: Dict, c_cells: Dict) -> bool:
+    """True when the X2 remap should fire: geom OVER-segments vs Clarity by at least
+    _REMAP_MIN_OVERSEG measures (the dense-stack failure the remap was measured to fix) AND
+    enough geom chords anchor to Clarity (_REMAP_MIN_ANCHOR) that Clarity's transcription is
+    trustworthy. The UNDER-segmentation direction (gm < cm) is deliberately OFF: measured mixed
+    (serenade +0.08 but moonlight1 -0.10, nocturnecsharp -0.42, the liminality clean -0.11 and
+    photo -0.21), so a piece where Clarity reports MORE measures keeps geom's grid until a
+    better placement exists. PURE; NEVER raises (False on any failure keeps today's path)."""
+    try:
+        if _measure_count(g_cells) - _measure_count(c_cells) < _REMAP_MIN_OVERSEG:
+            return False
+        n = sum(len(v) for v in g_cells.values())
+        if not n:
+            return False
+        return len(_borrow_from_clarity(g_cells, c_cells)) / n >= _REMAP_MIN_ANCHOR
+    except Exception:
+        return False
+
+
 def _remap_measures(g_cells: Dict, c_cells: Dict) -> Dict:
     """Regroup geom's chords into CLARITY's measure grid (X2, the measure remap). Measured
     2026-06-11 (x2_study): on clean dense scores Clarity's measure count is near-ORACLE (exact on
@@ -441,12 +470,12 @@ def fuse(geom_xml, clarity_xml) -> Optional[bytes]:
         c_cells = _chords_by_cell(clarity_xml)
         if not c_cells:
             return geom_xml
-        # X2 MEASURE REMAP, fired only when the two engines DISAGREE on the measure count, so an
-        # agreeing grid (clean sparse pieces, where geom's barlines are already right) stays
-        # byte-identical. On disagreement Clarity's grid wins (measured near-oracle on clean dense,
-        # x2_study 2026-06-11) and geom's chords are re-grouped into it; a failed remap ({} -- no
-        # anchors) keeps geom's grid, today's behavior.
-        if _measure_count(g_cells) != _measure_count(c_cells):
+        # X2 MEASURE REMAP, fired only by _remap_gate: geom over-segmented by >= 2 measures
+        # (the dense-stack failure; Clarity's count is near-oracle there, x2_study 2026-06-11)
+        # with enough NW anchors to trust Clarity's transcription. Everything else (agreeing
+        # grids, geom under-segmentation, a broken Clarity run) keeps geom's grid byte-identical;
+        # a failed remap ({} -- no anchors on a populated staff) also keeps it.
+        if _remap_gate(g_cells, c_cells):
             remapped = _remap_measures(g_cells, c_cells)
             if remapped:
                 g_cells = remapped
