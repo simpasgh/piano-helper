@@ -548,6 +548,20 @@ def test_remap_measures_unmatched_chord_follows_its_neighbours():
     assert [c[1][0][0] for c in out[(2, 1)]] == ["E"]
 
 
+def test_remap_measures_leading_unmatched_chord_inherits_next_match():
+    # A geom chord BEFORE the first NW anchor (B, absent from Clarity) has no PREVIOUS matched
+    # neighbour, so the backward pass gives it the NEXT one's measure: a leading extra notehead
+    # survives the remap at the front of its anchor's measure (direct-call capability test).
+    g_cells = {(1, 1): [(0, [("B", 0, 4)], 1, None)],
+               (2, 1): [(0, [("C", 0, 5)], 1, None)],
+               (3, 1): [(0, [("E", 0, 5)], 1, None)]}
+    c_cells = {(1, 1): [(0, [("C", 0, 5)], 16, None)],
+               (2, 1): [(0, [("E", 0, 5)], 16, None)]}
+    out = fusion._remap_measures(g_cells, c_cells)
+    assert [c[1][0][0] for c in out[(1, 1)]] == ["B", "C"]  # stream order kept: B leads its anchor
+    assert [c[1][0][0] for c in out[(2, 1)]] == ["E"]
+
+
 def test_fuse_remap_gate_blocks_without_anchors():
     # Over-segmented by >= 2 but NO pitch class is shared anywhere: the anchor-rate gate keeps
     # geom's own grid (a broken / partial Clarity run must never supply the measure grid; the
