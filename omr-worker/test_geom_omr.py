@@ -1209,7 +1209,8 @@ def _clean_multi_staff_page(width=520, n_staves=3, interline=16, top=60, gap=80)
 
 @requires_geom
 def test_clean_raster_verdict_clean_on_flat_even_page():
-    # A flat, evenly-lit multi-staff scan: staves detected raw, no deep shadow, dewarp adds nothing.
+    # A flat, evenly-lit multi-staff scan: staves detected raw, no deep shadow, dewarp adds nothing,
+    # and (condition 5) ~5 sharp full-width staff-line rows per staff so the page reads as straight.
     g = _clean_multi_staff_page()
     v = geom_omr.clean_raster_verdict(g)
     assert v["clean"] is True, v
@@ -1218,6 +1219,9 @@ def test_clean_raster_verdict_clean_on_flat_even_page():
     assert v["deep_shadow"] is False, v
     assert v["guard_min"] > 0.25, v
     assert v["dewarp_staves"] <= v["raw_staves"], v
+    # straightness (condition 5): a flat scan projects ~5 sharp lines per staff, far above the floor.
+    assert v["lines_per_staff"] >= geom_omr._CLEAN_MIN_LINES_PER_STAFF, v
+    assert v["lines_per_staff"] >= 3.0, v   # comfortable margin on the synthetic clean page
 
 
 @requires_geom
@@ -1254,6 +1258,65 @@ def test_clean_raster_verdict_photo_when_dewarp_recovers_staves():
     v = geom_omr.clean_raster_verdict(rg)
     assert v["dewarp_staves"] > v["raw_staves"], v
     assert v["clean"] is False, v
+
+
+def _tctab2_false_clean_page(width=1300, n_staves=7, interline=22, top=130, gap=95, lw=3,
+                             partial=0.46):
+    """REGRESSION FIXTURE for the tctab-2 false-clean bug (the real phone photo that conditions (1)-(4)
+    wrongly promoted: raw 7 staves, dewarp 6 -- so dewarp REDUCED the count and condition (3)'s
+    "dewarp does not ADD staves" passed). The decoupling that catches it lives in condition (5): a
+    photographed page's tilted/curved lines smear across rows so almost none project to a SHARP
+    full-width row peak, even though detect_systems still groups them into staves.
+
+    This raster reproduces that signature deterministically by exploiting the two thresholds: a row
+    flags as a staff line in detect_systems at >= 0.35*w coverage, but _strong_hline_count only counts
+    a row above 0.6 of the page's DARKEST row. So most staff lines are drawn as CONTINUOUS partial-width
+    rules (~0.46*w, above detect_systems' 0.35*w so they group into 7 staves) while two genuinely
+    FULL-WIDTH heavy bars set the darkest-row reference high, so the partial staff rules fall BELOW
+    0.6*max and are NOT counted as sharp peaks. The page is otherwise flat and evenly lit: it PASSES
+    conditions (1) staves found, (2) no deep shadow, (3) dewarp does not add staves, (4) interline 22
+    above the floor -- and is rejected ONLY by (5) (lines-per-staff well under 1.5), exactly as the
+    real tctab-2 photo is. Without condition (5) this is a false-clean (verified)."""
+    from PIL import Image, ImageDraw
+    import numpy as np
+    height = top + n_staves * (5 * interline + gap) + 130
+    im = Image.new("L", (width, int(height)), 255)
+    d = ImageDraw.Draw(im)
+    seg = int(width * partial)
+    # two full-width heavy bars (page frame / system span) set the darkest-row reference high
+    d.line([(10, 60), (width - 10, 60)], fill=0, width=6)
+    d.line([(10, height - 50), (width - 10, height - 50)], fill=0, width=6)
+    y = top
+    for _ in range(n_staves):
+        for i in range(5):
+            ly = y + i * interline
+            d.line([(60, ly), (60 + seg, ly)], fill=0, width=lw)   # partial-width staff rule
+        for hx in range(120, 60 + seg - 60, 130):
+            d.ellipse([hx - 9, y + 2 * interline - 8, hx + 9, y + 2 * interline + 8], fill=0)
+        y += 5 * interline + gap
+    return np.asarray(im, dtype=np.float32) / 255.0
+
+
+@requires_geom
+def test_clean_raster_verdict_photo_on_tctab2_false_clean_signature():
+    # REGRESSION (tctab-2 false-clean). A page with MANY detected staves but FEW sharp full-width line
+    # rows -- the photo signature where conditions (1)-(4) all pass yet the page is NOT a clean scan --
+    # must classify PHOTO via condition (5). The real tctab-2 photo had raw 7 / dewarp 6 (dewarp reduced
+    # the count, so the dewarp-does-not-add-staves guard passed) and lines-per-staff 0.43; this fixture
+    # reproduces that signature. Guard "dewarp engaged" too: the field is non-trivial on this page.
+    g = _tctab2_false_clean_page()
+    v = geom_omr.clean_raster_verdict(g)
+    # conditions (1)-(4) PASS (so only the new straightness gate can reject it):
+    assert v["raw_staves"] >= geom_omr._CLEAN_MIN_STAVES, v
+    assert v["raw_staves"] >= 5, v                       # many staves, like tctab-2's 7
+    assert v["deep_shadow"] is False, v                  # (2)
+    assert v["dewarp_staves"] <= v["raw_staves"], v      # (3): dewarp does NOT add staves (the bug path)
+    assert v["interline"] is not None and v["interline"] >= geom_omr._CLEAN_MIN_INTERLINE, v  # (4)
+    # ...but condition (5) catches it: far too few sharp full-width line rows per staff (a photo smear).
+    assert v["lines_per_staff"] < geom_omr._CLEAN_MIN_LINES_PER_STAFF, v
+    assert v["clean"] is False, v
+    # and the dewarp DID engage on this raster (non-identity), matching the real photo's dewarp path.
+    assert geom_omr.dewarp_staff_lines(g) is not g, v
 
 
 @requires_geom

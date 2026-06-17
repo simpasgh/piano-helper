@@ -139,6 +139,30 @@ THE RANKED PROGRAM (impact-per-effort; full reasoning + adversarial caveats in t
       never-worse AND a measured clean-PNG lift) happens at ENABLE, not at merge. The cheap alternative
       (just DOCUMENT "upload clean scans as PDF") was considered and the routing built instead because
       the zeus arm is the real prize.
+      ENABLE-GATE HARDENING -- **2026-06-18, follow-up correctness fix (staged, not yet merged).** The
+      box-enable safety gate (clean_raster_verdict on the 5 real photos via the worker venv) caught a
+      FALSE-CLEAN BUG: tctab-2 (a real phone photo) classified clean=True. Root cause: condition (3)
+      "dewarp does not ADD staves" only fires when the dewarp INCREASES the count; tctab-2's dewarp
+      REDUCED it (raw 7, dewarp 6), so 6<=7 passed. The "by construction" claim above was wrong --
+      offline calibration never validated the dewarp-REDUCES-count direction. The fix added CONDITION
+      (5): the raw page must be geometrically straight, measured as sharp full-width staff-line rows
+      PER detected staff (geom_omr._strong_hline_count / raw_staves >= _CLEAN_MIN_LINES_PER_STAFF=1.5).
+      Physics = the camera-OMR program's own premise: a flat scan projects ~5 sharp full-width row
+      peaks per staff; a tilted/curved photo smears each line across rows and projects almost none.
+      MEASURED (worker venv, pypdfium2 300/150 DPI rasters): all 5 real photos now PHOTO (lines-per-
+      staff 0.00-0.50, tctab-2 0.43, margin >= +1.0 below the 1.5 floor); clean CC0 PDFs stay CLEAN
+      26/26 @300dpi, 24/26 @150dpi (the 2 @150 misses fail the PRE-EXISTING resolution floor (4) at
+      interline 8-9, NOT condition (5) which passes at l/s 4.92/5.20 -- the safe direction). Clean ratio
+      across the 26-piece CC0 set is 2.30-5.56 (worst k545@150dpi=2.30), photos 0.00-0.50: a wide gap.
+      The `gray_dw is gray` (dewarp-identity) form the fix brief suggested was REJECTED: a dense clean
+      page's per-column ink nudges the field above min_shift_px, so dewarp returns a NEW array on every
+      clean CC0 PDF too (it would make the flag inert); the pixel-diff-magnitude fallback also fails
+      (clean PDFs move MORE on mean-diff than photos). Lines-per-staff is the robust separator. Regression
+      fixture _tctab2_false_clean_page (test_geom_omr.py) reproduces the signature deterministically by
+      exploiting the threshold gap (detect_systems flags a row at >=0.35*w; _strong_hline_count needs
+      >0.6*max), asserts the OLD gate would false-clean it and the NEW gate calls it PHOTO. RECOMMENDATION:
+      SHIP the hardened gate and proceed to the box-enable measure (the gate now robustly separates the
+      sets; do NOT fall back to "upload as PDF"). 695 Python / 854 Node / build green.
 
   P3  ZEUS OTTAVA WRAPPER -- **CLOSED / SUBSUMED** 2026-06-18 (local study, no prod code, no ship).
       The candidate (gated borrow + a MEASURE-LEVEL geom-detect_ottavas correction on zeus) FAILS the
