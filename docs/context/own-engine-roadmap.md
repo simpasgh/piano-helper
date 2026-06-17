@@ -108,9 +108,12 @@ THE RANKED PROGRAM (impact-per-effort; full reasoning + adversarial caveats in t
       measure granularity. [RESULT: oracle gate clears thinly (+0.060 aligned dense) but the
       realizable selector is -0.105 under floor at 46% accuracy -- KILLED.]
 
-  P2  DECOUPLE "CLEAN" FROM "PDF" IN ROUTING -- **BUILT 2026-06-18** (flag OMR_CLEAN_RASTER, default
-      OFF, flag-OFF byte-identical + tested; NOT enabled, the box never-worse-on-photos + clean-PNG
-      lift gate runs at ENABLE time, it-support). VERIFIED LEVER (against current worker.py): with N1
+  P2  DECOUPLE "CLEAN" FROM "PDF" IN ROUTING -- **LIVE 2026-06-18** (PRs #253 build + #254 gate-harden;
+      OMR_CLEAN_RASTER=1 on cx33, box 7f5b061). Box-enable gate PASSED: all 5 real photos classify PHOTO
+      (tctab-2 false-clean fixed by the lines-per-staff straightness condition (5)); canon clean-PNG E2E
+      -> "classified CLEAN raster" -> seq2seq picked zeus -> valid 20-measure MusicXML; tctab-2 photo
+      control stayed on the photo path. See infrastructure.md 2026-06-18 for deploy + rollback. Original
+      build notes follow: VERIFIED LEVER (against current worker.py): with N1
       shipped, a clean non-PDF image ALREADY reaches Clarity via the photo shim, and on a clean image
       that shim raster ~= the clean raster (dewarp no-ops, _write_clarity_pdf's normalize_illumination
       is a guarded no-op). So the dominant gap is (a) ZEUS NEVER RUNS: the referee gate keyed on
