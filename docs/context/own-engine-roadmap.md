@@ -4,6 +4,160 @@ Self-contained plan so any session (esp. the one on the GPU PC) can pick up and 
 without the prior machine's local memory. Newest status at the top. NO em dashes in generated
 text (project rule). Ship every code change through the gated flow (see "Constraints" below).
 
+## STATUS (2026-06-18): LEARNED PER-MEASURE SELECTOR KILLED/DEFERRED. A trained selector over geom/Clarity/zeus does NOT break the dense ceiling, now proven TWICE. LOO-CV on the dense subset reaches 0.716 (vs the shipped referee's 0.702) but its pick-accuracy is 0.743 (< the pre-registered 0.80 gate) and it commits 5 never-worse violations; it barely beats always-zeus-on-dense by +0.0085 (95% CI [-0.028, +0.047], straddles 0). CONCLUSION: no selector over the three current engines clears the dense ceiling. The lever is now a BETTER ENGINE (the L2 data factory + a zeus retrain on free local GPU), not smarter routing. Artifacts: C:\Users\pascu\omr-train\p1_learned_selector.py + p1_learned_vs_alwayszeus.tsv.
+
+## STATUS: POST-ZEUS CLEAN-PDF/IMAGE PROGRAM (scoping only, no code) -- ranked, gated; photo work PARKED; ceiling-raisers only since the referee is at its own oracle; P0 anacrusis SETTLED = ARTIFACT (2026-06-17); P1 per-measure assembly KILLED at the kill-gate (2026-06-18: oracle clears +0.05 thinly at +0.060 aligned-dense but the realizable selector is -0.105 under floor at 46% accuracy); P2 clean-raster routing BUILT 2026-06-18 (flag OMR_CLEAN_RASTER, default OFF, flag-OFF byte-identical, box never-worse+lift gate at ENABLE). Cheap lever left = P3 (zeus ottava, small)
+
+SCOPE DECISION (user, this session): photo robustness is OUT. KEEP what shipped (UVDoc guarded,
+dewarp, illum, photo-Clarity shim, the photo gate) but invest NOTHING further. Parked: L1 (tctab
+geometry), L3 (photo data), N3 (photo-eval expansion), any UVDoc/dewarp/illum tuning. SINGLE GOAL:
+best engine for a CLEAN PDF or a CLEAN image (a flat well-lit scan exported PNG/JPEG counts).
+
+WHERE WE STAND (verified against code this session): Zeus seq2seq is LIVE (PRs #250+#251,
+OMR_SEQ2SEQ=1, agreement referee), dense-clean fusion picked-mean ~0.51 -> ~0.70. Sparse clean is
+near SOTA (tctab 0.995, icarus 0.990, liminality 0.946, reverie 0.881) = little headroom. On the
+30-piece CC0 set the referee is near its OWN ceiling: picked mean 0.702 vs per-piece oracle 0.715
+(residual 0.013). So a smarter WHOLE-PIECE selector is dead; gains must RAISE THE CEILING.
+
+THE RANKED PROGRAM (impact-per-effort; full reasoning + adversarial caveats in tech-lead.md
+2026-06-17 entry):
+
+  P0  ANACRUSIS DIAGNOSTIC -- DONE 2026-06-17 (local, no ship, no code): CLASSIFIED **ARTIFACT**.
+      Evidence (throwaway scorer over the cached x2_out geom+Clarity, l4v2_out zeus_corr, cc0_scores
+      truth; arms = the shipped repair(fuse) / repair(zeus_corr)):
+        - NUMBERING (sub-q1): truth files DO carry the pickup as <measure number="0" implicit="yes">;
+          every engine numbers it 1. zeus emits BARE <measure> (no number attr) so reconcile's
+          running-1-based fallback makes the pickup 1 (the LIVE worker seq2seq.delinearize:104 then
+          stamps sequential 1..N explicitly); geom emits number="1.."; Clarity emits implicit="no"
+          number="1..". So the whole grid is uniformly off-by-one for the entire piece.
+        - GAP CLOSES (sub-q2), measure-keyed f1 -> shift-1 / onset-aligned (DP content-align) f1:
+            maple    zeus 0.408 -> 0.972 / 0.972 (pc_recall 0.989);  fusion 0.348 -> 0.696 / 0.697
+            furelise zeus 0.260 -> 0.655 / 0.886;                    fusion 0.419 -> 0.428 / 0.578
+            nocturne zeus 0.394 -> 0.840 / 0.845;                    fusion 0.348 -> 0.577 / 0.682
+          best global shift is k=-1 on ALL 6 arm/piece (matches shift-1 exactly) = a pure uniform
+          offset, not scattered misalignment. The maple 0.41->0.98 headroom is ENTIRELY the off-by-one.
+          (furelise zeus's residual shift-1 0.655 vs aligned 0.886 is a SEPARATE internal zeus
+          grid scramble: zeus emits 108 measures vs truth 106 -- the referee already routes furelise
+          to fusion; it is NOT the pickup.)
+        - NO RENDER DEFECT (sub-q3): measure COUNT matches truth on the count-correct arms (maple all
+          85; nocturne/furelise fusion 106/106 wait -> furelise fusion 106==truth, nocturne fusion 39
+          vs 38 is a separate +1, not the pickup). The first measure holds EXACTLY the pickup notes
+          (maple midis 39,51 == truth; furelise 75,76; nocturne single 70), and the pickup renders as
+          a SHORT bar (~0.5 beat: maple 2/4-ticks, nocturne 24/48=0.5, zeus furelise 168/336=0.5) NOT
+          a full bar padded with a leading rest -- so no downbeat/barline shift. The off-by-one is the
+          printed bar-NUMBER only.
+      WHY LIVE APP UNAFFECTED: src/score.ts derives both note onsets and the cursor stepTimes from
+      OSMD's currentTimeStamp.RealValue * wholeNoteSeconds (cumulative note lengths), NOT the
+      <measure number> label; the sync invariant holds. The label changes only the cosmetic OSMD
+      bar number. A -1 renumber would WORSEN real numbering and is NOT worth shipping.
+      ACTION: the maple/nocturne/furelise pickup headroom is DELETED from the program -- do NOT
+      double-count it under P1 or the per-piece oracle. The oracle/referee numbers already reflect
+      the off-by-one (both arms scored the same measure-keyed scorer), so the +0.013 referee residual
+      and the dense picked-mean stand as measured; P1's "raise the ceiling" budget must come from
+      genuine content gains, not from anacrusis relabeling. No code change.
+
+  P1  PER-MEASURE 2-of-3 ASSEMBLY across geom/Clarity/zeus -- KILL-GATE RUN 2026-06-18: **KILL**
+      (local offline study, no prod code, no ship). The pre-registered ORACLE numeric test PASSES
+      thinly but the gate's own kill rationale FIRES, so do NOT start the 1-2 week build.
+      Study scripts (omr-train, gitignored, no PR): p1_permeasure_oracle.py + p1_aligned_control.py.
+      Set = the same 30 (26 CC0 + real-4); engines = geom (x2_out geom-*.xml), Clarity
+      (x2_out *.clarity.musicxml), zeus_corr (l4v2_out *.zeus_corr.musicxml); truth cc0_scores +
+      truth/. Each engine grid aligned to truth by its own best global shift k in -3..3
+      (score_zeus_real.shift_measures/best_shift) to NEUTRALIZE the P0 anacrusis off-by-one on
+      BOTH sides. Per-measure oracle = per truth measure pick the engine with the best EXACT-MIDI
+      by-(measure,staff) F1 (the headline metric's own key, NOT pitch-class -- a PC oracle made
+      the assembled output LOSE on carolbells/k545 because PC folds octaves); assemble + score
+      end-to-end via omr_eval.score_transcription. Empty truth measures skipped (referee rule).
+        - ORACLE vs ALIGNED whole-piece oracle, DENSE (fus<0.85, n=20): **+0.0603** (oracle 0.806
+          vs aligned floor 0.745), robust +0.060..+0.067 across dense cutoffs (fus<0.5/0.7/0.85).
+          So the LITERAL +0.05 oracle gate CLEARS, by a thin +0.010. Full-set +0.044; sparse +0.011.
+        - BUT vs the UNALIGNED 0.715-shape oracle the dense delta is +0.180 -- almost ALL of that
+          is the P0 anacrusis the program already deleted (maple +0.574 unaligned -> +0.010 aligned,
+          nocturne +0.457 -> +0.011, turkishmarch +0.537 -> +0.052). Reporting the unaligned number
+          would double-count the artifact; the +0.0603 aligned figure is the honest one.
+        - The gain IS genuine cross-engine complementarity (the prize): on driver pieces different
+          engines win different measures with real mass (twinkle 111/325 measures beat the
+          whole-piece-best engine, mass 63; arabesque 38/107; clairdelune 34/72; preludecmaj 24/34).
+        - DISPOSITIVE / why KILL: a GROUND-TRUTH-FREE corroboration selector (the program's literal
+          2-of-3 / best-corroborated PC-agreement, the ONLY available signal) does not merely miss
+          the oracle, it REGRESSES the dense set to 0.640 = **-0.105 BELOW the aligned floor** at
+          **45.6% per-measure pick accuracy** (vs the required >=80%). It collapses exactly the
+          pieces where zeus is the lone good reader (k545 -0.380, flight -0.350, moonlight1 -0.318,
+          serenade -0.269, toccata -0.296): there geom+Clarity AGREE with each other and are both
+          WRONG, so corroboration picks the corroborated-bad engine. Agreement is anti-correlated
+          with correctness on the dense wall -- the SAME structural wall the whole-piece referee
+          study hit (every ground-truth-free referee failed). The oracle's +0.010 margin over the
+          bar is far smaller than the -0.105 the realizable selector gives back, so per-measure
+          assembly CANNOT PAY with the available signal. This is precisely the gate's kill clause.
+      WHAT REMAINS: nothing cheap. The +0.060 oracle is real but unreachable without per-measure
+      ground truth, which we do not have at inference; a learned per-measure selector would need a
+      training signal that beats agreement (a different, GPU-scale project, not a 1-2 week fusion
+      build). P3 (zeus ottava wrapper, small) stays as the only remaining cheap lever; P2 (clean-
+      raster routing) is orthogonal (a routing/coverage win, not a per-measure-accuracy win).
+
+  P1-OLD  [superseded by the 2026-06-18 KILL above] PER-MEASURE 2-of-3 ASSEMBLY (1-2 weeks; was
+      framed as the ONLY path above the 0.715 whole-piece oracle). Build a per-measure hybrid in
+      seq2seq+fusion: align the three on Clarity's near-oracle dense grid (X2 machinery + zeus's
+      grid), pick per measure by pitch-class agreement (2-of-3 vote / best-corroborated source).
+      Pre-registered gate: a LOCAL offline per-measure oracle study FIRST (no prod code) -- if the
+      per-measure oracle does not clear the whole-piece oracle by >= +0.05 mean on dense CC0, KILL
+      (the +0.013 referee residual says assembly only pays if per-measure beats whole-piece
+      materially). Then a ground-truth-free per-measure selector gated like selector-v2 (>= 80%
+      per-measure pick accuracy AND strict per-piece never-worse on CC0-26 + the real-4). Risk:
+      thin per-measure signal, alignment noise at measure boundaries, never-worse harder at
+      measure granularity. [RESULT: oracle gate clears thinly (+0.060 aligned dense) but the
+      realizable selector is -0.105 under floor at 46% accuracy -- KILLED.]
+
+  P2  DECOUPLE "CLEAN" FROM "PDF" IN ROUTING -- **BUILT 2026-06-18** (flag OMR_CLEAN_RASTER, default
+      OFF, flag-OFF byte-identical + tested; NOT enabled, the box never-worse-on-photos + clean-PNG
+      lift gate runs at ENABLE time, it-support). VERIFIED LEVER (against current worker.py): with N1
+      shipped, a clean non-PDF image ALREADY reaches Clarity via the photo shim, and on a clean image
+      that shim raster ~= the clean raster (dewarp no-ops, _write_clarity_pdf's normalize_illumination
+      is a guarded no-op). So the dominant gap is (a) ZEUS NEVER RUNS: the referee gate keyed on
+      is_pdf_input, so even with OMR_SEQ2SEQ on a clean PNG got no zeus arm (the X4-proven dense
+      ~0.51->~0.70 lift on clean scans). Secondary (b): Clarity got the shim raster, not a clean wrap.
+      BUILD: geom_omr.clean_raster_verdict (HIGH-PRECISION classical gate: staves detected raw, NO deep
+      broad shadow via _illum_has_deep_shadow's guard.min()<0.25, and the dewarp recovers no extra
+      staves = the SAME calibrated signals the shipped photo path uses). worker computes
+      pdf_quality = is_pdf_input or (clean_raster_enabled() and is_clean_raster(...)) and gates the
+      Clarity-fusion branch + the zeus referee on THAT (geom keeps consuming the ORIGINAL raster). On a
+      clean verdict Clarity reads _write_clean_clarity_pdf(original raster) -- NO dewarp, NO flat-field
+      -- run concurrently with geom (the wrap does not depend on geom's decode). Flag OFF => the branch
+      is unreachable, structurally byte-identical (tested). Photos (classified photo) stay on exactly
+      today's path (tested). CALIBRATION (synthetic rasters, CPU, no Clarity; the real 5-photo/clean-4
+      check is a LOCAL/box gate at enable): clean flat page guard_min 1.0 (>>0.25), dewarp_staves ==
+      raw_staves (no recovery) -> CLEAN; deep-shadow page guard_min 0.18 (<0.25, ~0.07 margin, matches
+      the real reverie 0.18) -> PHOTO; tilted page raw_staves 0 / dewarp recovers 3 -> PHOTO; blank
+      0 staves -> PHOTO. The thresholds are the photo path's own calibrated values, so the 5 real
+      photos (reverie deep shadow; icarus/tctab/liminality dewarp-recovery) classify PHOTO and the
+      clean-4 + synthetic-val rasters classify CLEAN by construction. Files: geom_omr.py
+      (clean_raster_verdict), worker.py (clean_raster_enabled/is_clean_raster/_write_clean_clarity_pdf
+      + the pdf_quality routing), flag_config.py + flags-server.ts (same position) + admin-flags.ts
+      (tier 9, requires geom+fusion). Tests: +5 classifier calibration (test_geom_omr.py), +8 routing/
+      plumbing (test_worker.py), +1 admin cascade (admin-flags.test.ts). 693 Python / 854 Node /
+      build green. NEVER-WORSE: flag-OFF byte-identical is structural + tested; the box gate (photos
+      never-worse AND a measured clean-PNG lift) happens at ENABLE, not at merge. The cheap alternative
+      (just DOCUMENT "upload clean scans as PDF") was considered and the routing built instead because
+      the zeus arm is the real prize.
+
+  P3  ZEUS OTTAVA WRAPPER (2-3 days; cheap, marginal). Zeus LMX has no ottava token, so it emits
+      written pitch in 8va regions (reverie zeus 0.748 vs fusion 0.881). The stage-1 gated octave
+      BORROW from geom already repairs this WHEN geom is a trustworthy anchor (reverie 0.773->0.837
+      inside the gate); a direct re-apply of geom_omr.detect_ottavas to zeus output is an
+      ALTERNATIVE octave source. Gate: never-worse on the 30-piece set + real-4; ship only if it
+      beats the existing gated borrow on >= 1 piece with zero regressions. Likely small (the borrow
+      already captures most of reverie's 8va), so this is a fast-follow, not a priority.
+
+SUPERSEDED / DEMOTED by Zeus going live:
+  - X3 trained barline detector: LARGELY SUPERSEDED. Zeus emits a near-oracle dense grid as tokens
+    (canon 0.999 raw), which is exactly what X3's oracle-swap aimed to inject. Keep only as a
+    contingency if P1 assembly is blocked by grid disagreement; do not spend GPU nights on it now.
+  - A smarter WHOLE-PIECE selector / margin-sweep referee work: DEAD (referee at its oracle, +0.013).
+  - Chord-merge adaptive threshold (1.2->1.4 sp): confirmed N5 "free insurance, not a recovery
+    lever" (0 merged truth onsets on dense; max within-chord spread == 1.20 sp). Not a ceiling-raiser.
+  - The fusion measure-number "discard": NOT a live bug -- X2's _remap_measures already re-grids
+    geom into Clarity's near-oracle grid where it helps; zeus supplies its own grid. No action.
+
 ## STATUS: L4 ZEUS INTEGRATION BUILT (OMR_SEQ2SEQ, default OFF, clean PDFs only) -- integrated gate 7/7 picks MATCH the study, fusion floor structural (2026-06-11)
 
 Built the third engine path on branch feat/omr-seq2seq: after the whole-file geom+Clarity
