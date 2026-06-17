@@ -15,7 +15,7 @@ export type FlagState = Record<FlagKey, boolean>;
 export interface FlagMeta {
   key: FlagKey;
   label: string;
-  // 1-based rank within the whole list, primitive (1) -> advanced (11); drives display order.
+  // 1-based rank within the whole list, primitive (1) -> advanced (12); drives display order.
   tier: number;
   section: FlagSection;
   // Direct prerequisites: this flag is meaningless unless these are also on.
@@ -122,9 +122,20 @@ export const FLAG_METADATA: readonly FlagMeta[] = [
     algorithm: "Geom's staff detection crops each grand-staff system; the zeus-olimpic CRNN reads them to LMX; a gated octave borrow from geom repairs missing-8va regions; per-measure pitch-class agreement vs Clarity referees Zeus against the fusion. Needs geom + fusion.",
   },
   {
+    key: "OMR_CLEAN_RASTER",
+    label: "Clean image uploads: PDF-quality pipeline",
+    tier: 9,
+    section: "engine",
+    requires: ["OMR_GEOM", "OMR_GEOM_FUSION"],
+    summary: "Route a CLEAN non-PDF image (a flat well-lit scan exported as PNG/JPEG) through the PDF-quality pipeline instead of the photo path.",
+    accuracy: "Clean PNG/JPEG uploads gain the concurrent Clarity fusion on a clean raster wrap and, with the Zeus referee on, its dense-score lift (picked mean 0.702 vs always-fusion 0.507 on the study). A high-precision classical gate (staves detected, no deep shadow, lines already straight) decides clean; any photo verdict keeps today's photo path untouched.",
+    latency: "One classical staff-detection pass per non-PDF upload (photos included) to classify clean vs photo, in process. A promoted clean image then runs Clarity (and, if on, Zeus) like a PDF, so it gains their time but also their accuracy; a photo verdict adds only that one gate pass and stays on today's path.",
+    algorithm: "Classical cleanliness gate on the raw raster; a clean verdict wraps the original raster (no dewarp, no flat-field) as a PDF for Clarity and lets the Zeus referee run. Needs geom + fusion; the Zeus arm also needs the seq2seq referee.",
+  },
+  {
     key: "OMR_PROGRESSIVE",
     label: "Progressive: fast-then-refine",
-    tier: 9,
+    tier: 10,
     section: "delivery",
     requires: [],
     recommended: true,
@@ -136,7 +147,7 @@ export const FLAG_METADATA: readonly FlagMeta[] = [
   {
     key: "OMR_PROGRESSIVE_PAGES",
     label: "Progressive: per-page streaming",
-    tier: 10,
+    tier: 11,
     section: "delivery",
     requires: ["OMR_PROGRESSIVE"],
     summary: "Stream a multi-page PDF page by page (measure 1 shows while measure 20 is still computing).",
@@ -147,7 +158,7 @@ export const FLAG_METADATA: readonly FlagMeta[] = [
   {
     key: "OMR_PROGRESSIVE_BLOCKS",
     label: "Progressive: block-by-block (per system)",
-    tier: 11,
+    tier: 12,
     section: "delivery",
     requires: ["OMR_PROGRESSIVE", "OMR_GEOM_FUSION"],
     summary: "Stream REAL rhythm one staff system at a time, with no pitch-only placeholder.",

@@ -1174,3 +1174,136 @@ def test_detect_barlines_photo_path_skips_head_veto():
     with_heads = geom_omr.detect_barlines(gray, staves, photo=True, heads=heads)
     without = geom_omr.detect_barlines(gray, staves, photo=True)
     assert with_heads == without  # heads change NOTHING on the photo path
+
+
+# --- CLEAN-RASTER GATE (P2, OMR_CLEAN_RASTER): geom_omr.clean_raster_verdict --------------------
+# The classifier that decouples "clean" from "PDF" in the worker routing. It must be HIGH-PRECISION
+# for the "clean" verdict (a false-clean photo would drop the photo adaptations AND run zeus on a
+# camera-OOD crop), so each condition is the photo-detecting side of an existing classical decision:
+# staves detected raw, NO deep broad shadow, and the dewarp recovers no extra staves. These synthetic
+# rasters exercise each condition; the REAL 5-photo / clean-4 calibration is a LOCAL/box check on the
+# rasters in C:/Users/pascu/omr-train/ (CPU signals, no Clarity), reported separately.
+
+
+def _clean_multi_staff_page(width=520, n_staves=3, interline=16, top=60, gap=80):
+    """A CLEAN page: several horizontal grand-staff lines on uniformly white paper. Lines are
+    straight (so the dewarp is a no-op and adds no staves) and the paper is even (no deep shadow),
+    so clean_raster_verdict should return clean."""
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    height = top + n_staves * (5 * interline + gap) + 60
+    im = Image.new("L", (width, int(height)), 255)
+    d = ImageDraw.Draw(im)
+    y = top
+    for _ in range(n_staves):
+        for i in range(5):
+            ly = y + i * interline
+            d.line([(20, ly), (width - 20, ly)], fill=0, width=2)
+        # a couple of noteheads per staff so it looks like real music, not a barcode
+        for hx in (140, 260, 380):
+            d.ellipse([hx - 9, y + 2 * interline - 8, hx + 9, y + 2 * interline + 8], fill=0)
+        y += 5 * interline + gap
+    return np.asarray(im, dtype=np.float32) / 255.0
+
+
+@requires_geom
+def test_clean_raster_verdict_clean_on_flat_even_page():
+    # A flat, evenly-lit multi-staff scan: staves detected raw, no deep shadow, dewarp adds nothing.
+    g = _clean_multi_staff_page()
+    v = geom_omr.clean_raster_verdict(g)
+    assert v["clean"] is True, v
+    # margins: staves found, no deep shadow (guard.min well above the 0.25 threshold), dewarp <= raw.
+    assert v["raw_staves"] >= 2, v
+    assert v["deep_shadow"] is False, v
+    assert v["guard_min"] > 0.25, v
+    assert v["dewarp_staves"] <= v["raw_staves"], v
+
+
+@requires_geom
+def test_clean_raster_verdict_photo_on_deep_shadow():
+    # A page under a DEEP broad cast shadow (the photo cue _illum_has_deep_shadow keys on) must be
+    # classified PHOTO, so the promotion keeps today's flat-field photo path.
+    import numpy as np
+    g = _clean_multi_staff_page()
+    band = np.ones(g.shape[0], dtype=np.float32)
+    band[g.shape[0] // 2:] = 0.18                 # deep broad shadow over the lower half
+    shadowed = np.clip(g * band[:, None], 0.0, 1.0)
+    v = geom_omr.clean_raster_verdict(shadowed)
+    assert v["deep_shadow"] is True, v
+    assert v["guard_min"] < 0.25, v               # the dilated paper field dipped below the threshold
+    assert v["clean"] is False, v
+
+
+@requires_geom
+def test_clean_raster_verdict_photo_when_dewarp_recovers_staves():
+    # A TILTED page whose staff lines smear across rows so raw detection loses staves the dewarp then
+    # recovers (dewarp_staves > raw_staves) must be PHOTO: the never-worse-on-clean guard's own
+    # signal (the dewarp adds staves only on a warped page) keeps it on the photo path.
+    import numpy as np
+    from PIL import Image
+    g = _clean_multi_staff_page()
+    im = Image.fromarray((np.clip(g, 0, 1) * 255).astype(np.uint8), mode="L")
+    rotated = im.rotate(4.0, resample=Image.BILINEAR, fillcolor=255)  # a few degrees of tilt
+    rg = np.asarray(rotated, dtype=np.float32) / 255.0
+    raw = len(geom_omr.detect_systems(rg))
+    dw = geom_omr.dewarp_staff_lines(rg)
+    dw_n = raw if dw is rg else len(geom_omr.detect_systems(dw))
+    if dw_n <= raw:
+        pytest.skip("synthetic tilt did not trip the dewarp-recovers-staves signal on this build")
+    v = geom_omr.clean_raster_verdict(rg)
+    assert v["dewarp_staves"] > v["raw_staves"], v
+    assert v["clean"] is False, v
+
+
+@requires_geom
+def test_clean_raster_verdict_photo_on_tiny_low_resolution_screenshot():
+    # A clean-but-TINY screenshot can pass the geometric gate (staves detected raw, no deep shadow,
+    # dewarp adds none) yet rasterize to a few-pixel interline that degrades Clarity, so the
+    # resolution floor (condition 4) must reject it. Calibrated so this stays PHOTO while the clean
+    # multi-staff page (interline 16) stays CLEAN.
+    import numpy as np
+    from PIL import Image, ImageDraw
+    width, n_staves, interline, top, gap = 1100, 2, 6, 10, 20   # interline 6 px = below the floor
+    height = top + n_staves * (5 * interline + gap) + 10
+    im = Image.new("L", (width, int(height)), 255)
+    d = ImageDraw.Draw(im)
+    y = top
+    for _ in range(n_staves):
+        for i in range(5):
+            ly = y + i * interline
+            d.line([(8, ly), (width - 8, ly)], fill=0, width=1)
+        for hx in range(40, width - 40, 90):
+            d.ellipse([hx - 3, y + 2 * interline - 3, hx + 3, y + 2 * interline + 3], fill=0)
+        y += 5 * interline + gap
+    g = np.asarray(im, dtype=np.float32) / 255.0
+    v = geom_omr.clean_raster_verdict(g)
+    # it DID pass the geometric conditions (so only the resolution floor can reject it)...
+    assert v["raw_staves"] >= geom_omr._CLEAN_MIN_STAVES, v
+    assert v["deep_shadow"] is False, v
+    assert v["dewarp_staves"] <= v["raw_staves"], v
+    # ...but its estimated interline is below the floor, so it is PHOTO.
+    assert v["interline"] is not None and v["interline"] < geom_omr._CLEAN_MIN_INTERLINE, v
+    assert v["clean"] is False, v
+
+
+@requires_geom
+def test_clean_raster_verdict_photo_on_blank_page():
+    # A blank / staff-less raster has no staves detected raw, so it is never promoted (a non-music
+    # upload must not be routed to the heavyweight pipeline).
+    import numpy as np
+    g = np.ones((300, 300), dtype=np.float32)
+    v = geom_omr.clean_raster_verdict(g)
+    assert v["raw_staves"] == 0, v
+    assert v["clean"] is False, v
+
+
+def test_clean_raster_verdict_never_raises_on_garbage():
+    # robustness contract: None / a degenerate array decline cleanly (clean=False), no raise.
+    v = geom_omr.clean_raster_verdict(None)
+    assert v["clean"] is False
+    assert v["available"] == geom_omr.GEOM_AVAILABLE
+    if geom_omr.GEOM_AVAILABLE:
+        import numpy as np
+        v2 = geom_omr.clean_raster_verdict(np.zeros((0, 0), dtype=np.float32))
+        assert v2["clean"] is False

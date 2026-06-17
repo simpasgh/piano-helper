@@ -296,7 +296,12 @@ def normalize_illumination(gray, grid: int = 48, floor: float = 0.25, even_thres
         return gray
 
 
-def _illum_has_deep_shadow(gray, grid: int = 48, thresh: float = 0.25) -> bool:
+# Deep-broad-shadow threshold: guard.min() below this trips the cue. Single-sourced here so the
+# clean-raster verdict applies the SAME threshold to its already-computed guard without a second call.
+_ILLUM_DEEP_SHADOW_THRESH = 0.25
+
+
+def _illum_has_deep_shadow(gray, grid: int = 48, thresh: float = _ILLUM_DEEP_SHADOW_THRESH) -> bool:
     """True when the page carries a DEEP, BROAD shadow: a region dark enough that even the 5-cell
     max-dilated paper estimate (see _illum_paper_guard) dips below `thresh`. This is the cue, on the
     DEWARP (warped-photo) path ONLY, to KEEP the flat-field (normalize_illumination): such a shadow
@@ -319,6 +324,107 @@ def _illum_has_deep_shadow(gray, grid: int = 48, thresh: float = 0.25) -> bool:
         return bool(float(guard.min()) < float(thresh))
     except Exception:
         return False
+
+
+# CLEAN-RASTER GATE (P2, OMR_CLEAN_RASTER). A flat, well-lit scan exported as PNG/JPEG should take
+# the PDF-quality pipeline (concurrent Clarity on a clean wrap + the zeus referee), but is_pdf_input
+# is a pure container check, so today such an image is routed "photo": zeus is gated out and Clarity
+# only via the dewarp+flat-field shim. This classifier decides whether a NON-PDF raster is clean
+# enough to promote, reusing the SAME classical signals the photo adaptations are built on.
+#
+# HIGH-PRECISION for the "clean" verdict: a false-clean (a photo misrouted as clean) is the
+# dangerous direction because it drops the photo adaptations AND would run zeus on a camera-OOD crop.
+# So every condition must hold, and each is the photo-detecting side of an existing decision:
+#   (1) staves are detected on the RAW raster (>= _CLEAN_MIN_STAVES). The count is taken with
+#       normalize_illum=False, i.e. on the raw raster matching NO flat-field, so a mildly-gradient
+#       photo cannot be silently flat-fielded into passing this condition (the dangerous false-clean
+#       direction). A clean scan's horizontal lines are fully detected on the raw raster anyway (the
+#       flat-field is a guarded no-op on an even page), a blank/garbage image or a badly warped photo
+#       finds none, and this is strictly MORE conservative than the default.
+#   (2) NO deep broad shadow (guard.min() >= the _illum_has_deep_shadow threshold): the SAME cue the
+#       dewarp path uses to KEEP the flat-field. A cast shadow / dim corner trips it -> photo. The
+#       guard is the already-computed paper field, so the block-max/maximum_filter runs ONCE here.
+#   (3) the dewarp does NOT recover extra staves (dewarp staves <= raw staves, both counted with
+#       normalize_illum=False on the raw raster): this is the AUTHORITATIVE never-worse-on-clean guard
+#       from transcribe_with_detector. A clean page's lines are already straight so dewarping cannot
+#       add staves; a tilted/curved photo's count jumps.
+#   (4) enough RESOLUTION for Clarity (estimated interline >= _CLEAN_MIN_INTERLINE, or, when the
+#       interline cannot be estimated, raster min-dimension >= _CLEAN_MIN_DIM): a clean-but-tiny
+#       screenshot can pass (1)-(3) yet rasterize to a few-pixel interline that degrades Clarity, so a
+#       low resolution floor rejects it. Calibrated so every clean calibration raster stays clean:
+#       the synthetic clean test page estimates interline 16 and the dense CC0 clean rasters 24-26, so
+#       a floor of 10 clears them by >= 6 while rejecting a tiny screenshot (interline ~4-8). See the
+#       module test calibration note.
+_CLEAN_MIN_STAVES = 1
+# Resolution floor for condition (4). 10 keeps the synthetic clean page (interline 16, margin +6) and
+# the dense CC0 clean rasters (interline 24-26, margin >= +14) CLEAN while rejecting a few-pixel-
+# interline screenshot. Conservative-low on purpose: a real 300-DPI scan has interline ~20-30, so
+# production clean scans clear it comfortably. The remaining gap between 10 and 16 is a residual to
+# re-verify at the box-enable gate on the real clean-4 + val rasters.
+_CLEAN_MIN_INTERLINE = 10.0
+# Fallback floor used ONLY when the interline cannot be estimated (estimator returned None): the raw
+# raster's min dimension. The clean calibration rasters have min-dim 520 (synthetic) to 2975 (dense),
+# so 400 only rejects a pathologically tiny raster and never the clean set.
+_CLEAN_MIN_DIM = 400
+
+
+def clean_raster_verdict(image_path_or_gray) -> dict:
+    """Classify a raster as clean (a flat well-lit scan) vs photo, with the per-signal margins so a
+    caller (and the calibration test) can inspect WHY. Returns a dict:
+        {"clean": bool, "raw_staves": int, "dewarp_staves": int, "guard_min": float,
+         "deep_shadow": bool, "interline": Optional[float], "min_dim": int, "available": bool}
+    "clean" is True ONLY when ALL high-precision conditions hold (see the module note above). On any
+    failure / unavailable geom stack it returns clean=False (decline = stay on today's photo path).
+    NEVER raises."""
+    out = {"clean": False, "raw_staves": 0, "dewarp_staves": 0, "guard_min": 0.0,
+           "deep_shadow": True, "interline": None, "min_dim": 0, "available": GEOM_AVAILABLE}
+    if not GEOM_AVAILABLE:
+        return out
+    try:
+        gray = _to_gray(image_path_or_gray)
+        if gray is None or gray.ndim != 2 or gray.size == 0:
+            return out
+        out["min_dim"] = int(min(gray.shape))
+        # (1) raw staves, counted on the TRULY raw raster (normalize_illum=False, matching no
+        # flat-field) so a mildly-gradient photo cannot be flat-fielded into passing condition (1).
+        staves_raw = detect_systems(gray, normalize_illum=False)
+        out["raw_staves"] = len(staves_raw)
+        # (2) deep broad shadow cue, derived from the SINGLE paper-field computed here (block-max +
+        # maximum_filter runs once): guard.min() < the _illum_has_deep_shadow threshold is the cue.
+        _block, guard = _illum_paper_guard(gray)
+        if guard is not None:
+            try:
+                out["guard_min"] = float(guard.min())
+                out["deep_shadow"] = bool(out["guard_min"] < _ILLUM_DEEP_SHADOW_THRESH)
+            except Exception:
+                out["guard_min"] = 0.0
+                out["deep_shadow"] = True
+        else:
+            # degenerate paper field: match _illum_has_deep_shadow, which returns False here.
+            out["deep_shadow"] = False
+        # (3) does the dewarp recover extra staves? (it adds none on an already-straight page). Both
+        # counts are on the raw raster (normalize_illum=False) so the comparison is like-for-like.
+        gray_dw = dewarp_staff_lines(gray)
+        staves_dw = staves_raw if gray_dw is gray else detect_systems(gray_dw, normalize_illum=False)
+        out["dewarp_staves"] = len(staves_dw)
+        # (4) resolution floor: estimated interline >= _CLEAN_MIN_INTERLINE, or, when the interline
+        # cannot be estimated, min-dimension >= _CLEAN_MIN_DIM. Keeps Clarity off few-pixel rasters.
+        interline = _estimate_interline_from_profile(_row_ink(gray))
+        out["interline"] = interline
+        if interline is not None:
+            resolution_ok = float(interline) >= _CLEAN_MIN_INTERLINE
+        else:
+            resolution_ok = out["min_dim"] >= _CLEAN_MIN_DIM
+        out["clean"] = bool(
+            out["raw_staves"] >= _CLEAN_MIN_STAVES
+            and not out["deep_shadow"]
+            and out["dewarp_staves"] <= out["raw_staves"]
+            and resolution_ok
+        )
+        return out
+    except Exception:
+        out["clean"] = False
+        return out
 
 
 def _estimate_interline_from_profile(prof1d) -> Optional[float]:

@@ -262,6 +262,69 @@ def seq2seq_enabled():
     return raw.strip().lower() in ("1", "true")
 
 
+# CLEAN-RASTER ROUTING (OMR_CLEAN_RASTER, default OFF; non-PDF uploads only). is_pdf_input is a
+# pure CONTAINER check, so a CLEAN image uploaded as PNG/JPEG (a flat well-lit scan exported from a
+# phone or a screenshot) is routed "photo": the zeus referee is gated out (PDF only) and Clarity is
+# reached only via the dewarp+flat-field photo shim. With this flag on, a cheap classical
+# cleanliness gate (geom_omr.clean_raster_verdict: staves detected raw, NO deep broad shadow, and
+# the dewarp recovers no extra staves) promotes a clean non-PDF upload to the PDF-quality pipeline:
+# Clarity reads a CLEAN wrap of the original raster (no dewarp, no flat-field) and the zeus referee
+# runs. The gate is HIGH-PRECISION for "clean": any failure, or a photo verdict, keeps EXACTLY
+# today's photo path. Flag off => the promotion branch is unreachable, so the routing is
+# byte-identical to today. Needs OMR_GEOM + OMR_GEOM_FUSION (the fusion path) and, for the zeus arm,
+# OMR_SEQ2SEQ.
+CLEAN_RASTER_ENV = "OMR_CLEAN_RASTER"
+
+
+def clean_raster_enabled():
+    """True when OMR_CLEAN_RASTER is truthy: on a NON-PDF upload classified clean by the classical
+    cleanliness gate, route it through the PDF-quality pipeline (concurrent Clarity on a clean wrap
+    + the zeus referee) instead of the photo shim. Only meaningful when geom_enabled() and
+    fusion_enabled() are also True. Mirrors photo_clarity_enabled."""
+    raw = os.environ.get(CLEAN_RASTER_ENV)
+    if raw is None:
+        return False
+    return raw.strip().lower() in ("1", "true")
+
+
+def is_clean_raster(image_path):
+    """Best-effort classical cleanliness verdict for a NON-PDF upload: True when the raster is a flat
+    well-lit scan that should take the PDF-quality pipeline (geom_omr.clean_raster_verdict). Imports
+    geom_omr lazily and in-process (it is torch-free: numpy/scipy/PIL only, all present in the worker
+    venv) so the verdict needs no subprocess. Returns False on ANY failure (a missing geom stack, a
+    decode error) so an unclassifiable upload stays on today's photo path. NEVER raises."""
+    try:
+        import geom_omr
+        return bool(geom_omr.clean_raster_verdict(image_path).get("clean"))
+    except Exception as err:
+        log("clean-raster verdict failed (%r); treating as photo" % err)
+        return False
+
+
+def _write_clean_clarity_pdf(image_path, pdf_path):
+    """Wrap the ORIGINAL upload raster as a one-page PDF for the PDF-only Clarity engine on the
+    CLEAN-RASTER path, with NO dewarp and NO flat-field (the photo adaptations are deliberately
+    skipped: the gate already verified the page is a flat well-lit scan). Mirrors the page-size /
+    300-DPI mapping of geom_detector._write_clarity_pdf: round-tripping the loaded image through
+    numpy strips any dpi the source PNG/JPEG embedded in im.info, so ONLY resolution=300.0 sets the
+    page size (an embedded dpi would otherwise mis-scale it and skew Clarity's interline). Returns
+    True on success, False on ANY failure (the caller then skips Clarity and the fusion degrades to
+    geom-alone, today's floor). NEVER raises."""
+    try:
+        import numpy as np
+        from PIL import Image
+        Image.MAX_IMAGE_PIXELS = 1_000_000_000
+        im = Image.open(image_path).convert("L")
+        # Re-create from a bare ndarray so NO embedded dpi/metadata survives; only resolution=300.0
+        # (below) sets the page size. quality is omitted: mode-L PDF is lossless and ignores it.
+        im = Image.fromarray(np.asarray(im))
+        im.save(pdf_path, format="PDF", resolution=300.0)
+        return True
+    except Exception as err:
+        log("clean-raster Clarity wrap failed (%r); skipping Clarity" % err)
+        return False
+
+
 # PROGRESSIVE publishing (progressive.py), gated by OMR_PROGRESSIVE (default OFF). When ON, process_job
 # writes the result key MULTIPLE times: in-progress writes are marked omr-status=partial so the browser
 # renders the first notes while the rest still computes, and the final write is the complete result.
@@ -1994,6 +2057,28 @@ def process_job(client, bucket, job_id):
                 log("geom input copy failed for %s (%r); geom disabled this job" % (job_id, err))
                 geom_input_png = None
 
+        # CLEAN-RASTER ROUTING (OMR_CLEAN_RASTER, default OFF): decouple "clean" from "PDF". A NON-PDF
+        # upload classified clean (classical gate on the original raster) is promoted to the
+        # PDF-quality pipeline, so pdf_quality (not is_pdf_input) gates the Clarity-fusion branch and
+        # the zeus referee below. The flag-off branch is unreachable (clean_raster_enabled() False),
+        # so the routing stays byte-identical to today. Routed ONLY when geom's copied raster exists
+        # (geom_input_png is not None): the gate AND geom must consume the SAME raster, and _geom_body
+        # decodes geom_input_png, so if the input copy failed geom is disabled this job and the photo
+        # path is correct. clean_probe IS geom_input_png (no input_path fallback) for that same reason.
+        clean_raster = False
+        clean_probe = None
+        if (clean_raster_enabled() and not is_pdf_input and geom_enabled() and fusion_enabled()
+                and geom_input_png is not None):
+            clean_probe = geom_input_png
+            clean_raster = is_clean_raster(clean_probe)
+            if clean_raster:
+                log("%s classified CLEAN raster: routing through the PDF-quality pipeline" % job_id)
+        # pdf_quality = a PDF OR a clean non-PDF raster. Everything that today keyed on is_pdf_input
+        # for ENGINE QUALITY (the concurrent Clarity fusion + the zeus referee) keys on this instead;
+        # geom always consumes the ORIGINAL raster regardless, and the PHOTO path (clean_raster False)
+        # is left exactly as today.
+        pdf_quality = is_pdf_input or clean_raster
+
         # Context for the seq2seq referee (OMR_SEQ2SEQ): the raster geom decoded (captured once
         # by _geom_body) plus the geom/clarity bytes the complete fusion was built from (filled
         # by whichever fusion sub-path produced the body). The referee declines, keeping the
@@ -2007,9 +2092,11 @@ def process_job(client, bucket, job_id):
             (when set) is forwarded to geom's decode so the fusion can re-key it under Clarity's
             detected key on a non-C piece. dump_clarity_pdf (when set, photo path only) asks geom
             to also write its dewarped raster as a one-page PDF for the Clarity shim. try_uvdoc
-            is decided HERE (OMR_UVDOC and a non-PDF upload), not per call site, so every geom run
-            for this job (fusion, primary, fallback, AND the rekey rerun) makes the same guarded
-            UVDoc raster decision; PDF uploads structurally never try it."""
+            is decided HERE (OMR_UVDOC and a PHOTO upload, i.e. not pdf_quality), not per call site,
+            so every geom run for this job (fusion, primary, fallback, AND the rekey rerun) makes the
+            same guarded UVDoc raster decision; a PDF AND a promoted CLEAN raster both skip UVDoc
+            (pdf_quality True), so the clean path keeps geom's decode raster matching seq_ctx["raster"]
+            and honours the "skip photo adaptations" contract."""
             try:
                 geom_image = (
                     rasterize_if_pdf(input_path, workdir)[0] if is_pdf_input else geom_input_png
@@ -2019,14 +2106,16 @@ def process_job(client, bucket, job_id):
                 return None
             if geom_image is None:
                 return None
-            if is_pdf_input:
-                # Capture the stitched raster path for the seq2seq referee (its Stage-A crops
-                # consume the SAME raster geom decoded). The rekey rerun re-captures the same
-                # value, so this is idempotent.
+            if pdf_quality:
+                # Capture the raster geom decoded for the seq2seq referee (its Stage-A crops consume
+                # the SAME raster). A PDF supplies the stitched rasterize_if_pdf output; a CLEAN
+                # non-PDF supplies geom_input_png (the copied original raster). The rekey rerun
+                # re-captures the same value, so this is idempotent. A PHOTO (pdf_quality False)
+                # never captures it, so the referee structurally declines, exactly as today.
                 seq_ctx["raster"] = geom_image
             gp = run_geom(geom_image, workdir, key_fifths=key_fifths,
                           dump_clarity_pdf=dump_clarity_pdf,
-                          try_uvdoc=uvdoc_enabled() and not is_pdf_input)
+                          try_uvdoc=uvdoc_enabled() and not pdf_quality)
             if not gp:
                 return None
             with open(gp, "rb") as fh:
@@ -2084,6 +2173,35 @@ def process_job(client, bucket, job_id):
                                 clarity_bytes = fh.read()
                         except Exception as err:
                             log("fusion: clarity read failed for %s (%r)" % (job_id, err))
+                elif clean_raster:
+                    # CLEAN-RASTER PATH (OMR_CLEAN_RASTER): a non-PDF upload the cleanliness gate
+                    # judged a flat well-lit scan. Wrap the ORIGINAL raster as a one-page PDF with
+                    # NO dewarp and NO flat-field (the photo adaptations are skipped on purpose) and
+                    # run Clarity on it CONCURRENTLY with geom, exactly like the PDF path: the wrap
+                    # does not depend on geom's decode, so the two engines overlap. geom keeps
+                    # consuming the ORIGINAL raster. Any wrap/Clarity failure leaves clarity_bytes
+                    # None and fuse(geom, None) returns geom unchanged: the geom-alone floor.
+                    clean_pdf = os.path.join(workdir, "clean-input.pdf")
+                    if _write_clean_clarity_pdf(clean_probe, clean_pdf):
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                            gf = pool.submit(_geom_body)
+                            cf = pool.submit(lambda: run_clarity(clean_pdf, workdir))
+                            geom_bytes = gf.result()
+                            if progressive_enabled() and geom_bytes:
+                                publish_partial(geom_bytes)
+                            clarity_path = cf.result()
+                        if clarity_path:
+                            try:
+                                with open(clarity_path, "rb") as fh:
+                                    clarity_bytes = fh.read()
+                            except Exception as err:
+                                log("clean fusion: clarity read failed for %s (%r)" % (job_id, err))
+                    else:
+                        # Clean wrap failed: degrade to geom-alone, but still surface geom's pitch as
+                        # a progressive partial like every sibling branch (OMR_PROGRESSIVE).
+                        geom_bytes = _geom_body()
+                        if progressive_enabled() and geom_bytes:
+                            publish_partial(geom_bytes)
                 elif photo_clarity_enabled():
                     # PHOTO-TO-PDF SHIM (OMR_PHOTO_CLARITY): geom decodes the ORIGINAL raster
                     # (unchanged) and dumps the dewarped+flat-fielded raster it used as a one-page
@@ -2112,22 +2230,24 @@ def process_job(client, bucket, job_id):
                 # otherwise assumes C major and reads key-signature accidentals a semitone off).
                 geom_bytes = _rekey_geom(geom_bytes, clarity_bytes,
                                          lambda ck: _geom_body(key_fifths=ck))
-                # Expose the fuse inputs for the seq2seq referee below (PDF only; on a photo the
-                # referee never fires because is_pdf_input gates it).
+                # Expose the fuse inputs for the seq2seq referee below (PDF-quality paths only: a PDF
+                # or a clean non-PDF raster. On a photo, pdf_quality is False so the referee never
+                # fires and these are unused).
                 seq_ctx["geom"], seq_ctx["clarity"] = geom_bytes, clarity_bytes
                 fused = fusion.fuse(geom_bytes, clarity_bytes)
                 if fused:
                     body, source = fused, "fusion"
                     log("%s recognized via fusion (geom pitch + clarity rhythm)" % job_id)
 
-            # L4 ZEUS SEQ2SEQ REFEREE (OMR_SEQ2SEQ, default OFF): on a CLEAN PDF whose COMPLETE
-            # body came from the fusion (whole-file or block-stream; every block-stream PARTIAL
-            # above stays pure fusion), also read the piece with the zeus seq2seq engine and keep
-            # zeus only when the validated agreement referee says so. The per-page progressive
-            # path leaves seq_ctx without geom/clarity (it has no whole-file Clarity), so it
-            # structurally keeps the fusion. Photos never reach here (is_pdf_input). Any stage
-            # failure inside returns body unchanged: the fused result is the floor.
-            if (body is not None and source == "fusion" and is_pdf_input
+            # L4 ZEUS SEQ2SEQ REFEREE (OMR_SEQ2SEQ, default OFF): on a PDF-QUALITY input (a CLEAN PDF
+            # or, with OMR_CLEAN_RASTER on, a clean non-PDF raster) whose COMPLETE body came from the
+            # fusion (whole-file or block-stream; every block-stream PARTIAL above stays pure fusion),
+            # also read the piece with the zeus seq2seq engine and keep zeus only when the validated
+            # agreement referee says so. The per-page progressive path leaves seq_ctx without
+            # geom/clarity (it has no whole-file Clarity), so it structurally keeps the fusion. PHOTOS
+            # never reach here (pdf_quality False). Any stage failure inside returns body unchanged:
+            # the fused result is the floor.
+            if (body is not None and source == "fusion" and pdf_quality
                     and seq2seq_enabled()):
                 body = _seq2seq_referee(job_id, workdir, body, seq_ctx.get("geom"),
                                         seq_ctx.get("clarity"), seq_ctx.get("raster"))

@@ -1630,6 +1630,233 @@ def test_seq2seq_photo_upload_never_runs_zeus(tmp_path, monkeypatch):
     assert client.put_body == b"<score>fused</score>"
 
 
+# --- Clean-raster routing (OMR_CLEAN_RASTER): decouple "clean" from "PDF" --------------------
+
+
+def test_clean_raster_enabled_truthy_parsing(monkeypatch):
+    monkeypatch.delenv("OMR_CLEAN_RASTER", raising=False)
+    assert worker.clean_raster_enabled() is False
+    for on in ("1", "true", "TRUE", " True "):
+        monkeypatch.setenv("OMR_CLEAN_RASTER", on)
+        assert worker.clean_raster_enabled() is True, on
+    for off in ("0", "false", "", "garbage"):
+        monkeypatch.setenv("OMR_CLEAN_RASTER", off)
+        assert worker.clean_raster_enabled() is False, off
+
+
+def test_clean_raster_flag_off_keeps_today_photo_path_byte_identical(tmp_path, monkeypatch):
+    # Flag OFF (unset): a non-PDF upload takes EXACTLY today's photo path. The clean-raster branch
+    # is unreachable, so the verdict is never even computed and zeus never runs -- structural
+    # byte-identity. (OMR_PHOTO_CLARITY off here too, so this is the plain geom-alone photo output.)
+    monkeypatch.delenv("OMR_CLEAN_RASTER", raising=False)
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    monkeypatch.setenv("OMR_SEQ2SEQ", "1")  # on, but pdf_quality is False for a non-PDF -> no zeus
+    geom_out = tmp_path / "geom.musicxml"; geom_out.write_text("<score>geom</score>")
+    monkeypatch.setattr(worker, "run_geom", lambda *a, **k: str(geom_out))
+    monkeypatch.setattr(worker.fusion, "fuse", lambda g, c: g)
+
+    def must_not_classify(*a, **k):
+        raise AssertionError("the cleanliness gate must not run with the flag off")
+
+    def must_not_run(*a, **k):
+        raise AssertionError("zeus must not run on a non-PDF with the flag off")
+
+    monkeypatch.setattr(worker, "is_clean_raster", must_not_classify)
+    monkeypatch.setattr(worker, "_seq2seq_referee", must_not_run)
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"\x89PNG fake")
+    _drive_process_job(monkeypatch, client, is_pdf=False)
+    assert client.put_body == b"<score>geom</score>"
+
+
+def test_clean_raster_on_clean_image_runs_clarity_and_zeus(tmp_path, monkeypatch):
+    # Flag ON + a non-PDF the gate judges CLEAN: Clarity runs on a CLEAN WRAP of the original
+    # raster (NOT the dewarp/flat-field shim), the fusion is built, and the zeus referee runs with
+    # the raster geom decoded (geom_input.png). The picked body is what lands in the complete write.
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    monkeypatch.setenv("OMR_SEQ2SEQ", "1")
+    monkeypatch.setenv("OMR_CLEAN_RASTER", "1")
+    geom_out = tmp_path / "geom.musicxml"; geom_out.write_text("<score>geom</score>")
+    clar_out = tmp_path / "clarity.musicxml"; clar_out.write_text("<score>clarity</score>")
+    monkeypatch.setattr(worker, "is_clean_raster", lambda p: True)
+    seen = {}
+
+    def fake_run_geom(image, workdir, **k):
+        # geom must consume the ORIGINAL raster (geom_input.png), NOT a wrap; and must NOT be asked
+        # to dump the photo shim PDF on the clean path.
+        seen["geom_image"] = image
+        seen["geom_dump"] = k.get("dump_clarity_pdf")
+        return str(geom_out)
+
+    def fake_run_clarity(image, workdir, **k):
+        seen["clarity_image"] = image
+        return str(clar_out)
+
+    def fake_clean_wrap(image_path, pdf_path):
+        seen["wrap_src"] = image_path
+        with open(pdf_path, "wb") as fh:
+            fh.write(b"%PDF-1.4 clean")
+        return True
+
+    def fake_referee(job_id, workdir, fused_body, geom_bytes, clarity_bytes, raster_path):
+        seen["referee"] = (geom_bytes, clarity_bytes, raster_path)
+        return b"<score>zeus-picked</score>"
+
+    monkeypatch.setattr(worker, "run_geom", fake_run_geom)
+    monkeypatch.setattr(worker, "run_clarity", fake_run_clarity)
+    monkeypatch.setattr(worker, "_write_clean_clarity_pdf", fake_clean_wrap)
+    monkeypatch.setattr(worker.fusion, "fuse", lambda g, c: b"<score>fused</score>")
+    monkeypatch.setattr(worker, "_seq2seq_referee", fake_referee)
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"\x89PNG clean-scan")
+    _drive_process_job(monkeypatch, client, is_pdf=False)
+    assert client.put_body == b"<score>zeus-picked</score>"          # the referee decided the body
+    assert seen["geom_image"].endswith("geom_input.png")             # geom on the ORIGINAL raster
+    assert seen["geom_dump"] is None                                 # NO photo shim dump on clean
+    assert seen["clarity_image"].endswith("clean-input.pdf")         # Clarity on the CLEAN wrap
+    assert seen["wrap_src"].endswith("geom_input.png")               # wrap is the original raster
+    geom_bytes, clarity_bytes, raster_path = seen["referee"]
+    assert geom_bytes == b"<score>geom</score>"
+    assert clarity_bytes == b"<score>clarity</score>"
+    assert raster_path.endswith("geom_input.png")                    # zeus crops the geom raster
+
+
+def test_clean_raster_on_clean_image_without_seq2seq_still_fuses_clarity(tmp_path, monkeypatch):
+    # OMR_CLEAN_RASTER on but OMR_SEQ2SEQ off: a clean image still gets the Clarity fusion on the
+    # clean wrap (the routing win), just no zeus arm. The fused body lands as the complete.
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    monkeypatch.delenv("OMR_SEQ2SEQ", raising=False)
+    monkeypatch.setenv("OMR_CLEAN_RASTER", "1")
+    geom_out = tmp_path / "geom.musicxml"; geom_out.write_text("<score>geom</score>")
+    clar_out = tmp_path / "clarity.musicxml"; clar_out.write_text("<score>clarity</score>")
+    monkeypatch.setattr(worker, "is_clean_raster", lambda p: True)
+    monkeypatch.setattr(worker, "run_geom", lambda *a, **k: str(geom_out))
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clar_out))
+    monkeypatch.setattr(worker, "_write_clean_clarity_pdf",
+                        lambda src, pdf: (open(pdf, "wb").write(b"%PDF-1.4 clean"), True)[1])
+    monkeypatch.setattr(worker.fusion, "fuse",
+                        lambda g, c: b"<score>fused-with-clarity</score>" if c else g)
+
+    def must_not_run(*a, **k):
+        raise AssertionError("zeus must not run with OMR_SEQ2SEQ off")
+
+    monkeypatch.setattr(worker, "_seq2seq_referee", must_not_run)
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"\x89PNG clean-scan")
+    _drive_process_job(monkeypatch, client, is_pdf=False)
+    assert client.put_body == b"<score>fused-with-clarity</score>"
+
+
+def test_clean_raster_on_photo_verdict_keeps_today_photo_path(tmp_path, monkeypatch):
+    # Flag ON but the gate judges the upload a PHOTO: it must take EXACTLY today's photo path
+    # (the OMR_PHOTO_CLARITY shim here, with the dewarp+flat-field dump), and zeus must NOT run.
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    monkeypatch.setenv("OMR_PHOTO_CLARITY", "1")
+    monkeypatch.setenv("OMR_SEQ2SEQ", "1")
+    monkeypatch.setenv("OMR_CLEAN_RASTER", "1")
+    geom_out = tmp_path / "geom.musicxml"; geom_out.write_text("<score>geom</score>")
+    clar_out = tmp_path / "clarity.musicxml"; clar_out.write_text("<score>clarity</score>")
+    monkeypatch.setattr(worker, "is_clean_raster", lambda p: False)   # PHOTO verdict
+    seen = {}
+
+    def fake_run_geom(image, workdir, **k):
+        seen["geom_dump"] = k.get("dump_clarity_pdf")
+        dump = k.get("dump_clarity_pdf")
+        if dump:
+            with open(dump, "wb") as fh:
+                fh.write(b"%PDF-1.4 shim")
+        return str(geom_out)
+
+    def must_not_wrap(*a, **k):
+        raise AssertionError("the CLEAN wrap must not run on a photo verdict")
+
+    def must_not_run(*a, **k):
+        raise AssertionError("zeus must never run on a photo verdict")
+
+    monkeypatch.setattr(worker, "run_geom", fake_run_geom)
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clar_out))
+    monkeypatch.setattr(worker, "_write_clean_clarity_pdf", must_not_wrap)
+    monkeypatch.setattr(worker.fusion, "fuse", lambda g, c: b"<score>fused</score>")
+    monkeypatch.setattr(worker, "_seq2seq_referee", must_not_run)
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"\x89PNG photo")
+    _drive_process_job(monkeypatch, client, is_pdf=False)
+    assert client.put_body == b"<score>fused</score>"
+    assert seen["geom_dump"] is not None  # the photo shim path ran (dewarp+flat-field dump)
+
+
+def test_clean_raster_pdf_input_always_pdf_quality_regardless_of_flag(tmp_path, monkeypatch):
+    # A PDF upload is pdf_quality by container, independent of OMR_CLEAN_RASTER: the cleanliness
+    # gate must NEVER even run on a PDF, and zeus runs as on the normal PDF path.
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    monkeypatch.setenv("OMR_SEQ2SEQ", "1")
+    monkeypatch.delenv("OMR_CLEAN_RASTER", raising=False)  # flag OFF, yet a PDF still runs zeus
+    raster = tmp_path / "stitched.png"; raster.write_bytes(b"png")
+    geom_out = tmp_path / "geom.musicxml"; geom_out.write_text("<score>geom</score>")
+    clar_out = tmp_path / "clarity.musicxml"; clar_out.write_text("<score>clarity</score>")
+    monkeypatch.setattr(worker, "rasterize_if_pdf", lambda p, w: (str(raster), True))
+    monkeypatch.setattr(worker, "run_geom", lambda *a, **k: str(geom_out))
+    monkeypatch.setattr(worker, "run_clarity", lambda *a, **k: str(clar_out))
+    monkeypatch.setattr(worker.fusion, "fuse", lambda g, c: b"<score>fused</score>")
+
+    def must_not_classify(*a, **k):
+        raise AssertionError("the cleanliness gate must never run on a PDF")
+
+    monkeypatch.setattr(worker, "is_clean_raster", must_not_classify)
+    monkeypatch.setattr(worker, "_seq2seq_referee",
+                        lambda *a, **k: b"<score>zeus-picked</score>")
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"%PDF-1.4 fake")
+    _drive_process_job(monkeypatch, client, is_pdf=True)
+    assert client.put_body == b"<score>zeus-picked</score>"
+
+
+def test_clean_raster_wrap_failure_degrades_to_geom_alone(tmp_path, monkeypatch):
+    # Clean verdict but the CLEAN wrap fails to write: the fusion must degrade to geom-alone (the
+    # floor), NOT crash, and the zeus arm still runs (it gates on a fusion body, which geom-alone is).
+    monkeypatch.setenv("OMR_GEOM", "1")
+    monkeypatch.setenv("OMR_GEOM_FUSION", "1")
+    monkeypatch.delenv("OMR_SEQ2SEQ", raising=False)
+    monkeypatch.setenv("OMR_CLEAN_RASTER", "1")
+    geom_out = tmp_path / "geom.musicxml"; geom_out.write_text("<score>geom</score>")
+    monkeypatch.setattr(worker, "is_clean_raster", lambda p: True)
+    monkeypatch.setattr(worker, "run_geom", lambda *a, **k: str(geom_out))
+    monkeypatch.setattr(worker, "_write_clean_clarity_pdf", lambda src, pdf: False)  # wrap fails
+
+    def must_not_run_clarity(*a, **k):
+        raise AssertionError("Clarity must not run when the clean wrap failed")
+
+    monkeypatch.setattr(worker, "run_clarity", must_not_run_clarity)
+    monkeypatch.setattr(worker.fusion, "fuse", lambda g, c: g if c is None else g + c)
+    monkeypatch.setattr(worker.llm_omr, "llm_available", lambda: False)
+    monkeypatch.setattr(worker, "merge_to_grand_staff", lambda b: b)
+    monkeypatch.setattr(worker, "normalize_ties", lambda b: b)
+
+    client = _FakeClient(input_bytes=b"\x89PNG clean-scan")
+    _drive_process_job(monkeypatch, client, is_pdf=False)
+    assert client.put_body == b"<score>geom</score>"  # geom-alone floor, fuse(geom, None)
+
+
 def test_fusion_block_stream_fills_the_seq2seq_sink(tmp_path, monkeypatch):
     # The sink exposes the final fuse's inputs (re-keyed geom + whole-file Clarity) so the
     # referee compares the same engines the complete body was fused from. Partials + the
