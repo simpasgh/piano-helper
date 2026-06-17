@@ -347,7 +347,20 @@ def _illum_has_deep_shadow(gray, grid: int = 48, thresh: float = _ILLUM_DEEP_SHA
 #   (3) the dewarp does NOT recover extra staves (dewarp staves <= raw staves, both counted with
 #       normalize_illum=False on the raw raster): this is the AUTHORITATIVE never-worse-on-clean guard
 #       from transcribe_with_detector. A clean page's lines are already straight so dewarping cannot
-#       add staves; a tilted/curved photo's count jumps.
+#       add staves; a tilted/curved photo's count jumps. NOTE: this condition is NECESSARY but not
+#       SUFFICIENT. A photographed page whose dewarp REDUCES the staff count (the tctab-2 false-clean
+#       bug: raw 7, dewarp 6) also satisfies (3), because (3) only fires when the dewarp ADDS staves.
+#       Condition (5) is the geometric-straightness test that catches that case.
+#   (5) the RAW page is geometrically straight: it shows enough sharp, full-width horizontal staff-line
+#       rows per detected staff (lines-per-staff >= _CLEAN_MIN_LINES_PER_STAFF). This is THE clean-vs-
+#       photo discriminator and the physics the whole camera-OMR program rests on: a flat scan's 5
+#       staff lines per staff each project to a sharp near-full-width dark ROW, so the row-ink profile
+#       has ~5 tall peaks per staff (measured ratio 2.3-5.6 across the 26-piece CC0 set at 150-300 DPI);
+#       a photographed page's lines are tilted/curved, so each line smears across many rows and forms
+#       almost no full-width peak (measured 0.0-0.5 lines-per-staff on all 5 real photos, INCLUDING the
+#       tctab-2 false-clean that condition (3) lets through at 0.43). The ratio (not an absolute count)
+#       is used so a sparse clean first page with few staves still passes. A clean-but-tiny screenshot
+#       has straight lines and passes (5) but is rejected by the resolution floor (4) instead.
 #   (4) enough RESOLUTION for Clarity (estimated interline >= _CLEAN_MIN_INTERLINE, or, when the
 #       interline cannot be estimated, raster min-dimension >= _CLEAN_MIN_DIM): a clean-but-tiny
 #       screenshot can pass (1)-(3) yet rasterize to a few-pixel interline that degrades Clarity, so a
@@ -366,18 +379,57 @@ _CLEAN_MIN_INTERLINE = 10.0
 # raster's min dimension. The clean calibration rasters have min-dim 520 (synthetic) to 2975 (dense),
 # so 400 only rejects a pathologically tiny raster and never the clean set.
 _CLEAN_MIN_DIM = 400
+# Straightness floor for condition (5): minimum sharp full-width horizontal staff-line rows PER detected
+# staff. A flat scan projects ~5 lines per staff; the measured ratio is 2.30-5.56 across the 26-piece
+# CC0 set at 150 and 300 DPI (worst = k545 @ 150 DPI = 2.30), while all 5 real photos sit at 0.00-0.50
+# (worst-photo = liminality = 0.50) because tilt/curve smears each line across rows and kills the peak.
+# 1.5 sits in the wide gap: margin >= +0.80 below every clean page, >= +1.0 above every photo (and
+# +1.07 above the tctab-2 false-clean at 0.43). The fraction-of-max-darkness peak threshold below
+# (_CLEAN_HLINE_FRAC) is what makes a row count as a "line": a near-full-width rule clears it, a partial
+# smear does not. Conservative direction: a missed clean page (false-photo) is SAFE; a false-clean is not.
+_CLEAN_MIN_LINES_PER_STAFF = 1.5
+# A row counts as a staff line when its smoothed ink fraction exceeds this fraction of the page's
+# darkest row. 0.6 isolates the near-full-width staff rules from partial note/text rows.
+_CLEAN_HLINE_FRAC = 0.6
+
+
+def _strong_hline_count(gray) -> int:
+    """Count distinct sharp, near-full-width HORIZONTAL dark rows (the staff lines of a flat scan) in
+    the row-ink profile. On a straight page each of the 5 lines per staff projects to a tall, narrow
+    peak in the per-row ink fraction, so this counts ~5 per detected staff; on a tilted/curved photo
+    each line smears across many rows and never forms a full-width peak, so this counts almost none.
+    A peak is a row whose lightly-smoothed ink fraction exceeds _CLEAN_HLINE_FRAC of the page's darkest
+    row; distinct lines are the rising edges of that thresholded mask. Used by clean_raster_verdict
+    condition (5) as a geometric-straightness test. NEVER raises (returns 0 on any failure)."""
+    if not GEOM_AVAILABLE or gray is None:
+        return 0
+    try:
+        row = _row_ink(gray).astype(np.float32)
+        if row.size < 3:
+            return 0
+        row = ndimage.gaussian_filter1d(row, 1.0)
+        rmax = float(row.max())
+        if rmax <= 1e-6:
+            return 0
+        strong = (row / rmax) > _CLEAN_HLINE_FRAC
+        # Count rising edges of the thresholded mask = number of distinct full-width line bands.
+        return int(np.sum(strong[1:] & ~strong[:-1]))
+    except Exception:
+        return 0
 
 
 def clean_raster_verdict(image_path_or_gray) -> dict:
     """Classify a raster as clean (a flat well-lit scan) vs photo, with the per-signal margins so a
     caller (and the calibration test) can inspect WHY. Returns a dict:
         {"clean": bool, "raw_staves": int, "dewarp_staves": int, "guard_min": float,
-         "deep_shadow": bool, "interline": Optional[float], "min_dim": int, "available": bool}
+         "deep_shadow": bool, "interline": Optional[float], "min_dim": int,
+         "hline_count": int, "lines_per_staff": float, "available": bool}
     "clean" is True ONLY when ALL high-precision conditions hold (see the module note above). On any
     failure / unavailable geom stack it returns clean=False (decline = stay on today's photo path).
     NEVER raises."""
     out = {"clean": False, "raw_staves": 0, "dewarp_staves": 0, "guard_min": 0.0,
-           "deep_shadow": True, "interline": None, "min_dim": 0, "available": GEOM_AVAILABLE}
+           "deep_shadow": True, "interline": None, "min_dim": 0,
+           "hline_count": 0, "lines_per_staff": 0.0, "available": GEOM_AVAILABLE}
     if not GEOM_AVAILABLE:
         return out
     try:
@@ -415,11 +467,20 @@ def clean_raster_verdict(image_path_or_gray) -> dict:
             resolution_ok = float(interline) >= _CLEAN_MIN_INTERLINE
         else:
             resolution_ok = out["min_dim"] >= _CLEAN_MIN_DIM
+        # (5) geometric straightness: sharp full-width staff-line rows PER detected staff. A flat scan
+        # projects ~5 per staff; a tilted/curved photo smears each line and projects almost none. This
+        # is what catches the tctab-2 false-clean that condition (3) lets through (its dewarp REDUCED
+        # the count, 7 -> 6, so (3) passes, but lines-per-staff is 0.43 << the floor).
+        out["hline_count"] = _strong_hline_count(gray)
+        lines_per_staff = out["hline_count"] / out["raw_staves"] if out["raw_staves"] > 0 else 0.0
+        out["lines_per_staff"] = float(lines_per_staff)
+        straight_ok = lines_per_staff >= _CLEAN_MIN_LINES_PER_STAFF
         out["clean"] = bool(
             out["raw_staves"] >= _CLEAN_MIN_STAVES
             and not out["deep_shadow"]
             and out["dewarp_staves"] <= out["raw_staves"]
             and resolution_ok
+            and straight_ok
         )
         return out
     except Exception:

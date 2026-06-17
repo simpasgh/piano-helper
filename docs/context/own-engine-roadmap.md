@@ -6,7 +6,7 @@ text (project rule). Ship every code change through the gated flow (see "Constra
 
 ## STATUS (2026-06-18): LEARNED PER-MEASURE SELECTOR KILLED/DEFERRED. A trained selector over geom/Clarity/zeus does NOT break the dense ceiling, now proven TWICE. LOO-CV on the dense subset reaches 0.716 (vs the shipped referee's 0.702) but its pick-accuracy is 0.743 (< the pre-registered 0.80 gate) and it commits 5 never-worse violations; it barely beats always-zeus-on-dense by +0.0085 (95% CI [-0.028, +0.047], straddles 0). CONCLUSION: no selector over the three current engines clears the dense ceiling. The lever is now a BETTER ENGINE (the L2 data factory + a zeus retrain on free local GPU), not smarter routing. Artifacts: C:\Users\pascu\omr-train\p1_learned_selector.py + p1_learned_vs_alwayszeus.tsv.
 
-## STATUS: POST-ZEUS CLEAN-PDF/IMAGE PROGRAM (scoping only, no code) -- ranked, gated; photo work PARKED; ceiling-raisers only since the referee is at its own oracle; P0 anacrusis SETTLED = ARTIFACT (2026-06-17); P1 per-measure assembly KILLED at the kill-gate (2026-06-18: oracle clears +0.05 thinly at +0.060 aligned-dense but the realizable selector is -0.105 under floor at 46% accuracy); P2 clean-raster routing BUILT 2026-06-18 (flag OMR_CLEAN_RASTER, default OFF, flag-OFF byte-identical, box never-worse+lift gate at ENABLE). Cheap lever left = P3 (zeus ottava, small)
+## STATUS: POST-ZEUS CLEAN-PDF/IMAGE PROGRAM (scoping only, no code) -- ranked, gated; photo work PARKED; ceiling-raisers only since the referee is at its own oracle; P0 anacrusis SETTLED = ARTIFACT (2026-06-17); P1 per-measure assembly KILLED at the kill-gate (2026-06-18: oracle clears +0.05 thinly at +0.060 aligned-dense but the realizable selector is -0.105 under floor at 46% accuracy); P2 clean-raster routing BUILT 2026-06-18 (flag OMR_CLEAN_RASTER, default OFF, flag-OFF byte-identical, box never-worse+lift gate at ENABLE); P3 zeus ottava wrapper CLOSED/SUBSUMED 2026-06-18 (shipped-output gate: 0 wins across all 30; reverie has the only octave headroom but routes to fusion and the referee is pitch-class/octave-blind). ALL ranked cheap levers now exhausted -- the remaining lever is a BETTER ENGINE (L2 data factory + a zeus retrain on free local GPU), not routing or wrappers.
 
 SCOPE DECISION (user, this session): photo robustness is OUT. KEEP what shipped (UVDoc guarded,
 dewarp, illum, photo-Clarity shim, the photo gate) but invest NOTHING further. Parked: L1 (tctab
@@ -139,14 +139,64 @@ THE RANKED PROGRAM (impact-per-effort; full reasoning + adversarial caveats in t
       never-worse AND a measured clean-PNG lift) happens at ENABLE, not at merge. The cheap alternative
       (just DOCUMENT "upload clean scans as PDF") was considered and the routing built instead because
       the zeus arm is the real prize.
+      ENABLE-GATE HARDENING -- **2026-06-18, follow-up correctness fix (staged, not yet merged).** The
+      box-enable safety gate (clean_raster_verdict on the 5 real photos via the worker venv) caught a
+      FALSE-CLEAN BUG: tctab-2 (a real phone photo) classified clean=True. Root cause: condition (3)
+      "dewarp does not ADD staves" only fires when the dewarp INCREASES the count; tctab-2's dewarp
+      REDUCED it (raw 7, dewarp 6), so 6<=7 passed. The "by construction" claim above was wrong --
+      offline calibration never validated the dewarp-REDUCES-count direction. The fix added CONDITION
+      (5): the raw page must be geometrically straight, measured as sharp full-width staff-line rows
+      PER detected staff (geom_omr._strong_hline_count / raw_staves >= _CLEAN_MIN_LINES_PER_STAFF=1.5).
+      Physics = the camera-OMR program's own premise: a flat scan projects ~5 sharp full-width row
+      peaks per staff; a tilted/curved photo smears each line across rows and projects almost none.
+      MEASURED (worker venv, pypdfium2 300/150 DPI rasters): all 5 real photos now PHOTO (lines-per-
+      staff 0.00-0.50, tctab-2 0.43, margin >= +1.0 below the 1.5 floor); clean CC0 PDFs stay CLEAN
+      26/26 @300dpi, 24/26 @150dpi (the 2 @150 misses fail the PRE-EXISTING resolution floor (4) at
+      interline 8-9, NOT condition (5) which passes at l/s 4.92/5.20 -- the safe direction). Clean ratio
+      across the 26-piece CC0 set is 2.30-5.56 (worst k545@150dpi=2.30), photos 0.00-0.50: a wide gap.
+      The `gray_dw is gray` (dewarp-identity) form the fix brief suggested was REJECTED: a dense clean
+      page's per-column ink nudges the field above min_shift_px, so dewarp returns a NEW array on every
+      clean CC0 PDF too (it would make the flag inert); the pixel-diff-magnitude fallback also fails
+      (clean PDFs move MORE on mean-diff than photos). Lines-per-staff is the robust separator. Regression
+      fixture _tctab2_false_clean_page (test_geom_omr.py) reproduces the signature deterministically by
+      exploiting the threshold gap (detect_systems flags a row at >=0.35*w; _strong_hline_count needs
+      >0.6*max), asserts the OLD gate would false-clean it and the NEW gate calls it PHOTO. RECOMMENDATION:
+      SHIP the hardened gate and proceed to the box-enable measure (the gate now robustly separates the
+      sets; do NOT fall back to "upload as PDF"). 695 Python / 854 Node / build green.
 
-  P3  ZEUS OTTAVA WRAPPER (2-3 days; cheap, marginal). Zeus LMX has no ottava token, so it emits
-      written pitch in 8va regions (reverie zeus 0.748 vs fusion 0.881). The stage-1 gated octave
-      BORROW from geom already repairs this WHEN geom is a trustworthy anchor (reverie 0.773->0.837
-      inside the gate); a direct re-apply of geom_omr.detect_ottavas to zeus output is an
-      ALTERNATIVE octave source. Gate: never-worse on the 30-piece set + real-4; ship only if it
-      beats the existing gated borrow on >= 1 piece with zero regressions. Likely small (the borrow
-      already captures most of reverie's 8va), so this is a fast-follow, not a priority.
+  P3  ZEUS OTTAVA WRAPPER -- **CLOSED / SUBSUMED** 2026-06-18 (local study, no prod code, no ship).
+      The candidate (gated borrow + a MEASURE-LEVEL geom-detect_ottavas correction on zeus) FAILS the
+      pre-registered shipped-output gate: it beats the borrow-only baseline on ZERO pieces of the
+      shipped transcription across all 30 (26 CC0 + real-4), so the "ship iff >= 1 win, zero
+      regressions" gate cannot fire. Study scripts (omr-train, gitignored, no PR): p3_residual_diag.py,
+      p3_reverie_deep.py, p3_reachable_ceiling.py, p3_candidate_gate.py, p3_shipped_gate.py.
+      WHY (three independent, dispositive reasons, each alone enough to close it):
+        1. NO ARM HEADROOM where zeus is shipped. detect_ottavas can only source geom's octave, so the
+           ceiling is the residual zeus octave-off notes that GEOM carries the RIGHT octave for
+           ("GEOM-RIGHT"). Across the SIX ottava-bearing pieces where the referee actually ships zeus
+           (clairdelune, flight, nocturnecsharp, toccata, waltzamin, liminality) that ceiling is 22
+           notes TOTAL, per-piece note_f1 bounds +0.0000..+0.0099 (clairdelune +0.0045, flight 0,
+           nocturnecsharp +0.0039, toccata +0.0016, waltzamin +0.0099, liminality 0) -- at or under
+           the gate's +0.002 noise floor on 4 of 6, and that is a PERFECT-detection upper bound.
+           geom is catastrophically broken on the dense ones (clairdelune g_exact 170/1540, flight
+           91/1107, toccata 127/3730), so it is not even a valid ottava source there.
+        2. THE ONE PIECE WITH REAL OCTAVE HEADROOM (reverie, 25 residual octave-off after the borrow,
+           20.0%->13.5%) IS ROUTED TO FUSION (af_pc 0.863 > az_pc 0.858), AND the referee signal is
+           PITCH-CLASS agreement, which is octave-blind. So even a perfect octave fix (the guarded P3
+           lifts reverie's zeus ARM 0.837->0.864, +0.0267, 6 GEOM-RIGHT notes) cannot move az_pc, the
+           pick stays fusion, and the user still gets fusion's 0.881. Of reverie's 25 residual notes,
+           20 are "geom-pc-off" (geom MISSED those brackets too = unreachable from geom); only 5 are
+           GEOM-RIGHT (a short staff-2 m16-17 run the borrow's run>=4 / NW gate skipped).
+        3. THE MEASURE-LEVEL SHIFT IS A NET REGRESSION UNGUARDED. zeus's running measure index does
+           not align to geom's grid on dense pieces, so a whole-measure octave shift lands on the
+           wrong bars: the UNGUARDED candidate REGRESSED reverie -0.0266 (45 notes shifted, alignment
+           damage) and moved twinkle/arabesque negative too. Only a guard that fires a shift solely
+           when it makes a note's sounding midi MATCH a geom sounding midi at that (staff, measure)
+           is never-worse -- but that guard collapses P3 back into "borrow geom's octave where geom is
+           right," i.e. exactly the borrow's job, just reaching the few short runs the borrow's run/
+           piece gate skipped. End-to-end shipped gate: mean 0.7022 -> 0.7022, zero wins, zero
+           regressions. P3 is fully subsumed by the existing borrow + referee. Cheap lever exhausted;
+           the remaining lever is a BETTER ENGINE (L2 data factory + zeus retrain), per the top STATUS.
 
 SUPERSEDED / DEMOTED by Zeus going live:
   - X3 trained barline detector: LARGELY SUPERSEDED. Zeus emits a near-oracle dense grid as tokens
